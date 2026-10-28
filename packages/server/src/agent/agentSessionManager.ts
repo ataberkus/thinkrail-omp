@@ -850,6 +850,29 @@ export function getSessionWorkspaceId(sessionId: string): string | undefined {
 	return sessions.get(sessionId)?.workspaceId;
 }
 
+/** What an ephemeral helper run needs from a live chat: its folder, model, effort and engine runtime. */
+export interface SessionRunSnapshot {
+	cwd: string;
+	model: NonNullable<AgentSession["model"]>;
+	thinkingLevel: AgentSession["thinkingLevel"];
+	settings: HostSessionSettings["settings"];
+	generation: PiRuntimeGeneration;
+}
+
+export function sessionRunSnapshot(sessionId: string): SessionRunSnapshot | null {
+	const entry = sessions.get(sessionId);
+	if (!entry || entry.disposed || !entry.registered || hasDeletionTombstone(sessionId)) return null;
+	const model = entry.session.model;
+	if (!model) return null;
+	return {
+		cwd: entry.session.sessionManager.getCwd(),
+		model,
+		thinkingLevel: entry.session.thinkingLevel,
+		settings: entry.settings.settings,
+		generation: entry.generation,
+	};
+}
+
 export function getSessionRuntimeGeneration(sessionId: string): PiRuntimeGeneration | undefined {
 	return hasSession(sessionId) ? sessions.get(sessionId)?.generation : undefined;
 }

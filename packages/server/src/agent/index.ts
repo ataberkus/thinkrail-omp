@@ -68,6 +68,13 @@ export {
 export * from "./oneshot";
 export { migratePiAgentDataOnBoot } from "./piMigration";
 export {
+	lookupBlockReason,
+	type ReadOnlyAgentRequest,
+	type ReadOnlyAgentStep,
+	type ReadOnlyTool,
+	runReadOnlyAgent,
+} from "./readOnlyAgent";
+export {
 	activatePiRuntimeGeneration,
 	configurePiRuntime,
 	configurePiRuntimeFactory,
