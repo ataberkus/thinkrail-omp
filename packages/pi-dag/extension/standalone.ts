@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { type ExtensionFactory, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionFactory, getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { createDelegationService } from "pi-delegation";
 import type { DagService } from "../domain/index.ts";
 import { createDagService } from "../runtime/index.ts";

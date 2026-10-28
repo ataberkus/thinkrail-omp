@@ -143,7 +143,6 @@ const listResult = (name: string, workspace = workspaceId): McpListResult => ({
 		},
 	],
 	configErrors: [{ source: "/project/.pi/mcp.json", message: name }],
-	handledElsewhere: { by: name },
 	statuses: [snapshot(name, workspace)],
 });
 
@@ -152,7 +151,6 @@ function expectInstalled(result: McpListResult, workspace = workspaceId) {
 	expect(projection).toMatchObject({
 		servers: result.servers,
 		configErrors: result.configErrors ?? [],
-		handledElsewhere: result.handledElsewhere ?? null,
 	});
 	expect(Object.values(projection?.sessions ?? {}).map((held) => held.snapshot)).toEqual(
 		result.statuses,

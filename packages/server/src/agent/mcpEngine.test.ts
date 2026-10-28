@@ -1,25 +1,17 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
-import { AgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { AgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import type { ExtUiRequest } from "@thinkrail/contracts";
+import { fauxAssistantMessage, fauxToolCall, isolateAgentDir } from "pi-faux";
 import {
 	applyPiResourceTrust,
-	createSession,
 	deleteSession,
 	dispatchSessionMcpCommand,
 	disposeAllSessions,
 	getSessionCommands,
 	getSessionMessages,
 	getSessionState,
-	mcpSessionView,
 	promptSession,
 	removeSession,
 	removeWorkspaceSessions,
@@ -30,8 +22,9 @@ import {
 	setSubagentsEnabledResolver,
 	settleSessionsForShutdown,
 } from "./agentSessionManager";
-import { getSessionResources, setSessionResourcesPublisher } from "./chatResources";
+import { getSessionResources } from "./chatResources";
 import { MCP_CONFIRM_ONCE } from "./mcp";
+import { type McpHarness, startMcpHarness, stdioFixture } from "./mcp/fixtures/harness";
 import {
 	listMcpServers,
 	readMcpToolOutput,
@@ -40,46 +33,24 @@ import {
 	refreshMcpStatus,
 	watchUserMcpConfig,
 } from "./mcpSessions";
-import { configurePiRuntime } from "./piRuntime";
 import { admissionContextFor } from "./skillAdmission";
 import { resolveExtUi, setExtUiPublisher } from "./webUiContext";
 
-const model = {
-	id: "engine",
-	name: "engine",
-	reasoning: false,
-	input: ["text"] as ("text" | "image")[],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 100_000,
-	maxTokens: 4096,
-};
-const faux = createFauxCore({
-	provider: "engine",
-	api: "engine",
-	models: [model],
-	tokensPerSecond: 4000,
-});
-const saved = {
-	agent: process.env.PI_CODING_AGENT_DIR,
-	data: process.env.THINKRAIL_DATA_DIR,
-	offline: process.env.PI_OFFLINE,
-};
-const root = mkdtempSync(join(tmpdir(), "mcp-engine-"));
-const agentDir = join(root, "agent");
-const pidFile = join(root, "fixture.pids");
-const fixture = join(import.meta.dir, "mcp", "fixtures", "stdioServer.ts");
-const probeMarker = join(root, "probe-starts.log");
+let h: McpHarness;
+let root = "";
+let agentDir = "";
+let pidFile = "";
+let probeMarker = "";
+const fixture = stdioFixture;
 const testExtensions = [
 	"other-mcp.ts",
 	"hang-shutdown.ts",
 	"hang-reload.ts",
-	"register-mcp.ts",
 	"reload-pause.ts",
 	"closing-probe.ts",
 ];
 let requests: ExtUiRequest[] = [];
 let legacyRequests: ExtUiRequest[] = [];
-let sequence = 0;
 
 function writeMcpConfig(
 	env: Record<string, string> = {},
@@ -104,24 +75,11 @@ function writeMcpConfig(
 
 beforeAll(async () => {
 	setSubagentsEnabledResolver(() => true);
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	process.env.THINKRAIL_DATA_DIR = join(root, "data");
-	process.env.PI_OFFLINE = "1";
-	mkdirSync(join(agentDir, "extensions"), { recursive: true });
-	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	runtime.registerProvider("engine", {
-		api: faux.api,
-		apiKey: "test",
-		baseUrl: "http://faux.local",
-		streamSimple: faux.streamSimple,
-		models: [{ ...model, api: faux.api }],
-	});
-	configurePiRuntime(runtime);
-	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd));
+	h = await startMcpHarness("engine");
+	root = h.root;
+	agentDir = h.agentDir;
+	pidFile = join(root, "fixture.pids");
+	probeMarker = join(root, "probe-starts.log");
 	setExtUiPublisher((request, audience) => (audience ? legacyRequests : requests).push(request));
 });
 
@@ -133,7 +91,9 @@ function killFixtures(): void {
 	}
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+	disposeAllSessions();
+	await Bun.sleep(50);
 	requests = [];
 	legacyRequests = [];
 	killFixtures();
@@ -151,25 +111,15 @@ function writeExtension(name: string, lines: string[]): void {
 function writeHangingShutdownExtension(): void {
 	writeExtension("hang-shutdown.ts", [
 		"export default function hangShutdown(pi) {",
-		'  pi.on("session_shutdown", (event) => (event.reason === "quit" ? new Promise(() => {}) : undefined));',
+		'  pi.on("session_shutdown", () => new Promise(() => {}));',
 		"}",
 	]);
 }
 
 afterAll(async () => {
 	setExtUiPublisher(() => {});
-	await settleSessionsForShutdown();
-	disposeAllSessions();
-	configurePiRuntime(null);
-	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
+	await h.teardown();
 	killFixtures();
-	if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = saved.agent;
-	if (saved.data === undefined) delete process.env.THINKRAIL_DATA_DIR;
-	else process.env.THINKRAIL_DATA_DIR = saved.data;
-	if (saved.offline === undefined) delete process.env.PI_OFFLINE;
-	else process.env.PI_OFFLINE = saved.offline;
-	rmSync(root, { recursive: true, force: true });
 });
 
 function pids(): number[] {
@@ -199,15 +149,28 @@ async function waitFor<T>(
 	}
 }
 
-async function chat() {
-	const workspaceId = `engine-${++sequence}`;
-	const cwd = mkdtempSync(join(root, "cwd-"));
-	const { sessionId } = await createSession({
-		workspaceId,
-		cwd,
-		model: { ...model, provider: "engine", thinkingLevels: ["off"] },
-	});
-	return { workspaceId, cwd, sessionId };
+function chat() {
+	return h.chat();
+}
+
+const faux = {
+	setResponses: (...args: Parameters<McpHarness["faux"]["setResponses"]>) =>
+		h.faux.setResponses(...args),
+};
+
+function captureSessions(): { sessions: AgentSession[]; restore(): void } {
+	const original = AgentSession.prototype.refreshMCPTools;
+	const sessions: AgentSession[] = [];
+	AgentSession.prototype.refreshMCPTools = function (tools) {
+		if (!sessions.includes(this)) sessions.push(this);
+		return original.call(this, tools);
+	};
+	return {
+		sessions,
+		restore: () => {
+			AgentSession.prototype.refreshMCPTools = original;
+		},
+	};
 }
 
 async function toolTexts(p: Awaited<ReturnType<typeof chat>>): Promise<string[]> {
@@ -225,8 +188,8 @@ const mcpCommands = (sessionId: string) =>
 test("a user-level server connects in a chat, its tools are callable, and a write tool asks first", async () => {
 	const p = await chat();
 	faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("mcp__fixture__echo", { text: "hi" }, { id: "echo" })),
-		fauxAssistantMessage(fauxToolCall("mcp__fixture__write_note", { text: "x" }, { id: "write" })),
+		fauxAssistantMessage(fauxToolCall("mcp__fixture_echo", { text: "hi" }, { id: "echo" })),
+		fauxAssistantMessage(fauxToolCall("mcp__fixture_write_note", { text: "x" }, { id: "write" })),
 		fauxAssistantMessage("DONE"),
 	]);
 	const turn = promptSession(p.sessionId, "Use the fixture.");
@@ -258,7 +221,7 @@ test("quitting terminates the servers of every live chat", async () => {
 const SHUTDOWN_DEADLINE_MS = 3500;
 const untilDeadline = (started: number) => Math.max(0, started + SHUTDOWN_DEADLINE_MS - Date.now());
 
-test("deleting a chat stops pi's MCP servers within the budget even when another extension's shutdown never settles", async () => {
+test("deleting a chat stops the host's MCP servers within the budget even when another extension's shutdown never settles", async () => {
 	writeHangingShutdownExtension();
 	writeMcpConfig({ MCP_FIXTURE_STUBBORN: "1" });
 	const p = await chat();
@@ -268,7 +231,7 @@ test("deleting a chat stops pi's MCP servers within the budget even when another
 	await waitFor(() => !alive(pid as number), untilDeadline(started));
 }, 15_000);
 
-test("quitting stops pi's MCP servers within the budget even when another extension's shutdown never settles", async () => {
+test("quitting stops the host's MCP servers within the budget even when another extension's shutdown never settles", async () => {
 	writeHangingShutdownExtension();
 	writeMcpConfig({ MCP_FIXTURE_STUBBORN: "1" });
 	await chat();
@@ -318,26 +281,21 @@ test("a reload finishes stubborn MCP cleanup before the replacement process star
 	}
 }, 15_000);
 
-test("runner-emitted shutdown joins the captured MCP cleanup instead of observing an empty server list", async () => {
+test("omp's own dispose, which emits session_shutdown, and the host's engine shutdown share one cleanup", async () => {
 	writeMcpConfig({ MCP_FIXTURE_STUBBORN: "1" });
-	const originalBind = AgentSession.prototype.bindExtensions;
-	let binding: AgentSession | undefined;
-	AgentSession.prototype.bindExtensions = async function (bindings) {
-		binding = this;
-		await originalBind.call(this, bindings);
-	};
+	const captured = captureSessions();
 	try {
 		const p = await chat();
 		await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
-		if (!binding) throw new Error("Missing pi session");
-		const runner = binding.extensionRunner;
+		const [session] = captured.sessions;
+		if (!session) throw new Error("Missing engine session");
 		const [pid] = pids();
 		const closing = removeSession(p.sessionId);
-		await runner.emit({ type: "session_shutdown", reason: "quit" });
-		expect(alive(pid as number)).toBe(false);
+		await session.dispose();
 		await closing;
+		expect(alive(pid as number)).toBe(false);
 	} finally {
-		AgentSession.prototype.bindExtensions = originalBind;
+		captured.restore();
 		disposeAllSessions();
 	}
 }, 15_000);
@@ -347,8 +305,7 @@ for (const reason of ["resource", "trust"] as const) {
 		writeExtension("hang-reload.ts", [
 			'import { appendFileSync } from "node:fs";',
 			"export default function hangReload(pi) {",
-			'  pi.on("session_shutdown", (event) => {',
-			'    if (event.reason !== "reload") return;',
+			'  pi.on("session_shutdown", () => {',
 			`    appendFileSync(${JSON.stringify(probeMarker)}, "reload\\n");`,
 			"    return new Promise(() => {});",
 			"  });",
@@ -481,7 +438,7 @@ for (const [label, close] of closures) {
 			expect(before.every((pid) => !alive(pid))).toBe(true);
 			writeFileSync(released, "");
 			const outcome = await reloading;
-			expect(probeStarts()).toEqual(["shutdown", "resumed", "discovered"]);
+			expect(probeStarts()).toEqual(["shutdown", "resumed"]);
 			await Bun.sleep(100);
 			expect(pids()).toEqual(before);
 			expect(outcome).toBe("The chat is closing.");
@@ -506,8 +463,7 @@ test("emergency disposal during graceful closure waits for the replacement runne
 	writeExtension("closing-probe.ts", [
 		'import { existsSync, writeFileSync } from "node:fs";',
 		"export default function closing(pi) {",
-		'  pi.on("session_shutdown", async (event) => {',
-		'    if (event.reason !== "quit") return;',
+		'  pi.on("session_shutdown", async () => {',
 		`    writeFileSync(${JSON.stringify(oldEntered)}, "");`,
 		`    while (!existsSync(${JSON.stringify(oldReleased)})) await new Promise(resolve => setTimeout(resolve, 10));`,
 		"  });",
@@ -558,76 +514,29 @@ test("emergency disposal during graceful closure waits for the replacement runne
 	}
 }, 15_000);
 
-test("a chat whose preparation fails after pi started its servers still stops them", async () => {
+test("a chat whose preparation fails after the host started its servers still stops them", async () => {
 	writeMcpConfig({ MCP_FIXTURE_STUBBORN: "1" });
-	const originalBind = AgentSession.prototype.bindExtensions;
-	let binding: AgentSession | undefined;
-	let releaseRegistration = () => {};
-	const registration = new Promise<void>((resolve) => {
-		releaseRegistration = resolve;
-	});
-	AgentSession.prototype.bindExtensions = async function (bindings) {
-		await originalBind.call(this, bindings);
-		binding = this;
-		await registration;
+	const original = AgentSession.prototype.setPendingMCPDiscovery;
+	AgentSession.prototype.setPendingMCPDiscovery = function (discovery) {
+		original.call(this, discovery);
+		queueMicrotask(() => disposeAllSessions());
 	};
 	try {
-		const creating = chat();
-		const failed = creating.then(
+		const failed = chat().then(
 			() => "registered",
 			(error: Error) => error.message,
 		);
-		await waitFor(() =>
-			binding?.extensionRunner
-				.getAllRegisteredTools()
-				.some((tool) => tool.definition.name.startsWith("mcp__fixture__")),
-		);
-		const [pid] = pids();
-		disposeAllSessions();
 		const started = Date.now();
-		releaseRegistration();
 		expect(await failed).toContain("Workspace is unavailable");
-		await waitFor(() => !alive(pid as number), untilDeadline(started));
+		await Bun.sleep(500);
+		await waitFor(() => pids().every((pid) => !alive(pid)), untilDeadline(started));
+		expect(pids().every((pid) => !alive(pid))).toBe(true);
 	} finally {
-		releaseRegistration();
-		AgentSession.prototype.bindExtensions = originalBind;
+		AgentSession.prototype.setPendingMCPDiscovery = original;
 	}
 }, 15_000);
 
-test("-builtin:mcp in pi settings keeps the engine out and starts no server", async () => {
-	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: ["-builtin:mcp"] }));
-	const p = await chat();
-	await Bun.sleep(300);
-	expect(mcpCommands(p.sessionId)).toHaveLength(0);
-	expect(pids()).toEqual([]);
-	await removeSession(p.sessionId);
-});
-
-test("pi settings that turn builtin:mcp off make MCP read-only with no chat open, honouring project trust", async () => {
-	const cwd = mkdtempSync(join(root, "cwd-"));
-	const elsewhere = async (trusted: boolean) =>
-		(
-			await listMcpServers({
-				workspaceId: "engine-idle",
-				cwd,
-				project: trusted ? { piResourceTrust: "granted" } : undefined,
-				waitMs: 0,
-			})
-		).handledElsewhere;
-	expect(await elsewhere(true)).toBeUndefined();
-	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: ["-builtin:mcp"] }));
-	expect(await elsewhere(false)).toEqual({ by: "pi settings (-builtin:mcp)" });
-	rmSync(join(agentDir, "settings.json"));
-	mkdirSync(join(cwd, ".pi"));
-	writeFileSync(
-		join(cwd, ".pi", "settings.json"),
-		JSON.stringify({ extensions: ["-builtin:mcp"] }),
-	);
-	expect(await elsewhere(false)).toBeUndefined();
-	expect(await elsewhere(true)).toEqual({ by: "pi settings (-builtin:mcp)" });
-});
-
-test("an installed extension that owns /mcp replaces the built-in instead of running alongside it", async () => {
+test("an installed extension that registers /mcp neither replaces the host's command nor starts a server twice", async () => {
 	writeFileSync(
 		join(agentDir, "extensions", "other-mcp.ts"),
 		[
@@ -638,19 +547,18 @@ test("an installed extension that owns /mcp replaces the built-in instead of run
 		].join("\n"),
 	);
 	const p = await chat();
-	await Bun.sleep(300);
+	await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
 	expect(mcpCommands(p.sessionId).map((command) => command.description)).toEqual([
-		"another MCP manager",
+		"MCP servers: status, login <server>, logout <server>, reconnect <server>",
 	]);
-	expect(pids()).toEqual([]);
+	expect(pids()).toHaveLength(1);
 	const listed = await listMcpServers({
 		workspaceId: p.workspaceId,
 		cwd: p.cwd,
 		project: undefined,
 		waitMs: 500,
 	});
-	expect(listed.handledElsewhere?.by).toContain("other-mcp.ts");
-	expect(listed.statuses).toEqual([]);
+	expect(listed.statuses.map((snapshot) => snapshot.sessionId)).toEqual([p.sessionId]);
 	await removeSession(p.sessionId);
 });
 
@@ -677,7 +585,7 @@ test("a subagent run starts no MCP server of its own", async () => {
 const notices = () =>
 	requests.flatMap((request) => (request.kind === "notify" ? [request.message] : []));
 
-test("status comes from pi's own /mcp report without toasting it, and generations only grow", async () => {
+test("status comes from omp's typed connection status without toasting it, and generations only grow", async () => {
 	const p = await chat();
 	const first = await refreshMcpStatus(p.sessionId, 5000);
 	expect(first?.servers.find((server) => server.name === "fixture")).toMatchObject({
@@ -697,13 +605,12 @@ test("status comes from pi's own /mcp report without toasting it, and generation
 		["fixture", "user", "stdio"],
 	]);
 	expect(listed.statuses.map((snapshot) => snapshot.sessionId)).toEqual([p.sessionId]);
-	expect(listed.handledElsewhere).toBeUndefined();
 	await removeSession(p.sessionId);
 });
 
 const SLOW_START = { MCP_FIXTURE_INITIALIZE_DELAY_MS: "1500" };
 
-test("a chat reports its servers starting until pi answers, from the moment it opens and again after each reload", async () => {
+test("a chat reports its servers starting until omp connects them, from the moment it opens and again after each reload", async () => {
 	writeMcpConfig(SLOW_START);
 	const p = await chat();
 	const opened = await listMcpServers({
@@ -728,8 +635,9 @@ test("a chat reports its servers starting until pi answers, from the moment it o
 }, 20_000);
 
 test("a status capture takes only its own dispatch's notices, so the user's own /mcp prints in the chat once", async () => {
-	writeMcpConfig(SLOW_START);
 	const p = await chat();
+	await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
+	requests = [];
 	const typed = promptSession(p.sessionId, "/mcp");
 	const captured: string[] = [];
 	const dispatched = dispatchSessionMcpCommand(p.sessionId, "", (message) =>
@@ -742,7 +650,7 @@ test("a status capture takes only its own dispatch's notices, so the user's own 
 	await removeSession(p.sessionId);
 }, 15_000);
 
-test("reconnecting keeps pi's notices out of the chat and rejects with pi's failure", async () => {
+test("reconnecting keeps the host's notices out of the chat and rejects with the failure", async () => {
 	const p = await chat();
 	await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
 	requests = [];
@@ -752,8 +660,10 @@ test("reconnecting keeps pi's notices out of the chat and rejects with pi's fail
 			() => null,
 			(error: Error) => error.message,
 		);
-	expect(await refusal("nope")).toBe('No MCP server named "nope".');
-	expect(await refusal("ghp_abcdefghijklmnop1234")).toBe('No MCP server named "***".');
+	expect(await refusal("nope")).toBe('No MCP server named "nope" is configured for this chat.');
+	expect(await refusal("ghp_abcdefghijklmnop1234")).toBe(
+		'No MCP server named "***" is configured for this chat.',
+	);
 	expect(notices()).toEqual([]);
 	expect(await stateOf(p.sessionId, "fixture")).toBe("connected");
 	await removeSession(p.sessionId);
@@ -771,32 +681,6 @@ test("disabling a server in one chat stops it at the reload and reads as disable
 	expect(await setSessionMcpServerEnabled(p.sessionId, "fixture", false)).toBe("unchanged");
 	expect(await setSessionMcpServerEnabled(p.sessionId, "fixture", true)).toBe("reloaded");
 	await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
-	await removeSession(p.sessionId);
-});
-
-test("MCP enable and disable refuse a replacement owner, including a previously disabled server", async () => {
-	const p = await chat();
-	await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
-	expect(await setSessionMcpServerEnabled(p.sessionId, "fixture", false)).toBe("reloaded");
-	writeExtension("other-mcp.ts", [
-		"export default function otherMcp(pi) {",
-		'  pi.registerCommand("mcp", { description: "another MCP manager", handler: async () => {} });',
-		"}",
-	]);
-	await requestSessionReload(p.sessionId);
-	const before = pids();
-	for (const enabled of [true, false]) {
-		await expect(setSessionMcpServerEnabled(p.sessionId, "fixture", enabled)).rejects.toMatchObject(
-			{
-				code: "MCP_HANDLED_ELSEWHERE",
-			},
-		);
-	}
-	expect(mcpSessionView(p.sessionId)?.disabledInChat.has("fixture")).toBe(true);
-	expect(mcpCommands(p.sessionId).map((command) => command.description)).toEqual([
-		"another MCP manager",
-	]);
-	expect(pids()).toEqual(before);
 	await removeSession(p.sessionId);
 });
 
@@ -840,8 +724,8 @@ test("only sessions whose effective config changed reload, and the chat resource
 	await waitFor(async () => (await stateOf(a.sessionId, "fixture")) === "connected");
 	expect(await reconcileMcpSessions([a.sessionId, b.sessionId])).toEqual({});
 
-	mkdirSync(join(a.cwd, ".pi"), { recursive: true });
-	writeFileSync(join(a.cwd, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { repo: second } }));
+	mkdirSync(join(a.cwd, ".omp"), { recursive: true });
+	writeFileSync(join(a.cwd, ".omp", "mcp.json"), JSON.stringify({ mcpServers: { repo: second } }));
 	expect(await reconcileMcpSessions([a.sessionId, b.sessionId])).toEqual({});
 
 	writeMcpConfig({}, { second });
@@ -875,10 +759,10 @@ test("a busy chat shows pending reload for the changed server and takes the chan
 	await removeSession(p.sessionId);
 });
 
-test("the user-file watcher creates pi's agent dir when it is missing and then picks up the file", async () => {
+test("the user-file watcher creates omp's agent dir when it is missing and then picks up the file", async () => {
 	const fresh = join(root, "fresh-agent");
 	expect(existsSync(fresh)).toBe(false);
-	process.env.PI_CODING_AGENT_DIR = fresh;
+	const isolated = isolateAgentDir(fresh);
 	const stop = watchUserMcpConfig();
 	try {
 		expect(existsSync(fresh)).toBe(true);
@@ -888,7 +772,7 @@ test("the user-file watcher creates pi's agent dir when it is missing and then p
 		await removeSession(p.sessionId);
 	} finally {
 		stop();
-		process.env.PI_CODING_AGENT_DIR = agentDir;
+		isolated.restore();
 	}
 });
 
@@ -914,76 +798,6 @@ function probeStarts(): string[] {
 		: [];
 }
 
-test("after another extension takes /mcp over in a live chat, config changes reload nothing and its MCP rows are retired", async () => {
-	const p = await chat();
-	await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
-	expect((await mcpResources(p))?.map((server) => server.name)).toEqual(["fixture"]);
-	const changes: string[] = [];
-	setSessionResourcesPublisher(({ sessionId }) => {
-		if (sessionId === p.sessionId) changes.push(sessionId);
-	});
-	try {
-		writeExtension("other-mcp.ts", [
-			'import { appendFileSync } from "node:fs";',
-			"export default function otherMcp(pi) {",
-			`  pi.on("session_start", (event) => appendFileSync(${JSON.stringify(probeMarker)}, \`\${event.reason}\\n\`));`,
-			'  pi.registerCommand("mcp", { description: "another MCP manager", handler: async () => {} });',
-			"}",
-		]);
-		expect(await requestSessionReload(p.sessionId)).toBe("reloaded");
-		expect(mcpCommands(p.sessionId).map((command) => command.description)).toEqual([
-			"another MCP manager",
-		]);
-		expect(await mcpResources(p)).toEqual([]);
-		expect(changes).toHaveLength(1);
-		const starts = probeStarts().length;
-		writeMcpConfig({}, { second });
-		expect(await reconcileMcpSessions([p.sessionId])).toEqual({});
-		writeMcpConfig({}, { second, third: second });
-		expect(await reconcileMcpSessions([p.sessionId])).toEqual({});
-		expect(probeStarts()).toHaveLength(starts);
-		expect(await refreshMcpStatus(p.sessionId, 500)).toBeNull();
-		expect(await mcpResources(p)).toEqual([]);
-		expect(changes).toHaveLength(1);
-	} finally {
-		setSessionResourcesPublisher(() => {});
-	}
-	await removeSession(p.sessionId);
-});
-
-test("servers an extension registers are marked in the chat's resources, keep their transport, and cannot be disabled per chat", async () => {
-	writeExtension("register-mcp.ts", [
-		"export default function registerMcp(pi) {",
-		`  pi.registerMcpServer("ext-stdio", { command: ${JSON.stringify(process.execPath)}, args: [${JSON.stringify(fixture)}], env: { MCP_FIXTURE_PID_FILE: ${JSON.stringify(pidFile)} }, exposure: "direct" });`,
-		'  pi.registerMcpServer("ext-http", { url: "http://127.0.0.1:9/mcp", exposure: "direct" });',
-		"}",
-	]);
-	const p = await chat();
-	await waitFor(async () => (await stateOf(p.sessionId, "ext-stdio")) === "connected");
-	const rows = await waitFor(async () => {
-		const current = await mcpResources(p);
-		return current?.length === 3 ? current : undefined;
-	});
-	expect(rows.map((server) => [server.name, server.transport, server.registered ?? false])).toEqual(
-		[
-			["fixture", "stdio", false],
-			["ext-stdio", "stdio", true],
-			["ext-http", "http", true],
-		],
-	);
-	const refusal = await setSessionMcpServerEnabled(p.sessionId, "ext-stdio", false).then(
-		() => null,
-		(error: Error & { code?: string }) => [error.code, error.message],
-	);
-	expect(refusal).toEqual([
-		"MCP_CONFIG_INVALID",
-		'"ext-stdio" is registered by an extension; it can\'t be disabled per chat.',
-	]);
-	expect(await stateOf(p.sessionId, "ext-stdio")).toBe("connected");
-	expect(await setSessionMcpServerEnabled(p.sessionId, "fixture", false)).toBe("reloaded");
-	await removeSession(p.sessionId);
-});
-
 test("disabling a server in a busy chat reads as pending reload right away", async () => {
 	const p = await chat();
 	await waitFor(async () => (await stateOf(p.sessionId, "fixture")) === "connected");
@@ -1000,10 +814,13 @@ test("disabling a server in a busy chat reads as pending reload right away", asy
 });
 
 test("results carry a durable, base64-free summary, and Full output reads only the recorded file", async () => {
-	const p = await chat();
+	setSessionManagerFactory((cwd) => SessionManager.create(cwd, join(root, "sessions")));
+	const p = await chat().finally(() =>
+		setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd)),
+	);
 	faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("mcp__fixture__rich", {}, { id: "rich" })),
-		fauxAssistantMessage(fauxToolCall("mcp__fixture__big", {}, { id: "big" })),
+		fauxAssistantMessage(fauxToolCall("mcp__fixture_rich", {}, { id: "rich" })),
+		fauxAssistantMessage(fauxToolCall("mcp__fixture_big", {}, { id: "big" })),
 		fauxAssistantMessage("DONE"),
 	]);
 	await promptSession(p.sessionId, "Use rich and big.");

@@ -20,14 +20,15 @@ interface ModuleRule {
 const MODULE_RULES: readonly ModuleRule[] = [
 	{
 		root: "packages/artifact-tests",
-		allowed: ["apps/cli", "packages/server", "packages/shared"],
+		allowed: ["apps/cli", "packages/server", "packages/shared", "packages/pi-faux"],
 	},
 	{ root: "packages/contracts", allowed: [] },
 	{ root: "packages/shared", allowed: ["packages/contracts"] },
-	{ root: "packages/pi-delegation", allowed: [] },
-	{ root: "packages/pi-background-commands", allowed: [] },
-	{ root: "packages/pi-subagents", allowed: ["packages/pi-delegation"] },
-	{ root: "packages/pi-dag", allowed: ["packages/pi-delegation"] },
+	{ root: "packages/pi-faux", allowed: [] },
+	{ root: "packages/pi-delegation", allowed: ["packages/pi-faux"] },
+	{ root: "packages/pi-background-commands", allowed: ["packages/pi-faux"] },
+	{ root: "packages/pi-subagents", allowed: ["packages/pi-delegation", "packages/pi-faux"] },
+	{ root: "packages/pi-dag", allowed: ["packages/pi-delegation", "packages/pi-faux"] },
 	{
 		root: "packages/server",
 		allowed: [
@@ -41,6 +42,7 @@ const MODULE_RULES: readonly ModuleRule[] = [
 			"packages/pi-thinkrail-workflow",
 			"packages/pi-todos",
 			"packages/extension-api",
+			"packages/pi-faux",
 		],
 	},
 	{
@@ -123,7 +125,7 @@ function moduleRules(packages: ReadonlyMap<string, string>): ModuleRule[] {
 			})),
 		...roots
 			.filter((root) => root.startsWith("pi-extensions/"))
-			.map((root) => ({ root, allowed: [] })),
+			.map((root) => ({ root, allowed: ["packages/pi-faux"] })),
 		...extensions.map((root) => ({
 			root,
 			allowed: [

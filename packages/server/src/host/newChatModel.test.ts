@@ -14,14 +14,18 @@ function wireModel(provider: string, id: string): WireModel {
 	};
 }
 
-function resolver(config: Partial<AppConfig>, models: WireModel[]) {
+function resolver(
+	config: Partial<AppConfig>,
+	models: WireModel[],
+	preferred: WireModel | undefined = models[0],
+) {
 	const clampCalls: Array<{ provider: string; id: string; level: ThinkingLevel }> = [];
 	return {
 		clampCalls,
 		resolve: (requested: { model?: WireModel; thinkingLevel?: ThinkingLevel } = {}) =>
 			resolveNewChatModel(requested, {
 				getConfig: () => ({ ...DEFAULT_CONFIG, ...config }),
-				listSettledModels: async () => models,
+				listSettledModels: async () => ({ models, preferred }),
 				clampThinkingForModel: async (model, level) => {
 					clampCalls.push({ ...model, level });
 					return model.provider === "limited" && level === "high" ? "medium" : level;
@@ -44,16 +48,17 @@ test("new-chat model resolution uses a saved available model and clamps its save
 	expect(clampCalls).toEqual([{ provider: "limited", id: "saved", level: "high" }]);
 });
 
-test("new-chat model resolution falls back to the first model when the saved model is unavailable", async () => {
+test("new-chat model resolution falls back to the engine's preferred model when the saved model is unavailable", async () => {
 	const { resolve } = resolver(
 		{ defaultModel: wireModel("missing", "gone"), defaultEffort: "low" },
 		[first, second],
+		second,
 	);
 
-	expect(await resolve()).toEqual({ model: first, thinkingLevel: "low" });
+	expect(await resolve()).toEqual({ model: second, thinkingLevel: "low" });
 });
 
-test("new-chat model resolution falls back to the first model when no default is saved", async () => {
+test("new-chat model resolution uses the engine's preferred model when no default is saved", async () => {
 	const { resolve } = resolver({}, [first, second]);
 
 	expect(await resolve()).toEqual({ model: first, thinkingLevel: "medium" });
@@ -90,10 +95,8 @@ test("a thinking-only request uses the resolved default model and clamps the req
 	expect(clampCalls).toEqual([{ provider: "limited", id: "saved", level: "high" }]);
 });
 
-test("new-chat model resolution prefers pi's provider default over catalog order", async () => {
-	const legacy = wireModel("openai", "gpt-4");
-	const current = wireModel("openai", "gpt-5.5");
-	const { resolve } = resolver({}, [legacy, current]);
+test("a saved default that is available wins over the engine's preferred model", async () => {
+	const { resolve } = resolver({ defaultModel: first }, [first, second], second);
 
-	expect(await resolve()).toEqual({ model: current, thinkingLevel: "medium" });
+	expect(await resolve()).toEqual({ model: first, thinkingLevel: "medium" });
 });

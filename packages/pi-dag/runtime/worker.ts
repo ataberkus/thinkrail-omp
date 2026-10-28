@@ -1,6 +1,7 @@
-import type { ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { fail, LIMITS, SubmissionSchema } from "../domain";
+import { Check } from "typebox/value";
+import { fail, LIMITS, SubmissionSchema, toolParameters } from "../domain";
 
 export const WORKER_TOOLS = ["dag_submit_result", "dag_request_input"];
 export const SubmitSchema = Type.Object(
@@ -12,6 +13,8 @@ export const InputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type Submission = Static<typeof SubmitSchema>;
+const submitParameters = toolParameters(SubmitSchema);
+const inputParameters = toolParameters(InputSchema);
 export interface WorkerReceipt {
 	dagId: string;
 	id: string;
@@ -51,8 +54,10 @@ export function workerExtension(protocol: WorkerProtocol): ExtensionFactory {
 			label: "Submit DAG result",
 			description:
 				"Submit exactly the declared outputs. Use {kind:'text',text}, {kind:'json',value}, or {kind:'artifact',path} for a workspace file. Must be the sole tool call in the batch. Durable submission requests activation end; pi settlement remains authoritative. It is not approval or acceptance.",
-			parameters: SubmitSchema,
+			parameters: submitParameters,
+			loadMode: "essential",
 			async execute(id, args, signal, _update, ctx) {
+				if (!Check(SubmitSchema, args)) fail("invalid-command", "Invalid DAG result submission");
 				const invocation = singleCall(ctx, id, "dag_submit_result");
 				const receipt = await protocol.submit(
 					ctx.sessionManager.getSessionId(),
@@ -63,7 +68,6 @@ export function workerExtension(protocol: WorkerProtocol): ExtensionFactory {
 				return {
 					content: [{ type: "text", text: JSON.stringify(receipt) }],
 					details: receipt,
-					terminate: true,
 				};
 			},
 		});
@@ -72,8 +76,10 @@ export function workerExtension(protocol: WorkerProtocol): ExtensionFactory {
 			label: "Request DAG input",
 			description:
 				"Ask for required input and end this activation. Must be the sole tool call in the batch. The runtime, not the worker, selects who may answer; do not approve gates yourself.",
-			parameters: InputSchema,
+			parameters: inputParameters,
+			loadMode: "essential",
 			async execute(id, args, signal, _update, ctx) {
+				if (!Check(InputSchema, args)) fail("invalid-command", "Invalid DAG input request");
 				const invocation = singleCall(ctx, id, "dag_request_input");
 				const receipt = await protocol.input(
 					ctx.sessionManager.getSessionId(),
@@ -84,7 +90,6 @@ export function workerExtension(protocol: WorkerProtocol): ExtensionFactory {
 				return {
 					content: [{ type: "text", text: JSON.stringify(receipt) }],
 					details: receipt,
-					terminate: true,
 				};
 			},
 		});

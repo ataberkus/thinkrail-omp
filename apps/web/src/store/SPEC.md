@@ -39,7 +39,7 @@ selected-log state belong to chat integration, not domain persistence. See
 
 `mcp.ts` is the private slice implementation of the MCP server state: **`mcpByWorkspace`** holds, per
 workspace, the last `mcp.list` answer — `servers`, the file-level `configErrors` (empty from an older
-host) and `handledElsewhere` — and the held per-session status snapshots, beside a monotonic
+host) — and the held per-session status snapshots, beside a monotonic
 **`mcpRevision`**. Two atomic actions write it.
 **`applyMcpStatus(snapshot)`** (the `mcp.status` channel) installs only while connected on an MCP-capable
 protocol, for a live scope (removed workspaces and deleted chats are rejected), and only

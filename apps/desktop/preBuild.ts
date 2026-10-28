@@ -19,16 +19,16 @@ const desktopDir = import.meta.dir;
 const repoRoot = resolve(desktopDir, "..", "..");
 const stageDir = join(desktopDir, ".stage");
 const runtimeDir = join(stageDir, "runtime");
+const nativeDir = join(stageDir, "native");
 const generatedEntry = join(stageDir, "server-entry.ts");
 const bundledRuntimeKeys = {
 	factories: "factories",
 	skillsDir: "skillsDir",
 	trashHelpers: "trashHelpers",
-	webAccessFactory: "webAccessFactory",
 } as const satisfies { [Key in keyof BundledExtensions]-?: Key };
 
-function runBun(args: string[]): void {
-	const result = spawnSync("bun", args, { cwd: repoRoot, stdio: "inherit" });
+function runBun(args: string[], cwd = repoRoot): void {
+	const result = spawnSync("bun", args, { cwd, stdio: "inherit" });
 	if (result.error) throw result.error;
 	if (result.status !== 0) {
 		throw new Error(`bun ${args.join(" ")} exited ${result.status ?? result.signal}`);
@@ -49,6 +49,47 @@ function resolveRuntimeSources(): BuildRuntimeSources {
 		throw new Error(`build-support manifest exited ${result.status ?? result.signal}`);
 	}
 	return JSON.parse(result.stdout) as BuildRuntimeSources;
+}
+
+interface EngineRuntimeBundle {
+	entry: string;
+	outdir: string;
+	naming: string;
+	sourcemap: boolean;
+	nativeDir: string;
+}
+
+function bundleEngineRuntime(bundle: EngineRuntimeBundle): void {
+	runBun(
+		[
+			"--eval",
+			`const { copyFileSync, mkdirSync } = await import("node:fs");
+const { join } = await import("node:path");
+const { engineBundledBuildConfig, engineNativeAddons } = await import("@thinkrail/server/build-support");
+const bundle = ${JSON.stringify(bundle)};
+const engine = engineBundledBuildConfig();
+const result = await Bun.build({
+  entrypoints: [bundle.entry],
+  target: "bun",
+  outdir: bundle.outdir,
+  naming: { entry: bundle.naming },
+  sourcemap: bundle.sourcemap ? "external" : "none",
+  plugins: engine.plugins,
+  define: engine.define,
+  external: engine.external,
+  files: engine.files,
+  throw: false,
+});
+if (!result.success) {
+  for (const log of result.logs) console.error(log);
+  process.exit(1);
+}
+mkdirSync(bundle.nativeDir, { recursive: true });
+for (const addon of engineNativeAddons({ platform: process.platform, arch: process.arch }))
+  copyFileSync(addon.path, join(bundle.nativeDir, addon.filename));`,
+		],
+		desktopDir,
+	);
 }
 
 function sourceMapRelease(): string | null {
@@ -146,7 +187,6 @@ export async function startDesktopHost(options) {
       macos: options.runtimeDir + "/macos-trash",
       windows: options.runtimeDir + "/windows-trash.exe",
     },
-    ${bundledRuntimeKeys.webAccessFactory}: factory${sources.webAccessIndex},
   });
   const host = await bootHost({
     port: 0,
@@ -168,16 +208,13 @@ export async function startDesktopHost(options) {
 `,
 	);
 	const runtimeFile = join(runtimeDir, "server-runtime.ts");
-	runBun([
-		"build",
-		generatedEntry,
-		"--target=bun",
-		"--define",
-		"PI_BUNDLED_NODE=true",
-		...(release ? ["--sourcemap=external"] : []),
-		`--outdir=${runtimeDir}`,
-		`--entry-naming=${basename(runtimeFile)}`,
-	]);
+	bundleEngineRuntime({
+		entry: generatedEntry,
+		outdir: runtimeDir,
+		naming: basename(runtimeFile),
+		sourcemap: release !== null,
+		nativeDir,
+	});
 	if (release) uploadRuntimeSourceMap(runtimeFile, release);
 } finally {
 	rmSync(generatedEntry, { force: true });

@@ -1,4 +1,4 @@
-import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
+import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog";
 import type { AcquisitionRecord, AttributionTouch } from "../persistence";
 
 export type BuildKind = "source" | "binary" | "desktop";
@@ -200,8 +200,8 @@ let catalog: Map<string, ReadonlySet<string>> | null = null;
 function builtinCatalog(): Map<string, ReadonlySet<string>> {
 	if (!catalog) {
 		catalog = new Map();
-		for (const provider of getBuiltinProviders()) {
-			catalog.set(provider, new Set(getBuiltinModels(provider).map((model) => String(model.id))));
+		for (const provider of getBundledProviders()) {
+			catalog.set(provider, new Set(getBundledModels(provider).map((model) => String(model.id))));
 		}
 	}
 	return catalog;

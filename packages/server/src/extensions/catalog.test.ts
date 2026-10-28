@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import { listExtensionCatalog } from "./catalog";
 import type { ServerExtensionEntry } from "./registry";
 

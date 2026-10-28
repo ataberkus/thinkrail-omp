@@ -1,9 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { isValid, type ValidationReport, validateGraph } from "../core/index.ts";
 import { getIndex, textResult } from "./shared.ts";
 
-const parameters = Type.Object({});
+const parameters = z.object({});
 
 export function registerSpecValidate(pi: ExtensionAPI): void {
 	pi.registerTool<typeof parameters, ValidationReport>({
@@ -11,8 +10,7 @@ export function registerSpecValidate(pi: ExtensionAPI): void {
 		label: "Spec Validate",
 		description:
 			"Validate the spec-graph: report dangling parent/depends-on/references/implements links, duplicate ids, and parent cycles.",
-		promptSnippet:
-			"spec_validate — check the spec-graph for dangling links, duplicate ids, and parent cycles.",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, _params, _signal, _onUpdate, ctx) {
 			const report = validateGraph(getIndex(ctx.cwd).graph());

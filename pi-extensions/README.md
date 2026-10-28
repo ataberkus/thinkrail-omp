@@ -1,7 +1,7 @@
-# Publishing pi packages
+# Publishing omp packages
 
 How-to for the packages under `pi-extensions/*`, published to npm as `@thinkrail/pi-<name>` and usable
-in vanilla `pi` without ThinkRail. Decisions and rationale live in [SPEC.md](SPEC.md); this file is the
+in vanilla `omp` (oh-my-pi) without ThinkRail. Decisions and rationale live in [SPEC.md](SPEC.md); this file is the
 checklist.
 
 ## Add a new package
@@ -12,14 +12,16 @@ checklist.
    - `name: "@thinkrail/pi-<name>"`, `version: "0.0.0"` (the first changeset produces the first
      real version), `private` absent, `license: "Apache-2.0"`, `repository.directory`,
      `publishConfig: { access: "public", provenance: true }`.
-   - `keywords` include `"pi-package"` and a `pi` manifest (`extensions`, `skills` …) **only** for an
-     installable extension. A portable library (no factory) gets neither.
+   - `keywords` include `"pi-package"` and `"oh-my-pi"`, and an `omp` manifest (`extensions`) **only** for
+     an installable extension; skills ship in a `skills/` directory, which omp discovers without a
+     manifest key. A portable library (no factory) gets neither.
    - `files`: everything the entrypoints and `exports` transitively import, tests excluded. The parity
      gate installs from the tarball, so an omission fails there.
-   - Pi SDK packages (`@earendil-works/pi-ai`, `pi-coding-agent`, `pi-tui`, `pi-agent-core`, `typebox`) are
-     `peerDependencies: "*"` and `devDependencies: "catalog:"`. Other runtime deps: exact pins.
+   - omp SDK packages (`@oh-my-pi/pi-ai`, `pi-coding-agent`, `pi-tui`, `pi-agent-core`) are
+     `peerDependencies: "*"` and `devDependencies: "catalog:"`. Tool schemas use omp's `z` builder, not
+     TypeBox. Other runtime deps: exact pins.
 3. Copy `LICENSE` from the repo root. Write a `README.md` whose first lines are
-   `pi install npm:@thinkrail/pi-<name>` and what the package adds.
+   `omp plugin install @thinkrail/pi-<name>` and what the package adds.
 4. Create `SPEC.md` (`parent: module-pi-extensions`) and add the package to the members table in
    [SPEC.md](SPEC.md).
 5. Register the package in `scripts/check-module-boundaries.ts` (`{ root: "pi-extensions/<name>", allowed: [] }`
@@ -31,15 +33,19 @@ checklist.
 
 ## The vanilla-parity bar (before the first publish)
 
-- `bun run check:pi-packages` is green — it packs, installs into an isolated pi fixture **outside the
-  repo**, and loads under **Node** (vanilla pi's runtime), so Bun-only APIs and missing `files` fail here.
-- Shipped code is dual-runtime: `node:` builtins and standard ESM only; no `Bun.*`, `bun:*`,
-  `import.meta.dir`.
+- `bun run check:pi-packages` is green. It packs the package, installs it with the real
+  `omp plugin install` into an isolated fixture **outside the repo** (tarballs served from a loopback
+  registry), and loads it through omp's own discovery. Missing `files` and a wrong `omp.extensions`
+  entry fail here.
+- Shipped code imports the engine only through `@oh-my-pi/*` public entries: no `@earendil-works/*`,
+  `@mariozechner/*`, `typebox`, or `extensibility/legacy-pi-*`. omp would silently shim those, so only
+  the gate's tarball scan catches them. Bun APIs are fine, because omp only runs on Bun.
+- Every tool sets `loadMode: "essential"`; omp otherwise hides extension tools behind tool search.
 - Every tool whose plain text result reads poorly has `renderCall`/`renderResult`; every UI call is behind
   `ctx.hasUI`.
 - Manual check in a real terminal, including inside `tmux`:
   ```bash
-  node_modules/.bin/pi -e pi-extensions/<name>/index.ts
+  node_modules/.bin/omp -e pi-extensions/<name>/index.ts
   ```
 - No `~/.thinkrail` paths, no host wire, no `@thinkrail/*` imports except sibling `pi-extensions/*`.
 
@@ -98,7 +104,12 @@ authentication and disallow tokens*.
 
 - **`check:pi-packages` fails with a module not found inside the fixture** — a runtime import is not in
   `dependencies`, or a file is missing from `files`.
-- **"uses a Bun-only API"** — move the call into a `*.test.ts` or replace it with a `node:` equivalent.
+- **"imports a legacy pi engine module"**: switch the import to the `@oh-my-pi/*` equivalent (schemas
+  use omp's `z`, not TypeBox).
+- **`omp plugin install … extension validation failed`**: an `omp.extensions` entry is missing from the
+  tarball or does not default-export a factory.
+- **"bound to a plugin-local omp copy"**: an engine import bypassed omp's host remapping and resolved to
+  the `*` peer bun installed beside the plugin. Import a public `@oh-my-pi/*` entry instead.
 - **Publish job skipped everything** — the versions on `main` are already on npm (nothing to do) or
   changesets are still pending (cut the version PR first).
 - **Publish fails with `ENEEDAUTH`/403** — Trusted Publisher is not configured for that package yet (see

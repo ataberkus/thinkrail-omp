@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { type ExtensionContext, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { type ExtensionContext, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent";
+import { stripTerminalSequences, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import {
 	ASK_STOPPED_ERROR,
 	type AskOutcome,
@@ -30,7 +30,7 @@ const theme = {
 
 const tui = { requestRender: () => {}, terminal: { rows: 40, columns: 120 } } as unknown as TUI;
 
-beforeAll(() => initTheme("dark", false));
+beforeAll(() => initTheme(false));
 
 const library: AskUserQuestionItem = {
 	question: "Which library should we use for dates?",
@@ -401,29 +401,30 @@ describe("askInTerminal", () => {
 });
 
 describe("transcript renderers", () => {
-	const plain = (component: { render(width: number): string[] }) =>
+	const plain = (component: { render(width: number): readonly string[] }) =>
 		component
 			.render(100)
 			.map((line) => stripTerminalSequences(line).trimEnd())
 			.join("\n");
 
 	test("the call shows how many questions and their headers, also while streaming", () => {
-		expect(plain(renderAskCall({ questions: [library, runtime] }, theme))).toBe(
+		const options = { expanded: false, isPartial: false };
+		expect(plain(renderAskCall({ questions: [library, runtime] }, options, theme))).toBe(
 			"ask_user_question 2 questions (Lib, Runtime)",
 		);
-		expect(plain(renderAskCall({ questions: [{ question: "q" }] }, theme))).toBe(
+		expect(plain(renderAskCall({ questions: [{ question: "q" }] }, options, theme))).toBe(
 			"ask_user_question 1 question",
 		);
-		expect(plain(renderAskCall(undefined, theme))).toBe("ask_user_question 0 questions");
+		expect(plain(renderAskCall(undefined, options, theme))).toBe("ask_user_question 0 questions");
 	});
 
 	const render = (details: unknown, isError = false, text = "raw text") =>
 		plain(
 			renderAskResult(
-				{ content: [{ type: "text", text }], details },
+				{ content: [{ type: "text", text }], details, isError },
 				{ expanded: false, isPartial: false },
 				theme,
-				{ args: { questions: [library, targets, runtime] }, isError },
+				{ questions: [library, targets, runtime] },
 			),
 		);
 

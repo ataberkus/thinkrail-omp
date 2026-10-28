@@ -20,7 +20,7 @@ dials it over the network; a phone reaches the selected host over Tailscale.
 
 - **Engine host** (`packages/server` + `packages/shared`, launched by `apps/cli` or `apps/desktop`
   in local-host mode): owns `pi`, session state, persistence, and serves the wire endpoint. It bundles pi extensions
-  (`pi-web-access`, `pi-spec-graph`, `pi-thinkrail-workflow`, `pi-todos`) and the ThinkRail extensions
+  (`pi-spec-graph`, `pi-thinkrail-workflow`, `pi-todos`) and the ThinkRail extensions
   from its server registry (`visualize`, `ask-user-question`) into every session.
 - **The wire** (`packages/contracts`): the typed, versioned protocol — the only coupling between client
   and host.
@@ -338,12 +338,12 @@ dependency. This keeps test process drivers outside both launchers and the serve
 20. **Portable pi packages are published, scoped, and held to a vanilla-parity bar.** Capabilities the
     agent can use anywhere live under `pi-extensions/*` and ship to npm as `@thinkrail/pi-<name>` (the npm
     org is `thinkrail`, which also reserves the scope of the private, never-published `@thinkrail/*`
-    workspace packages; raw TypeScript, `pi` manifest, `pi-package` keyword; unscoped `pi-*` names collide
+    workspace packages; raw TypeScript, `omp` manifest, `pi-package` keyword; unscoped `pi-*` names collide
     with third parties).
-    "Works in vanilla pi" is defined, not assumed: install from the packed tarball into an isolated
-    fixture, load through pi's own loader under **Node** (vanilla pi's runtime — ThinkRail runs the same
-    code under Bun, so shipped code is dual-runtime), register and execute tools, render in a real
-    terminal. Releases go through Changesets and npm Trusted Publishing with provenance; the host keeps
+    "Works in vanilla omp" is defined, not assumed: install with omp's own `omp plugin install` into an
+    isolated home, discover and load through omp's own plugin discovery and extension loader (Bun-only,
+    like omp itself), register and execute tools, render through omp's theme, and reject tarballs that
+    still import upstream pi or omp's legacy-pi shims. Releases go through Changesets and npm Trusted Publishing with provenance; the host keeps
     consuming the packages through `workspace:*`. A portable *library* (delegation) is published without a
     manifest and is never given a fake factory. Detail and the gate: [[module-pi-extensions]].
 
@@ -441,7 +441,7 @@ dependency. This keeps test process drivers outside both launchers and the serve
 
 - Never **value**-import `pi` in browser-bundled code; import types only, from the `pi-ai` /
   `pi-agent-core` package roots (type-only imports are erased at build, keeping the bundle provider-free).
-  `@earendil-works/pi-coding-agent` is server-only — it never reaches `contracts`/`web`.
+  `@oh-my-pi/pi-coding-agent` is server-only — it never reaches `contracts`/`web`.
 - One id model: the UI tab id vs `session.sessionId` (the `AgentSession` id). No separate pi UUID.
 - The agent runs in-process with **no crash isolation** — wrap session calls and forward errors; a fatal
   fault takes the whole host down (accepted tradeoff vs the subprocess RPC mode).

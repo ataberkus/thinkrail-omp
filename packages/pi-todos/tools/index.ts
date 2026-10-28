@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { registerTodoAdd } from "./add.ts";
 import { registerTodoList } from "./list.ts";
 import { registerTodoPlanSummary } from "./planSummary.ts";

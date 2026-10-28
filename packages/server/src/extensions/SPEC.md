@@ -20,25 +20,18 @@ list for registry extensions.
 ## Boundary
 
 - **Owns:** `serverExtensions` (the ordered entries), `registryInlineExtensions(kind, isDisabled?,
-  entries?, session?)` (flattens `extensions` / `childExtensions` into pi `InlineExtension`s named after
-  the extension — one factory keeps the bare name, several get `name#n` — so pi diagnostics show
-  `<inline:visualize>` instead of a position; each factory asks `isDisabled(name)` **when pi loads it**, so
-  a reload re-decides membership without rebuilding the loader. A parent flatten given a `session` appends
-  `sessionExtensions(session)` after the static factories under the same naming; it calls it once per
-  flatten, so every parent session's factories close over its own services. Without a session, and in the
-  child set, session factories are absent), `omitDisabledRegistryExtensions(result, isDisabled)` (drops a disabled
-  extension's `<inline:…>` entries from a pi `LoadExtensionsResult`, for the parent loader's
-  `extensionsOverride`, so a disabled extension is absent rather than present-and-empty),
-  `preferRegistryTools(result)` (also composed into that override, after the disabled filter). It moves a
-  registry extension directly ahead of the first non-registry extension that registers one of its tool
-  names, so a user-installed same-name package never takes over a tool whose host UI and lifecycle key on
-  the name — `ask_user_question` is the reason. The other package's other tools, commands and hooks stay
-  loaded. pi's own conflict diagnostic stays in the loader result, unreported, as before. The pi facts it
-  relies on are registered in [[pi-compatibility]]),
-  `registryExtensionName(path)` (maps an `<inline:name>` / `<inline:name#n>` path — an extension's or its
-  tools' `sourceInfo.path` — back to the registry extension that owns it by name, `undefined` otherwise;
-  matching by name rather than by recomputed names keeps it independent of how many per-session factories
-  a session got),
+  entries?, session?, onLoaded?)` (flattens `extensions` / `childExtensions` into omp `ExtensionFactory`s,
+  each tagged with its owner as `registryName`; each factory asks `isDisabled(name)` **when omp loads it**,
+  so a disabled extension contributes nothing to a chat created — or rebuilt by a reload — while it is off,
+  and a reload re-decides membership. A parent flatten given a `session` appends `sessionExtensions(session)`
+  after the static factories; it calls it once per flatten, so every parent session's factories close over
+  its own services. Without a session, and in the child set, session factories are absent),
+  `registryToolOwner(tool)` (the registry extension that registered a tool name, recorded through a
+  `registerTool` proxy because omp names inline factories by position; process-wide, so the session manager
+  also requires that the chat itself loaded that extension). Same-name precedence needs no host ordering:
+  omp loads discovered extension paths before inline factories (`sdk.ts`) and resolves a tool name to its
+  last registration (`ExtensionRunner.getRegisteredTool`), so a registry tool wins over a user package's
+  same-name tool — `ask_user_question` is why that matters ([[pi-compatibility]]),
   `listExtensionCatalog(disabled)` (the Settings catalog: per entry `name`, `title` — falling back to
   `name` — optional `description`, `hasChildExtensions`, `enabled = !disabled.has(name)`, and the tool names
   its **parent** factories register against a recording stub `ExtensionAPI` whose every other member is
@@ -49,8 +42,7 @@ list for registry extensions.
   returning its `pi.skills` directories; a named package with no skills fails loudly). The specifier is kept
   as a string precisely because a descriptor holds functions, which yield no module identity.
 - **Public surface (barrel):** `serverExtensions`, `ServerExtensionEntry`, `registryInlineExtensions`,
-  `RegistryExtensionKind`, `ExtensionDisabled`, `omitDisabledRegistryExtensions`, `preferRegistryTools`,
-  `registryExtensionName`,
+  `RegistryExtensionKind`, `RegistryExtensionFactory`, `ExtensionDisabled`, `registryToolOwner`,
   `listExtensionCatalog`,
   `resolveExtensionSkillRoots`, `interactiveTools`, `InteractiveTools`, `ExtensionSessionServices`,
   `InteractiveTool`, `ToolResponse`.
@@ -62,7 +54,7 @@ list for registry extensions.
   needs-input and late-response wording; nothing in `packages/server` names a tool or imports an extension
   outside `registry.ts`.
 - **Allowed deps:** `@thinkrail/extension-api/server` (types), every `@thinkrail/ext-*/server`,
-  `@earendil-works/pi-coding-agent` (types only), `@thinkrail/contracts` (the `ExtensionCatalogEntry` type),
+  `@oh-my-pi/pi-coding-agent` (types only), `@thinkrail/contracts` (the `ExtensionCatalogEntry` type),
   Node `module`/`fs`/`path`.
 - **Forbidden:** `host`; `settings` (the disabled set arrives as a parameter); sibling features; resolving extension-owned packages from the host's own
   `createRequire` (the host does not depend on the pi packages an extension composes, so that resolution

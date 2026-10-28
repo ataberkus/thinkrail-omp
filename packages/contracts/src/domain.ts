@@ -68,15 +68,15 @@ export interface Project {
 	disabledSkills?: string[];
 	disabledGroups?: string[];
 	/**
-	 * pi-level trust for the project's native `.pi/` resources, separate from the alias-skill `trusted`
+	 * pi-level trust for the project's native `.omp/` resources, separate from the alias-skill `trusted`
 	 * grant; absent (a record that predates pi-level trust) reads as untrusted. Never enables MCP servers by itself.
 	 */
 	piResourceTrust?: "granted" | "untrusted";
 	/** Approved repo-defined MCP entries: server name → fingerprint of the original project-file entry. */
 	mcpApprovals?: Record<string, string>;
-	/** Per-project enablement/exposure of user-level MCP servers (never written to `.pi/mcp.json`). */
+	/** Per-project enablement/exposure of user-level MCP servers (never written to `.omp/mcp.json`). */
 	mcpOverrides?: Record<string, McpProjectOverride>;
-	/** "Always allow" MCP tools per server name (never written to `.pi/mcp.json`). */
+	/** "Always allow" MCP tools per server name (never written to `.omp/mcp.json`). */
 	mcpToolGrants?: Record<string, McpToolGrant>;
 }
 
@@ -100,7 +100,7 @@ export type ProjectResourceKind =
 
 /**
  * What a project's trust grant would load, for the trust notice; alias skill names show only after trust.
- * `mcpServers` counts the entries of the project's `.pi/mcp.json`, each approved separately.
+ * `mcpServers` counts the entries of the project's `.omp/mcp.json`, each approved separately.
  */
 export interface ProjectTrustSummary {
 	aliasSkills: string[];
@@ -573,7 +573,6 @@ export type McpServerState =
 	| "invalid-config"
 	| "pending-reload"
 	| "not-running"
-	| "handled-elsewhere"
 	| "unknown";
 
 export interface McpServerStatus {
@@ -602,8 +601,6 @@ export interface McpServerResourceSummary {
 	state: McpServerState;
 	toolCount?: number;
 	transport: McpTransportKind;
-	/** Registered by an extension (`pi.registerMcpServer()`), not an `mcp.json` entry: it cannot be disabled per chat. */
-	registered?: true;
 }
 
 /** Mirror of pi's `McpToolDetails` as it arrives in `mcp__*` and the three MCP resource tools' results. */
@@ -660,8 +657,6 @@ export interface McpListResult {
 	statuses: McpStatusSnapshot[];
 	/** File-level problems of the files `servers` came from; absent when there are none or the host predates them. */
 	configErrors?: McpConfigFileError[];
-	/** MCP is provided by a user-installed extension or disabled through pi settings; management is read-only. */
-	handledElsewhere?: { by: string };
 }
 
 export type BackgroundCommandOutputResult =

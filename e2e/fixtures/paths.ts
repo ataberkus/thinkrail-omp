@@ -104,7 +104,7 @@ export const E2E_EDITOR_LOG = join(E2E_DATA_DIR, "editor-invocations.log");
 
 export const E2E_PI_AGENT_DIR = join(E2E_DATA_DIR, "pi-agent");
 
-export const E2E_PI_MODELS_SEED = join(E2E_DATA_DIR, "pi-agent-models.seed.json");
+export const E2E_PI_MODELS_SEED = join(E2E_DATA_DIR, "pi-agent-models.seed.yml");
 
 export const E2E_RESTART_DATA_DIR = join(tmpdir(), `thinkrail-e2e-restart-${E2E_STATE_KEY}`);
 

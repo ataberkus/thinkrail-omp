@@ -1,10 +1,74 @@
+import { analyzeAuthError } from "@oh-my-pi/pi-coding-agent/mcp";
+import type { McpConnectionStatusEvent } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 import type { McpServerState, McpServerStatus, McpServerSummary } from "@thinkrail/contracts";
 import { redactMcpText } from "./redact";
 
-export const MCP_ATTENTION_PREFIX = "MCP servers need attention:";
-const NO_SERVERS_PREFIX = "No MCP servers configured.";
-const EXPOSURE_SUFFIX = / \((codemode|deferred|direct|hidden)\)$/;
-const SERVER_LINE = /^([A-Za-z0-9_-]+): (.*)$/;
+export type McpRuntimeState = Extract<
+	McpServerState,
+	"starting" | "connected" | "needs-sign-in" | "failed" | "disconnected" | "disabled"
+>;
+
+export interface McpRuntimeStatus {
+	name: string;
+	state: McpRuntimeState;
+	toolCount?: number;
+	detail?: string;
+}
+
+export interface McpRuntimeSource {
+	connectionStatus(name: string): "connected" | "connecting" | "disconnected";
+	toolCount(name: string): number;
+}
+
+export interface McpRuntimeServer {
+	enabled?: boolean;
+	type?: string;
+	url?: string;
+}
+
+export class McpRuntimeTracker {
+	readonly #failures = new Map<string, string>();
+	readonly #seen = new Set<string>();
+
+	observe(event: McpConnectionStatusEvent): void {
+		if (event.type === "connecting") {
+			for (const name of event.serverNames) this.#seen.add(name);
+			return;
+		}
+		this.#seen.add(event.serverName);
+		if (event.type === "failed") this.#failures.set(event.serverName, event.error);
+		else if (event.type === "connected") this.#failures.delete(event.serverName);
+	}
+
+	fail(name: string, error: string): void {
+		this.#seen.add(name);
+		this.#failures.set(name, error);
+	}
+
+	statuses(
+		servers: ReadonlyMap<string, McpRuntimeServer>,
+		source: McpRuntimeSource | null,
+	): McpRuntimeStatus[] {
+		return [...servers].map(([name, config]): McpRuntimeStatus => {
+			if (config.enabled === false) return { name, state: "disabled" };
+			const connection = source?.connectionStatus(name) ?? "connecting";
+			if (connection === "connected") {
+				return { name, state: "connected", toolCount: source?.toolCount(name) ?? 0 };
+			}
+			const failure = this.#failures.get(name);
+			if (connection === "connecting" || (failure === undefined && !this.#seen.has(name))) {
+				return { name, state: "starting" };
+			}
+			if (failure === undefined) {
+				return { name, state: "disconnected", detail: "Connection closed" };
+			}
+			const needsSignIn =
+				(config.type === "http" || config.type === "sse") &&
+				analyzeAuthError(new Error(failure), config.url).requiresAuth;
+			return { name, state: needsSignIn ? "needs-sign-in" : "failed", detail: failure };
+		});
+	}
+}
 
 export interface ParsedMcpServerStatus {
 	state: McpServerState;
@@ -17,70 +81,34 @@ export interface ParsedMcpStatus {
 	configErrors: string[];
 }
 
-function stateOf(text: string): Omit<ParsedMcpServerStatus, "detail"> {
-	if (text.startsWith("needs sign-in")) return { state: "needs-sign-in" };
-	if (text === "disabled") return { state: "disabled" };
-	if (text.startsWith("disconnected")) return { state: "disconnected" };
-	if (text.startsWith("failed")) return { state: "failed" };
-	if (text === "starting" || text.startsWith("connecting")) return { state: "starting" };
-	const connected = /^connected(?:(?:,| ·) (\d+) tools?)?/.exec(text);
-	if (connected) return { state: "connected", toolCount: Number(connected[1] ?? 0) };
-	return { state: "unknown" };
+export function reportMcpRuntime(
+	statuses: readonly McpRuntimeStatus[],
+	configErrors: readonly string[] = [],
+): ParsedMcpStatus {
+	return {
+		servers: new Map(
+			statuses.map((status) => [
+				status.name,
+				{
+					state: status.state,
+					...(status.toolCount !== undefined ? { toolCount: status.toolCount } : {}),
+					detail: redactMcpText(status.detail ?? ""),
+				},
+			]),
+		),
+		configErrors: configErrors.map(redactMcpText),
+	};
 }
 
-export function parseMcpStatusText(text: string): ParsedMcpStatus | null {
-	const servers = new Map<string, ParsedMcpServerStatus>();
-	const configErrors: string[] = [];
-	if (text.startsWith(NO_SERVERS_PREFIX)) return { servers, configErrors };
-	let current: ParsedMcpServerStatus | undefined;
-	let diagnostic: number | undefined;
-	for (const line of text.split("\n")) {
-		if (line.startsWith("    ") && current) {
-			current.detail += `\n${line.trim()}`;
-			continue;
-		}
-		if (line.startsWith("config error: ")) {
-			diagnostic = configErrors.push(line.slice("config error: ".length)) - 1;
-			current = undefined;
-			continue;
-		}
-		if (line.startsWith("overridden: ")) {
-			current = undefined;
-			diagnostic = undefined;
-			continue;
-		}
-		const match = SERVER_LINE.exec(line);
-		if (!match?.[1] || match[2] === undefined || !EXPOSURE_SUFFIX.test(match[2])) {
-			if (diagnostic === undefined) return null;
-			configErrors[diagnostic] += `\n${line}`;
-			continue;
-		}
-		diagnostic = undefined;
-		const body = match[2].replace(EXPOSURE_SUFFIX, "");
-		current = { ...stateOf(body), detail: line };
-		servers.set(match[1], current);
-	}
-	for (const server of servers.values()) server.detail = redactMcpText(server.detail);
-	return { servers, configErrors: configErrors.map(redactMcpText) };
-}
-
-export function parseMcpAttentionNotice(text: string): ParsedMcpStatus | null {
-	if (!text.startsWith(MCP_ATTENTION_PREFIX)) return null;
-	const servers = new Map<string, ParsedMcpServerStatus>();
-	const configErrors: string[] = [];
-	for (const raw of text.slice(MCP_ATTENTION_PREFIX.length).split("\n")) {
-		const line = raw.trim();
-		if (!line || line.startsWith("Run /mcp")) continue;
-		if (line.startsWith("config: ")) {
-			configErrors.push(redactMcpText(line.slice("config: ".length)));
-			continue;
-		}
-		const match = SERVER_LINE.exec(line);
-		if (match?.[1] && match[2] !== undefined) {
-			servers.set(match[1], { ...stateOf(match[2]), detail: redactMcpText(line) });
-		}
-	}
-	return { servers, configErrors };
+export function formatMcpRuntime(statuses: readonly McpRuntimeStatus[]): string {
+	if (statuses.length === 0) return "No MCP servers configured.";
+	return statuses
+		.map((status) => {
+			const tools = status.toolCount !== undefined ? `, ${status.toolCount} tools` : "";
+			const detail = status.detail ? `\n    ${status.detail.split("\n").join("\n    ")}` : "";
+			return `${status.name}: ${status.state}${tools}${detail}`;
+		})
+		.join("\n");
 }
 
 export function deriveMcpServerStatuses(options: {

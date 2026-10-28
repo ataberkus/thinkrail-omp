@@ -6,11 +6,10 @@ export type {
 export { listExtensionCatalog } from "./catalog";
 export {
 	type ExtensionDisabled,
-	omitDisabledRegistryExtensions,
-	preferRegistryTools,
+	type RegistryExtensionFactory,
 	type RegistryExtensionKind,
-	registryExtensionName,
 	registryInlineExtensions,
+	registryToolOwner,
 } from "./inline";
 export { type InteractiveTools, interactiveTools } from "./interactive";
 export { type ServerExtensionEntry, serverExtensions } from "./registry";

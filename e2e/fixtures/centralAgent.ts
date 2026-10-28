@@ -48,22 +48,31 @@ export function writeE2eAgentSettings(
 	const target = resolveE2eModel(env);
 	mkdirSync(agentDir, { recursive: true });
 	writeFileSync(
-		join(agentDir, "settings.json"),
-		`${JSON.stringify(
+		join(agentDir, "config.yml"),
+		Bun.YAML.stringify(
 			{
-				defaultProvider: target.provider,
-				defaultModel: target.id,
+				modelRoles: { default: `${target.provider}/${target.id}` },
 				defaultThinkingLevel: "low",
 			},
 			null,
 			2,
-		)}\n`,
+		),
 	);
 	return target;
 }
 
+export const LOCAL_AGENT_MODEL_AND_AUTH_FILES = [
+	"agent.db",
+	"agent.db-wal",
+	"agent.db-shm",
+	"models.yml",
+	"models.yaml",
+	"models.json",
+	"models.yml.bak",
+] as const;
+
 export function removeLocalAgentModelAndAuth(agentDir: string = E2E_PI_AGENT_DIR): void {
-	for (const file of ["auth.json", "models.json", "auth.json.bak", "models.json.bak"]) {
+	for (const file of LOCAL_AGENT_MODEL_AND_AUTH_FILES) {
 		rmSync(join(agentDir, file), { force: true });
 	}
 }

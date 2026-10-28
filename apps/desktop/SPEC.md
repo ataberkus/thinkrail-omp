@@ -85,15 +85,20 @@ another.
    typical profile, seconds on a slow one); overlapping it with the splash and the bundle import hides up to
    that time. The bundle's own `shellEnv` copy is a separate module instance, so the run is cached on a
    `Symbol.for` global key: its `bootHost()` call awaits the same run instead of probing again. That bundle is
-   built with pi's `PI_BUNDLED_NODE=true` define, which makes PI use its embedded-modules extension loader
-   (static jiti with Babel bundled, plus virtual modules) for external extensions such as Central. Without the
-   define a single-file bundle is treated as a plain Node runtime and PI's lazy Babel `require` cannot resolve
-   inside it ([[submodule-server-agent]] owns the seam). Flattening PI into Electrobun's normal entry is still
-   forbidden: it would load `bun-pty` before `BUN_PTY_LIB` is set.
-4. The runtime value-imports the four bundled pi-package factories (`pi-web-access`, `pi-spec-graph`,
+   built with `@thinkrail/server/build-support`'s `engineBundledBuildConfig()` ([[module-cli]] holds the
+   rationale): omp's `PI_BUNDLED` define switches its extension loader to bundled mode, and a build plugin
+   supplies the `omp-legacy-pi-modules` registry that mode imports, so an external extension such as
+   Central gets the bundle's own `@oh-my-pi/*` instances. Without the define the loader resolves those
+   imports itself and, with no `node_modules` beside the bundle, Bun auto-installs a second omp for the
+   extension. omp's native addons (`pi_natives.<tag>[-modern|-baseline].node` for the host target) are
+   staged to `.stage/native` and copied to `Resources/app/native`, the `../native` directory omp's loader
+   probes beside the bundle (`import.meta.dir`), so they stay physical files and nothing is extracted
+   at run time. Flattening the engine into Electrobun's normal entry is still forbidden: it would load
+   `bun-pty` before `BUN_PTY_LIB` is set. omp's worker processes and threads have no host here yet: they
+   re-enter `Bun.main` (Electrobun's entry) only when a worker host is declared, and fail closed otherwise.
+4. The runtime value-imports the three bundled pi-package factories (`pi-spec-graph`,
    `pi-thinkrail-workflow`, `pi-todos`) and calls `registerBundledRuntime()` with those factories, the
-   `pi-web-access` factory needed by delegation children (picked by `BuildRuntimeSources.webAccessIndex`,
-   never by position), the staged skills (every `BuildRuntimeSources.skillRoots` entry flattened into one
+   staged skills (every `BuildRuntimeSources.skillRoots` entry flattened into one
    dir, duplicate routes rejected), and macOS/Windows trash helpers. ThinkRail extensions from the server
    registry ([[submodule-server-extensions]]) need no generated entry: their factories reach the bundle
    through `@thinkrail/server`'s static import graph. The generator's key map must satisfy every key of the server-owned
@@ -405,8 +410,9 @@ builds the shared web artifact and stages the application-specific PTY/trash/ski
 runtime. The hook invokes the real Bun CLI both to read the
 `@thinkrail/server/build-support` manifest (which value-loads the server extension registry and with it
 the pi graph — Cottontail's module runtime cannot evaluate that graph; `typebox`'s `String` export is the
-first casualty) and to bundle the separately staged `.ts` server runtime rather than changing PI's
-bundler. That split dates from Hutch running hooks under Cottontail; Hutch 0.28.2 runs them under Bun, so
+first casualty) and, through `bun --eval`, to bundle the separately staged `.ts` server runtime with
+`Bun.build` and build-support's engine configuration, which is functions (a build plugin) and so cannot
+cross a JSON manifest, and to copy the host target's engine native addons. That split dates from Hutch running hooks under Cottontail; Hutch 0.28.2 runs them under Bun, so
 the child Bun processes are now removable rather than required. Its transient factory entry is removed
 even on failure. Staged resources include the workflow SPEC consumed by the bundled skills. A documented
 `postBuild` hook removes staging after the framework has copied it; a failed build's staging is replaced

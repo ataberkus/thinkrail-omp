@@ -2,7 +2,7 @@
 id: module-pi-visualize
 type: module-design
 status: draft
-title: "@thinkrail/pi-visualize — the visualize tool for vanilla pi"
+title: "@thinkrail/pi-visualize — the visualize tool for vanilla omp"
 parent: module-pi-extensions
 tags: [pi-extension, visualization, mermaid]
 ---
@@ -11,13 +11,14 @@ tags: [pi-extension, visualization, mermaid]
 
 The published, portable half of the visualization capability: one tool, `visualize`, that validates a
 diagram, comparison or file-preview request, returns a markdown fallback as the model-facing result, and draws the
-result in pi's terminal UI. It knows nothing about ThinkRail. ThinkRail composes it through [[module-ext-visualize]]'s server half
+result in omp's terminal UI. It knows nothing about ThinkRail. ThinkRail composes it through [[module-ext-visualize]]'s server half
 (the successor of the deleted `packages/pi-visualize`), injecting its strict validator.
 
 ## Public surface
 
-- **Default export** — the pi `ExtensionFactory` with the default configuration; what `pi install`
-  loads through the `pi` manifest.
+- **Default export** — the omp `ExtensionFactory` with the default configuration; what
+  `omp plugin install` loads through the `omp` manifest. The tool is registered with
+  `loadMode: "essential"` so omp does not hide it behind tool search.
 - **`createVisualizeExtension({ validateMermaid?, checkFile?, scratchDir? })`** — returns an `ExtensionFactory` with an injected
   `MermaidValidator: (source) => void | Promise<void>`. The validator **replaces** the default check
   (never supplements it, so a stricter engine can accept syntax the probe would reject). The package
@@ -40,16 +41,18 @@ result in pi's terminal UI. It knows nothing about ThinkRail. ThinkRail composes
   host renders it with its existing file renderers and review comments anchor to a real file the agent
   then edits in place. The flip side is that a rendered file is always its current content: iterating on a
   mockup updates every earlier card, so the guideline tells the agent to copy a proposal it wants to keep
-  visible and pass the copy as `before`. The tool's one `promptGuidelines` entry asks the agent to write a self-contained
+  visible and pass the copy as `before`. The tool's one prompt guideline (appended to the system prompt from `before_agent_start` while the
+  tool is active, because omp tools have no guidelines field) asks the agent to write a self-contained
   HTML mockup (inline CSS, `data:` images, controls drawn with styled elements because hosts may strip
   scripts, form controls and external resources) and show it this way whenever it proposes or asks
   about a UI change. The model-facing result and the terminal are one line naming the path(s); a
   terminal user opens them in a browser.
 - **Dependency-light for vanilla users: `lovely-mermaid`.** The package depends on `lovely-mermaid` only
   (zero dependencies, ~1 MB, synchronous, Apache-2.0). It is the maintained successor of `grok-mermaid`,
-  the engine pi itself uses to draw ```` ```mermaid ```` fences in chat messages — pi never applies that
-  to tool results, hence this package's own renderer — so a `visualize` diagram looks like one the
-  model writes inline. `mermaid` (~83 MB with its tree) and the `linkedom` DOM shim it needs under
+  the engine family that draws ```` ```mermaid ```` fences in chat messages, so a `visualize` diagram
+  looks like one the model writes inline. omp's `Markdown` component draws mermaid fences itself through
+  its markdown theme's `resolveMermaidAscii`; this package renders tool results with that hook removed so
+  its own width-aware tiers below decide when source is shown. `mermaid` (~83 MB with its tree) and the `linkedom` DOM shim it needs under
   Node/Bun were rejected here: they buy strict parsing but no terminal rendering, and a host that
   renders with mermaid can inject that parser through the seam.
 - **Post-mortem: `beautiful-mermaid` was replaced.** Its ASCII engine (shared by the `@vercel` and
@@ -76,21 +79,21 @@ result in pi's terminal UI. It knows nothing about ThinkRail. ThinkRail composes
   diagram is drawn only when the art is **complete** (no warnings) and every row fits the width by
   pi-tui's `visibleWidth` (which agrees with the renderer's grapheme-correct widths, so CJK and emoji
   labels draw); otherwise, and for kinds the renderer does not draw, the pi-tui `Markdown` fence of the
-  source is shown. Span roles map to pi's theme exactly as pi's native renderer does (`border` →
+  source is shown. Span roles map to omp's theme as pi's native renderer did (`border` →
   `borderMuted`, `text` → `text`, `edge` → `accent`, `edgeLabel` → `muted`). A diagram is never
   word-wrapped. Collapsed = drawing only; expanded = drawing + source fence. Diagrams render from
   defensively checked `result.details`; comparisons, errors (`context.isError`) and missing details
   render from `result.content`; partial results show a placeholder. Image-tier rendering
   (Kitty/iTerm2) is deferred: it needs SVG rasterisation without a browser and degrades under tmux/SSH.
-- **Dual runtime.** Shipped code uses `node:`-free standard ESM and pi's host-provided packages only,
-  so it runs under Node (vanilla pi, jiti) and Bun (ThinkRail). Runtime imports from
-  `@earendil-works/pi-coding-agent` are limited to `getMarkdownTheme`; `@earendil-works/pi-tui` supplies
-  `Text`, `Markdown`, `visibleWidth`.
+- **Portable runtime.** Shipped code uses `node:`-free standard ESM and omp's host-provided packages
+  only; omp and ThinkRail both run it under Bun. Runtime imports from `@oh-my-pi/pi-coding-agent` are
+  limited to `getMarkdownTheme` and the `z` schema builder; `@oh-my-pi/pi-tui` supplies `Text`,
+  `TruncatedText`, `Markdown`, `truncateToWidth`, `visibleWidth`.
 
 ## Boundary
 
-- **Allowed deps:** `lovely-mermaid` (exact pin); peers `@earendil-works/pi-ai` (`StringEnum`),
-  `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, `typebox`.
+- **Allowed deps:** `lovely-mermaid` (exact pin); peers `@oh-my-pi/pi-coding-agent`,
+  `@oh-my-pi/pi-tui`.
 - **Forbidden:** anything from ThinkRail (`@thinkrail/*`, `apps/*`, `packages/server`), `mermaid`,
   `linkedom`, Bun-specific APIs.
 

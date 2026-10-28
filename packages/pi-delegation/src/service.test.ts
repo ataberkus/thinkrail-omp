@@ -1,22 +1,24 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore, type Model, type ProviderHeaders } from "@earendil-works/pi-ai";
-import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
+import { deflateSync } from "node:zlib";
+import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	type AgentSession,
 	createAgentSession,
-	ModelRegistry,
-	ModelRuntime,
+	type ModelRegistry,
 	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	createDelegationService,
 	DelegationError,
@@ -49,75 +51,95 @@ function tmpDir(prefix: string): string {
 	return dir;
 }
 
-let priorAgentDir: string | undefined;
+let agentDir: IsolatedAgentDir | undefined;
 let priorOffline: string | undefined;
-let runtime: ModelRuntime;
+let runtime: ModelRegistry;
 let parent: AgentSession;
 let parentCwd: string;
 let delegationRoot: string;
 let service: DelegationService;
 const events: LifecycleEvent[] = [];
 
+type RequestHeaders = Record<string, string | undefined>;
+
+async function isolatedRegistry(): Promise<ModelRegistry> {
+	return (await createFauxModelRegistry(Settings.isolated({}))).modelRegistry;
+}
+
 function registerFauxProvider(
-	target: ModelRuntime,
+	target: ModelRegistry,
 	id: string,
 	options: {
 		headers?: Record<string, string>;
-		onRequestHeaders?: (headers: ProviderHeaders | undefined) => void;
+		onRequestHeaders?: (headers: RequestHeaders) => void;
+		sourceId?: string;
+		input?: ("text" | "image")[];
 	} = {},
 ): void {
-	target.registerProvider(id, {
-		api: faux.api,
-		baseUrl: "http://faux.local",
-		apiKey: "faux",
-		streamSimple: (model, context, streamOptions) => {
-			options.onRequestHeaders?.(streamOptions?.headers);
-			return faux.streamSimple(model, context, streamOptions);
-		},
-		...(options.headers ? { headers: options.headers } : {}),
-		models: [
-			{
-				id,
-				name: id,
-				api: faux.api,
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 100_000,
-				maxTokens: 4096,
+	const api = id === "faux" ? faux.api : `faux-${id}`;
+	target.registerProvider(
+		id,
+		{
+			api,
+			baseUrl: "http://faux.local",
+			apiKey: "faux",
+			streamSimple: (model, context, streamOptions) => {
+				options.onRequestHeaders?.({ ...model.headers, ...streamOptions?.headers });
+				return faux.streamSimple(model, context, streamOptions);
 			},
-		],
-	});
+			...(options.headers ? { headers: options.headers } : {}),
+			models: [
+				{
+					id,
+					name: id,
+					api,
+					reasoning: false,
+					input: options.input ?? ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 100_000,
+					maxTokens: 4096,
+				},
+			],
+		},
+		options.sourceId,
+	);
 }
 
-function fauxModel(): Model<string> {
-	const model = runtime.getModel("faux", "faux");
+function fauxModel(): Model {
+	const model = runtime.find("faux", "faux");
 	if (!model) throw new Error("faux model not registered");
 	return model;
 }
 
 beforeAll(async () => {
-	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = tmpDir("pi-delegation-agentdir-");
+	agentDir = isolateAgentDir(tmpDir("pi-delegation-agentdir-"));
 	priorOffline = process.env.PI_OFFLINE;
 	process.env.PI_OFFLINE = "1";
 
-	runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
+	const settings = Settings.isolated({});
+	const created = await createFauxModelRegistry(settings);
+	runtime = created.modelRegistry;
 	registerFauxProvider(runtime, "faux");
 
 	parentCwd = tmpDir("pi-delegation-parent-");
-	const created = await createAgentSession({
+	const parentSession = await createAgentSession({
 		cwd: parentCwd,
-		modelRuntime: runtime,
+		agentDir: agentDir?.dir ?? parentCwd,
+		settings,
+		authStorage: created.authStorage,
+		modelRegistry: runtime,
 		sessionManager: SessionManager.inMemory(parentCwd),
-		settingsManager: SettingsManager.inMemory({}),
 		model: fauxModel(),
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
 	});
-	parent = created.session;
+	parent = parentSession.session;
 
 	delegationRoot = tmpDir("pi-delegation-root-");
 	const parentProjection = (id: string) =>
@@ -128,15 +150,14 @@ beforeAll(async () => {
 		resolveParent: parentProjection,
 		delegationRoot,
 		scope: "ws-test",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 	});
 	service.onLifecycle((event) => events.push(event));
 });
 
-afterAll(() => {
-	parent?.dispose();
-	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+afterAll(async () => {
+	await parent?.dispose();
+	agentDir?.restore();
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
 	for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
@@ -281,7 +302,7 @@ test("a foreground run completes: outcome, registry, lineage storage, lifecycle 
 	expect(outcome.finalText).toBe("CHILD_DONE");
 	expect(outcome.details.childSessionId).toBe(child.sessionId);
 	expect(outcome.details.model).toBe("faux/faux");
-	expect(outcome.details.thinkingLevel).toBe(parent.thinkingLevel);
+	expect<string | undefined>(outcome.details.thinkingLevel).toBe(parent.thinkingLevel ?? "off");
 	expect(outcome.details.usage.turns).toBe(1);
 	expect(outcome.details.roleName).toBe("scout");
 
@@ -334,7 +355,9 @@ test("a scripted provider error becomes an error OUTCOME, not a rejection", asyn
 });
 
 test("sequential runs report per-run finalText and usage deltas, never cumulative totals", async () => {
-	const longAnswer = "FIRST_LONG_ANSWER ".repeat(20).trim();
+	const longAnswer = Array.from({ length: 20 }, (_, index) => `FIRST_ANSWER_PART_${index}`).join(
+		" ",
+	);
 	faux.setResponses([fauxAssistantMessage(longAnswer), fauxAssistantMessage("TINY")]);
 	const child = await service.createChild(subagentSpec());
 	try {
@@ -354,14 +377,10 @@ test("sequential runs report per-run finalText and usage deltas, never cumulativ
 	}
 });
 
-test("the self-created runtime mirrors public provider registrations and removes stale ones", async () => {
-	const sourceRuntime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	registerFauxProvider(sourceRuntime, "mirrored");
-	const sourceModel = sourceRuntime.getModel("mirrored", "mirrored");
+test("children share the parent's live registry: its providers resolve and removed ones fail", async () => {
+	const sourceRegistry = await isolatedRegistry();
+	registerFauxProvider(sourceRegistry, "mirrored");
+	const sourceModel = sourceRegistry.find("mirrored", "mirrored");
 	if (!sourceModel) throw new Error("mirrored model not registered");
 	const fallback = createDelegationService({
 		resolveParent: (id) =>
@@ -370,7 +389,7 @@ test("the self-created runtime mirrors public provider registrations and removes
 						cwd: parentCwd,
 						model: sourceModel,
 						thinkingLevel: parent.thinkingLevel,
-						modelRegistry: new ModelRegistry(sourceRuntime),
+						modelRegistry: sourceRegistry,
 					}
 				: undefined,
 		delegationRoot,
@@ -393,7 +412,7 @@ test("the self-created runtime mirrors public provider registrations and removes
 		await child.dispose();
 	}
 
-	sourceRuntime.unregisterProvider("mirrored");
+	sourceRegistry.unregisterProvider("mirrored");
 	const staleResult = await fallback.createChild(mirroredSpec).then(
 		() => undefined,
 		(error: unknown) => error,
@@ -403,19 +422,15 @@ test("the self-created runtime mirrors public provider registrations and removes
 	await fallback.disposeChildrenOf(parent.sessionId);
 });
 
-test("the self-created runtime replaces same-id provider configs without retaining omitted fields", async () => {
-	const sourceRuntime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	const requestHeaders: (ProviderHeaders | undefined)[] = [];
-	const captureHeaders = (headers: ProviderHeaders | undefined) => requestHeaders.push(headers);
-	registerFauxProvider(sourceRuntime, "replaced", {
+test("a same-id provider replacement on the shared registry does not retain omitted fields", async () => {
+	const sourceRegistry = await isolatedRegistry();
+	const requestHeaders: RequestHeaders[] = [];
+	const captureHeaders = (headers: RequestHeaders) => requestHeaders.push(headers);
+	registerFauxProvider(sourceRegistry, "replaced", {
 		headers: { "x-stale-secret": "secret" },
 		onRequestHeaders: captureHeaders,
 	});
-	const sourceModel = sourceRuntime.getModel("replaced", "replaced");
+	const sourceModel = sourceRegistry.find("replaced", "replaced");
 	if (!sourceModel) throw new Error("replacement model not registered");
 	const fallback = createDelegationService({
 		resolveParent: (id) =>
@@ -424,7 +439,7 @@ test("the self-created runtime replaces same-id provider configs without retaini
 						cwd: parentCwd,
 						model: sourceModel,
 						thinkingLevel: parent.thinkingLevel,
-						modelRegistry: new ModelRegistry(sourceRuntime),
+						modelRegistry: sourceRegistry,
 					}
 				: undefined,
 		delegationRoot,
@@ -446,8 +461,8 @@ test("the self-created runtime replaces same-id provider configs without retaini
 		await first.dispose();
 	}
 
-	sourceRuntime.unregisterProvider("replaced");
-	registerFauxProvider(sourceRuntime, "replaced", { onRequestHeaders: captureHeaders });
+	sourceRegistry.unregisterProvider("replaced");
+	registerFauxProvider(sourceRegistry, "replaced", { onRequestHeaders: captureHeaders });
 	const second = await fallback.createChild(replacedSpec);
 	try {
 		expect((await second.runQueued("Use new config.")).status).toBe("completed");
@@ -458,21 +473,13 @@ test("the self-created runtime replaces same-id provider configs without retaini
 	}
 });
 
-test("self-created runtimes isolate provider synchronization per parent lineage", async () => {
-	const sourceA = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	const sourceB = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	registerFauxProvider(sourceA, "lineage-a");
-	registerFauxProvider(sourceB, "lineage-b");
-	const modelA = sourceA.getModel("lineage-a", "lineage-a");
-	const modelB = sourceB.getModel("lineage-b", "lineage-b");
+test("child assembly never prunes extension-registered providers from its parents' shared registries", async () => {
+	const sourceA = await isolatedRegistry();
+	const sourceB = await isolatedRegistry();
+	registerFauxProvider(sourceA, "lineage-a", { sourceId: "<inline-0>" });
+	registerFauxProvider(sourceB, "lineage-b", { sourceId: "/extensions/provider-b.ts" });
+	const modelA = sourceA.find("lineage-a", "lineage-a");
+	const modelB = sourceB.find("lineage-b", "lineage-b");
 	if (!modelA || !modelB) throw new Error("lineage models not registered");
 	const multiParent = createDelegationService({
 		resolveParent: (id) => {
@@ -481,7 +488,7 @@ test("self-created runtimes isolate provider synchronization per parent lineage"
 					cwd: parentCwd,
 					model: modelA,
 					thinkingLevel: parent.thinkingLevel,
-					modelRegistry: new ModelRegistry(sourceA),
+					modelRegistry: sourceA,
 				};
 			}
 			if (id === "parent-b") {
@@ -489,13 +496,14 @@ test("self-created runtimes isolate provider synchronization per parent lineage"
 					cwd: parentCwd,
 					model: modelB,
 					thinkingLevel: parent.thinkingLevel,
-					modelRegistry: new ModelRegistry(sourceB),
+					modelRegistry: sourceB,
 				};
 			}
 			return undefined;
 		},
 		delegationRoot,
 		scope: "ws-multi-parent-registry",
+		childExtensionFactories: [() => {}],
 	});
 	const childA = await multiParent.createChild(
 		subagentSpec({
@@ -504,6 +512,7 @@ test("self-created runtimes isolate provider synchronization per parent lineage"
 				systemPrompt: "lineage a",
 				model: { provider: "lineage-a", id: "lineage-a" },
 				tools: [],
+				extensions: true,
 			},
 		}),
 	);
@@ -514,12 +523,15 @@ test("self-created runtimes isolate provider synchronization per parent lineage"
 				systemPrompt: "lineage b",
 				model: { provider: "lineage-b", id: "lineage-b" },
 				tools: [],
+				extensions: true,
 			},
 		}),
 	);
+	expect(sourceA.find("lineage-a", "lineage-a")).toBeDefined();
+	expect(sourceB.find("lineage-b", "lineage-b")).toBeDefined();
 	faux.setResponses([fauxAssistantMessage("LINEAGE_A_STILL_WORKS")]);
 	try {
-		const outcome = await childA.runQueued("Run after parent B synchronized.");
+		const outcome = await childA.runQueued("Run after parent B's child was assembled.");
 		expect(outcome.status).toBe("completed");
 		expect(outcome.finalText).toBe("LINEAGE_A_STILL_WORKS");
 	} finally {
@@ -528,7 +540,7 @@ test("self-created runtimes isolate provider synchronization per parent lineage"
 	}
 });
 
-test("a modelRuntime provider is resolved per createChild, never captured at service creation", async () => {
+test("a modelRegistry provider is resolved per createChild, never captured at service creation", async () => {
 	let resolves = 0;
 	const generational = createDelegationService({
 		resolveParent: (id) =>
@@ -537,7 +549,7 @@ test("a modelRuntime provider is resolved per createChild, never captured at ser
 				: undefined,
 		delegationRoot,
 		scope: "ws-live-runtime",
-		modelRuntime: () => {
+		modelRegistry: () => {
 			resolves++;
 			return runtime;
 		},
@@ -552,12 +564,8 @@ test("a modelRuntime provider is resolved per createChild, never captured at ser
 	}
 });
 
-test("a parent's retained runtime wins over the service-level binding", async () => {
-	const parentRuntime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
+test("a parent's own registry wins over the service-level binding", async () => {
+	const parentRuntime = await isolatedRegistry();
 	registerFauxProvider(parentRuntime, "fauxp");
 	const generational = createDelegationService({
 		resolveParent: (id) =>
@@ -566,12 +574,12 @@ test("a parent's retained runtime wins over the service-level binding", async ()
 						cwd: parentCwd,
 						model: parent.model,
 						thinkingLevel: parent.thinkingLevel,
-						modelRuntime: parentRuntime,
+						modelRegistry: parentRuntime,
 					}
 				: undefined,
 		delegationRoot,
 		scope: "ws-parent-runtime",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 	});
 	faux.setResponses([fauxAssistantMessage("PARENT_GEN_DONE")]);
 	const child = await generational.createChild(
@@ -684,7 +692,7 @@ test("the per-parent semaphore paces runs FIFO", async () => {
 				: undefined,
 		delegationRoot,
 		scope: "ws-paced",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		maxConcurrentPerParent: 1,
 	});
 	const order: string[] = [];
@@ -722,7 +730,7 @@ test("raising the per-parent limit starts a queued run while its sibling still r
 				: undefined,
 		delegationRoot,
 		scope: "ws-resized",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		maxConcurrentPerParent: 1,
 	});
 	const slow = gate();
@@ -761,7 +769,7 @@ test("an abort while QUEUED releases immediately — not after a slot frees", as
 				: undefined,
 		delegationRoot,
 		scope: "ws-queued-abort",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		maxConcurrentPerParent: 1,
 	});
 	faux.setResponses([
@@ -809,7 +817,7 @@ test("a child prepared across parent teardown never registers after the cleanup 
 						cwd: parentCwd,
 						model: parent.model,
 						thinkingLevel: parent.thinkingLevel,
-						modelRuntime: runtime,
+						modelRegistry: runtime,
 					}
 				: undefined,
 		delegationRoot,
@@ -862,7 +870,7 @@ test("a stale preparation cannot register into a replacement parent lifetime", a
 						cwd: parentCwd,
 						model: parent.model,
 						thinkingLevel: parent.thinkingLevel,
-						modelRuntime: runtime,
+						modelRegistry: runtime,
 					}
 				: undefined,
 		delegationRoot,
@@ -911,7 +919,7 @@ test.each([
 				: undefined,
 		delegationRoot,
 		scope: "ws-handle-queued-abort",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		maxConcurrentPerParent: 1,
 	});
 	const started = gate();
@@ -1069,7 +1077,7 @@ test("ChildHandle.dispose settles a queued run before removing the child", async
 				: undefined,
 		delegationRoot,
 		scope: "ws-handle-queued-dispose",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		maxConcurrentPerParent: 1,
 	});
 	faux.setResponses([
@@ -1109,10 +1117,15 @@ test("concurrent child and parent disposal share one teardown and both await it"
 				: undefined,
 		delegationRoot,
 		scope: "ws-concurrent-dispose",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
+	});
+	let providerCalled = () => {};
+	const requested = new Promise<void>((resolve) => {
+		providerCalled = resolve;
 	});
 	faux.setResponses([
 		async () => {
+			providerCalled();
 			await Bun.sleep(300);
 			return fauxAssistantMessage("SLOW_DONE");
 		},
@@ -1123,7 +1136,7 @@ test("concurrent child and parent disposal share one teardown and both await it"
 		if ("sessionId" in event && event.sessionId === child.sessionId) events.push(event.type);
 	});
 	const run = child.runQueued("Slow.");
-	await Bun.sleep(20);
+	await requested;
 	expect(child.snapshot?.status).toBe("running");
 	const childDisposal = child.dispose();
 
@@ -1153,7 +1166,7 @@ test("a replacement parent lineage survives an older cascade settling", async ()
 				: undefined,
 		delegationRoot,
 		scope: "ws-replacement-lineage",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 	});
 	const started = gate();
 	const finish = gate();
@@ -1189,7 +1202,7 @@ test("disposeChildrenOf marks every child before awaiting aborts — a queued si
 				: undefined,
 		delegationRoot,
 		scope: "ws-dispose-atomic",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		maxConcurrentPerParent: 2,
 	});
 	const started: string[] = [];
@@ -1231,15 +1244,17 @@ test("extensions opt-in loads ONLY the embedder-bound curated set — and only w
 				: undefined,
 		delegationRoot,
 		scope: "ws-ext",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		childExtensionFactories: [
 			(pi) => {
 				factoryLoads++;
+				const parameters = pi.zod.object({});
 				pi.registerTool({
 					name: "ping",
 					label: "Ping",
 					description: "Answers pong",
-					parameters: Type.Object({}),
+					parameters,
+					loadMode: "essential",
 					execute: async () => ({ content: [{ type: "text", text: "PONG" }], details: {} }),
 				});
 			},
@@ -1267,15 +1282,32 @@ test("extensions opt-in loads ONLY the embedder-bound curated set — and only w
 	}
 });
 
-function pngHeaderOnly(width: number, height: number): Buffer {
-	const ihdr = Buffer.alloc(25);
-	ihdr.writeUInt32BE(13, 0);
-	ihdr.write("IHDR", 4, "ascii");
-	ihdr.writeUInt32BE(width, 8);
-	ihdr.writeUInt32BE(height, 12);
-	ihdr[16] = 8;
-	ihdr[17] = 2;
-	return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr]);
+function pngChunk(type: string, data: Buffer): Buffer {
+	const length = Buffer.alloc(4);
+	length.writeUInt32BE(data.length);
+	const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+	const crc = Buffer.alloc(4);
+	crc.writeUInt32BE(Bun.hash.crc32(body));
+	return Buffer.concat([length, body, crc]);
+}
+
+function solidPng(width: number, height: number): Buffer {
+	const header = Buffer.alloc(13);
+	header.writeUInt32BE(width, 0);
+	header.writeUInt32BE(height, 4);
+	header[8] = 8;
+	header[9] = 2;
+	const rows = Buffer.alloc((width * 3 + 1) * height);
+	return Buffer.concat([
+		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+		pngChunk("IHDR", header),
+		pngChunk("IDAT", deflateSync(rows)),
+		pngChunk("IEND", Buffer.alloc(0)),
+	]);
+}
+
+function pngWidth(base64: string): number {
+	return Buffer.from(base64, "base64").readUInt32BE(16);
 }
 
 test("buildChildSettings supplies the settings a child's tools run on, with the parent's trust", async () => {
@@ -1292,13 +1324,14 @@ test("buildChildSettings supplies the settings a child's tools run on, with the 
 				: undefined,
 		delegationRoot,
 		scope: "ws-settings",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		buildChildSettings: (cwd, projectTrusted) => {
 			calls.push([cwd, projectTrusted]);
-			return SettingsManager.inMemory({ images: { autoResize: false } }, { projectTrusted });
+			return Settings.isolated({ "images.autoResize": false });
 		},
 	});
-	writeFileSync(join(parentCwd, "settings-raw.png"), pngHeaderOnly(9000, 10));
+	registerFauxProvider(runtime, "faux-vision", { input: ["text", "image"] });
+	writeFileSync(join(parentCwd, "settings-raw.png"), solidPng(9000, 10));
 	let toolResult: unknown;
 	faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("read", { path: "settings-raw.png" })),
@@ -1308,15 +1341,33 @@ test("buildChildSettings supplies the settings a child's tools run on, with the 
 		},
 	]);
 	const child = await scoped.createChild(
-		subagentSpec({ session: { systemPrompt: "read it", tools: ["read"] } }),
+		subagentSpec({
+			session: {
+				systemPrompt: "read it",
+				tools: ["read"],
+				model: { provider: "faux-vision", id: "faux-vision" },
+			},
+		}),
 	);
 	try {
 		expect(calls).toEqual([[parentCwd, false]]);
 		expect((await child.runQueued("Read settings-raw.png.")).finalText).toBe("READ");
-		expect(toolResult).toMatchObject({
-			role: "toolResult",
-			content: [{ type: "text" }, { type: "image", mimeType: "image/png" }],
-		});
+		expect(toolResult).toMatchObject({ role: "toolResult" });
+		const image =
+			typeof toolResult === "object" && toolResult !== null && "content" in toolResult
+				? [toolResult.content]
+						.flat()
+						.find(
+							(block): block is { type: "image"; data: string } =>
+								typeof block === "object" &&
+								block !== null &&
+								"type" in block &&
+								block.type === "image" &&
+								"data" in block &&
+								typeof block.data === "string",
+						)
+				: undefined;
+		expect(image && pngWidth(image.data)).toBe(9000);
 	} finally {
 		await scoped.disposeChildrenOf(parent.sessionId);
 	}
@@ -1332,7 +1383,7 @@ test("the base set loads for every child, opted into extensions or not, ahead of
 				: undefined,
 		delegationRoot,
 		scope: "ws-base",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 		childBaseExtensionFactories: [
 			(pi) => {
 				loads.push("base");
@@ -1359,8 +1410,15 @@ test("the base set loads for every child, opted into extensions or not, ahead of
 	}
 });
 
-test("a child's pi-level project trust is its parent context's, trusted when the parent states none", async () => {
+test("a child's project trust is its parent context's, gating project skills; trusted when the parent states none", async () => {
+	const skillDir = join(parentCwd, ".omp", "skills", "trust-probe");
+	mkdirSync(skillDir, { recursive: true });
+	writeFileSync(
+		join(skillDir, "SKILL.md"),
+		"---\nname: trust-probe\ndescription: Project-scoped probe skill\n---\nProbe body.\n",
+	);
 	const seen: boolean[] = [];
+	const settingsTrust: boolean[] = [];
 	const trustedService = (trusted: boolean | undefined) =>
 		createDelegationService({
 			resolveParent: (id) =>
@@ -1374,39 +1432,36 @@ test("a child's pi-level project trust is its parent context's, trusted when the
 					: undefined,
 			delegationRoot,
 			scope: `ws-trust-${trusted}`,
-			modelRuntime: runtime,
-			childExtensionFactories: [
-				(pi) => {
-					pi.registerTool({
-						name: "trust_probe",
-						label: "Trust probe",
-						description: "Reports project trust",
-						parameters: Type.Object({}),
-						execute: async (_id, _params, _signal, _update, ctx) => {
-							seen.push(ctx.isProjectTrusted());
-							return { content: [{ type: "text", text: "OK" }], details: {} };
-						},
-					});
-				},
-			],
+			modelRegistry: runtime,
+			buildChildSettings: (_cwd, projectTrusted) => {
+				settingsTrust.push(projectTrusted);
+				return Settings.isolated({});
+			},
 		});
-	for (const trusted of [false, true, undefined]) {
-		const scoped = trustedService(trusted);
-		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("trust_probe", {})),
-			fauxAssistantMessage("DONE"),
-		]);
-		const child = await scoped.createChild(
-			subagentSpec({
-				session: { systemPrompt: "probe", tools: ["trust_probe"], extensions: true },
-			}),
-		);
-		try {
-			expect((await child.runQueued("Probe.")).status).toBe("completed");
-		} finally {
-			await scoped.disposeChildrenOf(parent.sessionId);
+	try {
+		for (const trusted of [false, true, undefined]) {
+			const scoped = trustedService(trusted);
+			faux.setResponses([
+				(context) => {
+					seen.push(context.systemPrompt?.join("\n").includes("trust-probe") ?? false);
+					return fauxAssistantMessage("DONE");
+				},
+			]);
+			const child = await scoped.createChild(
+				subagentSpec({
+					session: { systemPrompt: "probe", tools: ["read"], skills: ["trust-probe"] },
+				}),
+			);
+			try {
+				expect((await child.runQueued("Probe.")).status).toBe("completed");
+			} finally {
+				await scoped.disposeChildrenOf(parent.sessionId);
+			}
 		}
+	} finally {
+		rmSync(join(parentCwd, ".omp"), { recursive: true, force: true });
 	}
+	expect(settingsTrust).toEqual([false, true, true]);
 	expect(seen).toEqual([false, true, true]);
 });
 
@@ -1424,7 +1479,7 @@ test("a child whose project trust changed while it was being prepared is dispose
 				: undefined,
 		delegationRoot,
 		scope: "ws-trust-flip",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 	});
 	await expect(flipping.createChild(subagentSpec())).rejects.toMatchObject({
 		code: "unknown-parent",
@@ -1473,8 +1528,8 @@ test("parent-owned children can opt into captured history without inheriting its
 	try {
 		expect(child.record.originKind).toBe("fork");
 		expect(child.record.entryId).toBe(history.entryId ?? undefined);
-		const manager = SessionManager.open(child.record.sessionFile);
-		expect(manager.buildSessionContext().model).toEqual({ provider: "faux", modelId: "faux" });
+		const manager = await SessionManager.open(child.record.sessionFile);
+		expect(manager.buildSessionContext().models.default).toBe("faux/faux");
 		expect(manager.buildSessionContext().thinkingLevel).toBe("off");
 		faux.setResponses([fauxAssistantMessage("CAPTURED_PARENT")]);
 		const outcome = await child.runQueued("continue");

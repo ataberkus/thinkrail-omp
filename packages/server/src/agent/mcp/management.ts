@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
-import { getAgentDir, type McpServerConfig } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import type { McpProjectOverride, McpServerScope } from "@thinkrail/contracts";
 import { CodedError } from "@thinkrail/shared/codedError";
 import {
 	fingerprintMcpEntry,
 	globalMcpConfigPath,
+	type HostMcpServerConfig,
 	isOverrideEntry,
 	isRecord,
 	loadHostMcpConfig,
@@ -25,7 +26,7 @@ export function effectiveMcpServerConfig(options: {
 	projectTrusted: boolean;
 	policy: McpProjectPolicy;
 	name: string;
-}): McpServerConfig | undefined {
+}): HostMcpServerConfig | undefined {
 	return loadHostMcpConfig({ ...options, agentDir: getAgentDir() }).servers.find(
 		(server) => server.name === options.name,
 	)?.config;
@@ -74,7 +75,7 @@ export function writeMcpServerEntry(options: {
 	const { scope, worktree, name, entry, mode } = options;
 	const validated = validateMcpServerConfig(name, entry);
 	if (typeof validated === "string") throw invalid(validated);
-	if (scope === "project" && "url" in validated && validated.auth) {
+	if (scope === "project" && validated.auth) {
 		throw invalid(`server "${name}": auth is only allowed in the global mcp.json`);
 	}
 	const path = configPath(scope, worktree);
@@ -124,7 +125,7 @@ export function shareMcpOverrideWithRepo(options: {
 	const existing = readRawEntry(path, name);
 	if (existing !== undefined && (!isRecord(existing) || !isOverrideEntry(existing))) {
 		throw invalid(
-			`The repository's .pi/mcp.json already defines "${name}" — edit that entry instead.`,
+			`The repository's .omp/mcp.json already defines "${name}" — edit that entry instead.`,
 		);
 	}
 	if (

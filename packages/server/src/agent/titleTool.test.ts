@@ -1,8 +1,24 @@
-import { afterEach, expect, test } from "bun:test";
-import type { ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	type AgentSession,
+	createAgentSession,
+	type ExtensionFactory,
+	SessionManager,
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+	registerFaux,
+} from "pi-faux";
 import { childExtensionFactories } from "./extensions";
 import {
-	createSetTitleTool,
 	pendingNamingRule,
 	SET_TITLE_TOOL_NAME,
 	type SetTitleParams,
@@ -10,44 +26,99 @@ import {
 	setTitleToolHost,
 } from "./titleTool";
 
+const root = mkdtempSync(join(tmpdir(), "title-tool-"));
+let agentDir: IsolatedAgentDir | undefined;
+
+beforeAll(() => {
+	agentDir = isolateAgentDir(join(root, "agent"));
+});
+
+afterAll(() => {
+	agentDir?.restore();
+	rmSync(root, { recursive: true, force: true });
+});
+
 afterEach(() => setTitleToolHost(null));
 
-const ctx = { sessionManager: { getSessionId: () => "s-1" } } as unknown as ExtensionToolContext;
+const faux = createFauxCore({ provider: "title-faux" });
+
+async function withSession(
+	extensions: ExtensionFactory[],
+	run: (session: AgentSession) => Promise<void>,
+): Promise<void> {
+	const settings = Settings.isolated({});
+	const { authStorage, modelRegistry } = await createFauxModelRegistry(settings);
+	const model = registerFaux(modelRegistry, faux);
+	const { session } = await createAgentSession({
+		cwd: root,
+		agentDir: join(root, "agent"),
+		settings,
+		authStorage,
+		modelRegistry,
+		model,
+		sessionManager: SessionManager.inMemory(root),
+		extensions,
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
+	});
+	try {
+		await run(session);
+	} finally {
+		await session.dispose();
+	}
+}
 
 test("set_title delegates the write policy to the host handler and returns its verdict", async () => {
-	const calls: Array<[string, SetTitleParams]> = [];
-	setTitleToolHost({
-		apply: async (sessionId, params) => {
-			calls.push([sessionId, params]);
-			return "Chat title set. Workspace name kept (already named).";
-		},
-		workspaceNeedsName: () => false,
+	await withSession([setTitleExtension], async (session) => {
+		const calls: Array<[string, SetTitleParams]> = [];
+		setTitleToolHost({
+			apply: async (sessionId, params) => {
+				calls.push([sessionId, params]);
+				return "Chat title set. Workspace name kept (already named).";
+			},
+			workspaceNeedsName: () => false,
+		});
+		const params = {
+			chat_title: "Ревью #567",
+			workspace_name: "Review #567",
+			branch: "review-567",
+		};
+		const result = await session.getToolByName(SET_TITLE_TOOL_NAME)?.execute("call-1", params);
+
+		expect(calls).toEqual([[session.sessionManager.getSessionId(), params]]);
+		expect(result?.content).toEqual([
+			{ type: "text", text: "Chat title set. Workspace name kept (already named)." },
+		]);
 	});
-	const params = { chat_title: "Ревью #567", workspace_name: "Review #567", branch: "review-567" };
-	const result = await createSetTitleTool().execute("call-1", params, undefined, undefined, ctx);
-
-	expect(calls).toEqual([["s-1", params]]);
-	expect(result.content).toEqual([
-		{ type: "text", text: "Chat title set. Workspace name kept (already named)." },
-	]);
 });
 
-test("the guidance names once-only, user-language, and the PR/issue form", () => {
-	const tool = createSetTitleTool();
-	const guidance = [tool.description, ...(tool.promptGuidelines ?? [])].join("\n");
-	expect(guidance).toContain("once per conversation, with chat_title, workspace_name and branch");
-	expect(guidance).toContain("language the user writes in");
-	expect(guidance).toContain("<Verb> #<number> <its exact title>");
+test("the tool is top-level and its description names once-only, user-language, and the PR/issue form", async () => {
+	await withSession([setTitleExtension], async (session) => {
+		const tool = session.extensionRunner
+			?.getAllRegisteredTools()
+			.find((registered) => registered.definition.name === SET_TITLE_TOOL_NAME)?.definition;
+		expect(tool?.loadMode).toBe("essential");
+		const guidance = tool?.description ?? "";
+		expect(guidance).toContain("once per conversation, with chat_title, workspace_name and branch");
+		expect(guidance).toContain("language the user writes in");
+		expect(guidance).toContain("<Verb> #<number> <its exact title>");
+	});
 });
 
-test("the tool is registered for top-level sessions, never in a subagent child's factories", () => {
-	const registered: string[] = [];
-	const pi = {
-		registerTool: (t: { name: string }) => registered.push(t.name),
-		on: () => {},
-	} as unknown as ExtensionAPI;
-	setTitleExtension(pi);
-	expect(registered).toEqual([SET_TITLE_TOOL_NAME]);
+test("the tool is registered for top-level sessions, never in a subagent child's factories", async () => {
+	await withSession([setTitleExtension], async (session) => {
+		const registered = session.extensionRunner
+			?.getAllRegisteredTools()
+			.filter((tool) => tool.extensionPath === "<inline-0>")
+			.map((tool) => tool.definition.name);
+		expect(registered).toEqual([SET_TITLE_TOOL_NAME]);
+	});
 	expect(childExtensionFactories()).not.toContain(setTitleExtension);
 });
 
@@ -64,29 +135,27 @@ test("pendingNamingRule names exactly what is still unnamed, and vanishes once b
 	expect(pendingNamingRule(false, false)).toBeNull();
 });
 
-test("the turn-start hook adds the pending-naming section only while something is unnamed", async () => {
-	type Hook = (event: unknown, ctx: unknown) => void;
-	let hook: Hook = () => {};
-	const pi = {
-		registerTool: () => {},
-		on: (_name: string, fn: Hook) => {
-			hook = fn;
-		},
-	} as unknown as ExtensionAPI;
-	setTitleExtension(pi);
-	let workspaceUnnamed = true;
-	setTitleToolHost({ apply: async () => "", workspaceNeedsName: () => workspaceUnnamed });
+test("the turn-start hook adds the pending-naming rule only while something is unnamed", async () => {
+	await withSession([setTitleExtension], async (session) => {
+		let workspaceUnnamed = true;
+		setTitleToolHost({ apply: async () => "", workspaceNeedsName: () => workspaceUnnamed });
+		const run = async (): Promise<string | undefined> => {
+			let seen: string[] = [];
+			faux.setResponses([
+				(context) => {
+					seen = context.systemPrompt ?? [];
+					return fauxAssistantMessage("ok");
+				},
+			]);
+			await session.prompt("Fix the login redirect.");
+			await session.waitForIdle();
+			return seen.find((block) => block.startsWith("Naming is still pending"));
+		};
 
-	const run = (sessionName: string | undefined) => {
-		const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
-		hook(event, {
-			sessionManager: { getSessionId: () => "s-1", getSessionName: () => sessionName },
-		});
-		return event.systemPromptOptions.sections["pending-naming"];
-	};
-
-	expect(run(undefined)).toContain("before your other tool calls");
-	workspaceUnnamed = false;
-	expect(run("Named")).toBeUndefined();
-	expect(run(undefined)).toContain("this chat has no title yet");
+		expect(await run()).toContain("before your other tool calls");
+		workspaceUnnamed = false;
+		expect(await run()).toContain("this chat has no title yet");
+		await session.sessionManager.setSessionName("Named", "user");
+		expect(await run()).toBeUndefined();
+	});
 });

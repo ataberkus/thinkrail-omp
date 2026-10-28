@@ -3,7 +3,7 @@ import {
 	getMarkdownTheme,
 	type Theme,
 	type ToolRenderResultOptions,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import {
 	type Component,
 	Markdown,
@@ -11,7 +11,7 @@ import {
 	TruncatedText,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@oh-my-pi/pi-tui";
 import type { MermaidArt, Span } from "lovely-mermaid";
 import { mermaidFence } from "./markdown.ts";
 import { renderArt } from "./probe.ts";
@@ -39,7 +39,11 @@ export function callSummary(args: Partial<VisualizeParams> | undefined): string 
 	return "diagram";
 }
 
-export function renderVisualizeCall(args: VisualizeParams, theme: Theme): Component {
+export function renderVisualizeCall(
+	args: Partial<VisualizeParams> | undefined,
+	_options: ToolRenderResultOptions,
+	theme: Theme,
+): Component {
 	return new TruncatedText(
 		theme.fg("toolTitle", theme.bold("visualize ")) + theme.fg("accent", callSummary(args)),
 		0,
@@ -61,7 +65,8 @@ function diagramDetails(details: unknown): { title?: string; mermaid: string } |
 }
 
 function markdown(text: string): Markdown {
-	return new Markdown(text, 0, 0, getMarkdownTheme());
+	const { resolveMermaidAscii: _drawnByDiagramComponent, ...theme } = getMarkdownTheme();
+	return new Markdown(text, 0, 0, theme);
 }
 
 export function fitsWidth(lines: readonly string[], width: number): boolean {
@@ -126,10 +131,9 @@ export function renderVisualizeResult(
 	result: AgentToolResult<unknown>,
 	{ expanded, isPartial }: ToolRenderResultOptions,
 	theme: Theme,
-	context: { isError: boolean },
 ): Component {
 	if (isPartial) return new Text(theme.fg("warning", "Rendering…"), 0, 0);
-	if (context.isError) return new Text(theme.fg("error", resultText(result)), 0, 0);
+	if (result.isError) return new Text(theme.fg("error", resultText(result)), 0, 0);
 	const diagram = diagramDetails(result.details);
 	if (diagram) return new DiagramComponent(diagram.mermaid, diagram.title, expanded, theme);
 	return markdown(resultText(result));

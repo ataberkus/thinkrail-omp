@@ -15,8 +15,11 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "catalog:",
-		"@earendil-works/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-agent-core": "catalog:",
+		"@oh-my-pi/pi-ai": "catalog:",
+		"@oh-my-pi/pi-catalog": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-utils": "catalog:",
 		"@posthog/core": "1.45.1",
 		"@stroncium/procfs": "1.2.1",
 		"@thinkrail/contracts": "workspace:*",
@@ -26,24 +29,23 @@
 		"@thinkrail/locales": "workspace:*",
 		"@thinkrail/shared": "workspace:*",
 		"bun-pty": "0.4.10",
-		"jiti": "2.7.0",
-		"jsonc-parser": "3.3.1",
 		"pi-background-commands": "workspace:*",
 		"pi-delegation": "workspace:*",
 		"pi-spec-graph": "workspace:*",
 		"pi-subagents": "workspace:*",
 		"pi-thinkrail-workflow": "workspace:*",
 		"pi-todos": "workspace:*",
-		"pi-web-access": "0.13.0",
 		"pino": "10.4.0",
 		"pino-pretty": "13.2.0",
 		"pino-roll": "4.0.0",
 		"posthog-node": "5.46.1",
 		"trash": "10.1.1",
-		"typebox": "catalog:"
+		"typebox": "catalog:",
+		"yaml": "catalog:"
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:",
+		"pi-faux": "workspace:*",
 		"typescript": "catalog:"
 	}
 }

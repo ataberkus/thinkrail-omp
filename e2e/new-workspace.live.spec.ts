@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import {
@@ -28,13 +28,14 @@ test("the dialog shows the exact default model and its picker scrolls inside the
 }, async ({ page }) => {
 	await openFixtureProject(page);
 	expect(existsSync(E2E_CENTRAL_ARTIFACT)).toBe(true);
-	const authPath = join(E2E_PI_AGENT_DIR, "auth.json");
-	if (existsSync(authPath))
-		expect(Object.keys(JSON.parse(readFileSync(authPath, "utf8")))).toEqual([]);
-	expect(existsSync(join(E2E_PI_AGENT_DIR, "models.json"))).toBe(false);
+	expect(existsSync(join(E2E_PI_AGENT_DIR, "models.yml"))).toBe(false);
 
 	const wire = await E2eWire.connect();
-	const selected = await wire.request("model.default", {}).finally(() => wire.close());
+	const [selected, status] = await Promise.all([
+		wire.request("model.default", {}),
+		wire.request("provider.status", {}),
+	]).finally(() => wire.close());
+	expect(status.providers.filter((provider) => provider.canLogout).map(({ id }) => id)).toEqual([]);
 	expect(isExactE2eModel(selected.model, resolveE2eModel())).toBe(true);
 	if (!selected.model) throw new Error("Central agent model is missing after setup preflight");
 

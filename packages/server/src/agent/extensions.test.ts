@@ -2,10 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { registryInlineExtensions } from "../extensions";
+import { type AgentSession, createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { createFauxCore, createFauxModelRegistry, isolateAgentDir, registerFaux } from "pi-faux";
+import specGraphExtension from "pi-spec-graph";
+import { registryInlineExtensions, registryToolOwner } from "../extensions";
 import {
-	buildResourceLoader,
+	buildSessionResources,
 	childBaseExtensionFactories,
 	childExtensionFactories,
 	disabledExtensions,
@@ -14,6 +16,7 @@ import {
 	setDisabledExtensionsResolver,
 } from "./extensions";
 import { oversizedImageGuard } from "./imageGuard";
+import { loadHostSettings } from "./piSettings";
 import type { SkillAdmissionContext } from "./skillAdmission";
 
 function ctx(trusted: boolean, acknowledged: string[] = []): SkillAdmissionContext {
@@ -28,20 +31,17 @@ function ctx(trusted: boolean, acknowledged: string[] = []): SkillAdmissionConte
 }
 
 function stubSkillEnv(home: string, agentDir: string): () => void {
-	const names = [
-		"HOME",
-		"PI_CODING_AGENT_DIR",
-		"CLAUDE_CONFIG_DIR",
-		"CODEX_HOME",
-		"GEMINI_CLI_HOME",
-	];
+	const names = ["HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"];
 	const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
 	process.env.HOME = home;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
 	delete process.env.CLAUDE_CONFIG_DIR;
 	delete process.env.CODEX_HOME;
 	delete process.env.GEMINI_CLI_HOME;
-	return () => restoreEnvironment(original);
+	const isolated = isolateAgentDir(agentDir);
+	return () => {
+		isolated.restore();
+		restoreEnvironment(original);
+	};
 }
 
 function writeSkill(root: string, name: string, description: string): void {
@@ -61,7 +61,7 @@ function restoreEnvironment(original: Record<string, string | undefined>): void 
 }
 
 describe("listSkillCommands", () => {
-	it("shares Pi precedence/provenance and does not execute extensions", async () => {
+	it("shares omp precedence/provenance and does not execute extensions", async () => {
 		const root = mkdtempSync(join(tmpdir(), "thinkrail-skill-catalog-"));
 		const project = join(root, "project");
 		const home = join(root, "home");
@@ -71,27 +71,18 @@ describe("listSkillCommands", () => {
 		mkdirSync(home, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
 
-		const original = Object.fromEntries(
-			["HOME", "PI_CODING_AGENT_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"].map(
-				(name) => [name, process.env[name]],
-			),
-		);
-		process.env.HOME = home;
-		process.env.PI_CODING_AGENT_DIR = agentDir;
-		delete process.env.CLAUDE_CONFIG_DIR;
-		delete process.env.CODEX_HOME;
-		delete process.env.GEMINI_CLI_HOME;
+		const restore = stubSkillEnv(home, agentDir);
 
 		try {
 			const configuredRoot = join(root, "configured-skills");
-			const nativeRoot = join(project, ".pi", "skills");
+			const nativeRoot = join(project, ".omp", "skills");
 			const projectRoot = join(project, ".claude", "skills");
 			const personalRoot = join(home, ".claude", "skills");
 			writeSkill(configuredRoot, "configured-wins", "configured description");
 			writeSkill(projectRoot, "configured-wins", "project alias must lose");
 			writeFileSync(
-				join(agentDir, "settings.json"),
-				`${JSON.stringify({ skills: [configuredRoot] }, null, 2)}\n`,
+				join(agentDir, "config.yml"),
+				`skills:\n  customDirectories:\n    - ${JSON.stringify(configuredRoot)}\n`,
 			);
 			writeSkill(nativeRoot, "native-wins", "native description");
 			writeSkill(projectRoot, "native-wins", "alias must lose");
@@ -109,7 +100,7 @@ describe("listSkillCommands", () => {
 			mkdirSync(invalidDir, { recursive: true });
 			writeFileSync(join(invalidDir, "SKILL.md"), "# no frontmatter\n");
 
-			const extensionDir = join(project, ".pi", "extensions");
+			const extensionDir = join(project, ".omp", "extensions");
 			mkdirSync(extensionDir, { recursive: true });
 			writeFileSync(
 				join(extensionDir, "probe.ts"),
@@ -160,7 +151,7 @@ describe("listSkillCommands", () => {
 			expect(byName("invalid")).toBeUndefined();
 			expect(existsSync(marker)).toBe(false);
 		} finally {
-			restoreEnvironment(original);
+			restore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -174,20 +165,11 @@ describe("listSkillCommands", () => {
 		mkdirSync(home, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
 
-		const original = Object.fromEntries(
-			["HOME", "PI_CODING_AGENT_DIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"].map(
-				(name) => [name, process.env[name]],
-			),
-		);
-		process.env.HOME = home;
-		process.env.PI_CODING_AGENT_DIR = agentDir;
-		delete process.env.CLAUDE_CONFIG_DIR;
-		delete process.env.CODEX_HOME;
-		delete process.env.GEMINI_CLI_HOME;
+		const restore = stubSkillEnv(home, agentDir);
 
 		try {
 			writeSkill(join(project, ".claude", "skills"), "repo-alias", "committed repo skill");
-			writeSkill(join(project, ".pi", "skills"), "repo-native", "pi-native repo skill");
+			writeSkill(join(project, ".omp", "skills"), "repo-native", "omp-native repo skill");
 			writeSkill(join(home, ".claude", "skills"), "personal-skill", "personal skill");
 
 			const untrusted = await listSkillCommands(project, ctx(false));
@@ -208,7 +190,7 @@ describe("listSkillCommands", () => {
 			expect(trusted.some((command) => command.name === "skill:repo-alias")).toBe(true);
 			expect(trusted.some((command) => command.name === "skill:repo-native")).toBe(true);
 		} finally {
-			restoreEnvironment(original);
+			restore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -252,48 +234,105 @@ describe("listSkillCommands", () => {
 	});
 });
 
-describe("buildResourceLoader", () => {
+const faux = createFauxCore({ provider: "resources-faux" });
+
+async function resourcesFor(
+	project: string,
+	projectTrusted: boolean,
+	getAdmission: () => SkillAdmissionContext,
+	excludedExtensionPaths: readonly string[] = [],
+) {
+	const { settings } = await loadHostSettings(project, projectTrusted);
+	const resources = await buildSessionResources({
+		cwd: project,
+		settings,
+		projectTrusted,
+		getAdmission,
+		excludedExtensionPaths,
+	});
+	return { settings, resources };
+}
+
+async function withSession<T>(
+	project: string,
+	agentDir: string,
+	resolved: Awaited<ReturnType<typeof resourcesFor>>,
+	run: (session: AgentSession) => Promise<T> | T,
+): Promise<T> {
+	const { authStorage, modelRegistry } = await createFauxModelRegistry(resolved.settings);
+	const model = registerFaux(modelRegistry, faux);
+	const { session } = await createAgentSession({
+		cwd: project,
+		agentDir,
+		settings: resolved.settings,
+		authStorage,
+		modelRegistry,
+		model,
+		sessionManager: SessionManager.inMemory(project),
+		contextFiles: [],
+		enableMCP: false,
+		hasUI: false,
+		...resolved.resources,
+	});
+	try {
+		return await run(session);
+	} finally {
+		await session.dispose();
+	}
+}
+
+function scratch(prefix: string) {
+	const root = mkdtempSync(join(tmpdir(), prefix));
+	const project = join(root, "project");
+	const home = join(root, "home");
+	const agentDir = join(root, "pi-agent");
+	mkdirSync(project, { recursive: true });
+	mkdirSync(home, { recursive: true });
+	mkdirSync(agentDir, { recursive: true });
+	return { root, project, home, agentDir };
+}
+
+describe("buildSessionResources", () => {
 	for (const excluding of [false, true]) {
-		it(`runs a project's .pi/extensions code only under pi-level trust (exclusion branch: ${excluding})`, async () => {
-			const root = mkdtempSync(join(tmpdir(), "thinkrail-project-extension-"));
-			const project = join(root, "project");
-			const home = join(root, "home");
-			const agentDir = join(root, "pi-agent");
+		it(`runs a project's .omp/extensions code only under project trust (exclusion branch: ${excluding})`, async () => {
+			const { root, project, home, agentDir } = scratch("thinkrail-project-extension-");
 			const generationArtifact = join(agentDir, "extensions", "generation.ts");
+			const repoCode = join(project, ".omp", "extensions", "repo-code.ts");
 			const loads = `__thinkrailProjectExtensionLoads_${excluding}`;
 			const counters = globalThis as typeof globalThis & Record<string, number | undefined>;
-			mkdirSync(join(project, ".pi", "extensions"), { recursive: true });
+			mkdirSync(join(project, ".omp", "extensions"), { recursive: true });
 			mkdirSync(join(agentDir, "extensions"), { recursive: true });
-			mkdirSync(home, { recursive: true });
 			writeFileSync(generationArtifact, "export default function generation() {}\n");
 			writeFileSync(
-				join(project, ".pi", "extensions", "repo-code.ts"),
+				repoCode,
 				`export default function repoCode() { globalThis.${loads} = (globalThis.${loads} ?? 0) + 1; }\n`,
 			);
 			const restore = stubSkillEnv(home, agentDir);
-			let piResourceTrusted = false;
-			try {
-				const loader = await buildResourceLoader(
+			const open = async (projectTrusted: boolean) => {
+				const resolved = await resourcesFor(
 					project,
-					SettingsManager.create(project, agentDir, { projectTrusted: false }),
-					() => ({ ...ctx(false), piResourceTrusted }),
+					projectTrusted,
+					() => ({ ...ctx(false), piResourceTrusted: projectTrusted }),
 					excluding ? [generationArtifact] : [],
 				);
-				const loadsRepoCode = () =>
-					loader
-						.getExtensions()
-						.extensions.some((extension) => extension.path.endsWith("repo-code.ts"));
+				const paths = resolved.resources.preloadedExtensionPaths ?? [];
+				expect(paths.includes(generationArtifact)).toBe(!excluding);
+				return withSession(project, agentDir, resolved, (session) => ({
+					listed: paths.some((path) => path.endsWith("repo-code.ts")),
+					loaded: (session.extensionRunner?.getExtensionPaths() ?? []).some((path) =>
+						path.endsWith("repo-code.ts"),
+					),
+				}));
+			};
+			try {
+				expect(await open(false)).toEqual({ listed: false, loaded: false });
 				expect(counters[loads]).toBeUndefined();
-				expect(loadsRepoCode()).toBe(false);
 
-				piResourceTrusted = true;
-				await loader.reload();
+				expect(await open(true)).toEqual({ listed: true, loaded: true });
 				expect(counters[loads]).toBe(1);
-				expect(loadsRepoCode()).toBe(true);
 
-				piResourceTrusted = false;
-				await loader.reload();
-				expect(loadsRepoCode()).toBe(false);
+				expect(await open(false)).toEqual({ listed: false, loaded: false });
+				expect(counters[loads]).toBe(1);
 			} finally {
 				delete counters[loads];
 				restore();
@@ -302,14 +341,55 @@ describe("buildResourceLoader", () => {
 		});
 	}
 
-	it("reload re-reads admission so a mid-session group toggle applies", async () => {
-		const root = mkdtempSync(join(tmpdir(), "thinkrail-skill-reload-"));
-		const project = join(root, "project");
-		const home = join(root, "home");
-		const agentDir = join(root, "pi-agent");
-		mkdirSync(project, { recursive: true });
-		mkdirSync(home, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
+	it("lists a project's prompt templates and custom tools only under project trust", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-project-resources-");
+		mkdirSync(join(project, ".omp", "prompts"), { recursive: true });
+		writeFileSync(
+			join(project, ".omp", "prompts", "repo-kickoff.md"),
+			"---\ndescription: d\n---\nGo\n",
+		);
+		mkdirSync(join(agentDir, "prompts"), { recursive: true });
+		writeFileSync(join(agentDir, "prompts", "own-kickoff.md"), "---\ndescription: d\n---\nGo\n");
+		mkdirSync(join(project, ".omp", "tools", "repo-tool"), { recursive: true });
+		writeFileSync(
+			join(project, ".omp", "tools", "repo-tool", "index.ts"),
+			"export default () => [];\n",
+		);
+		const restore = stubSkillEnv(home, agentDir);
+		const listed = async (projectTrusted: boolean) => {
+			const { resources } = await resourcesFor(project, projectTrusted, () => ctx(projectTrusted));
+			return {
+				prompts: (resources.promptTemplates ?? []).map((template) => template.name).sort(),
+				tools: (resources.preloadedCustomToolPaths ?? []).some((entry) =>
+					entry.path.includes("repo-tool"),
+				),
+			};
+		};
+		try {
+			expect(await listed(false)).toEqual({ prompts: ["own-kickoff"], tools: false });
+			expect(await listed(true)).toEqual({ prompts: ["own-kickoff", "repo-kickoff"], tools: true });
+		} finally {
+			restore();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("offers the bundled skills and turns omp's own discovery off for every listed resource", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-bundled-");
+		const restore = stubSkillEnv(home, agentDir);
+		try {
+			const { resources } = await resourcesFor(project, false, () => ctx(false));
+			expect((resources.skills ?? []).some((skill) => skill.name === "brainstorming")).toBe(true);
+			expect(resources.disableExtensionDiscovery).toBe(true);
+			expect(resources.slashCommands).toEqual([]);
+		} finally {
+			restore();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("re-reads admission on every build, so a group toggle applies to the next reopened chat", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-skill-reload-");
 		const restore = stubSkillEnv(home, agentDir);
 
 		try {
@@ -323,30 +403,23 @@ describe("buildResourceLoader", () => {
 				disabledGroups: [],
 				overrides: {},
 			};
-			const settingsManager = SettingsManager.create(project, agentDir, { projectTrusted: true });
-			const loader = await buildResourceLoader(project, settingsManager, () => admission);
-			const hasWidget = () =>
-				loader.getSkills().skills.some((skill) => skill.name === "reload-widget");
+			const hasWidget = async () => {
+				const { resources } = await resourcesFor(project, true, () => admission);
+				return (resources.skills ?? []).some((skill) => skill.name === "reload-widget");
+			};
 
-			expect(hasWidget()).toBe(true);
+			expect(await hasWidget()).toBe(true);
 
 			admission = { ...admission, disabledGroups: ["personal"] };
-			await loader.reload();
-			expect(hasWidget()).toBe(false);
+			expect(await hasWidget()).toBe(false);
 		} finally {
 			restore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("reload picks up a compatibility dir created after construction", async () => {
-		const root = mkdtempSync(join(tmpdir(), "thinkrail-skill-newdir-"));
-		const project = join(root, "project");
-		const home = join(root, "home");
-		const agentDir = join(root, "pi-agent");
-		mkdirSync(project, { recursive: true });
-		mkdirSync(home, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
+	it("a rebuild picks up a compatibility dir created after the first build", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-skill-newdir-");
 		const restore = stubSkillEnv(home, agentDir);
 
 		try {
@@ -358,29 +431,23 @@ describe("buildResourceLoader", () => {
 				disabledGroups: [],
 				overrides: {},
 			};
-			const settingsManager = SettingsManager.create(project, agentDir, { projectTrusted: true });
-			const loader = await buildResourceLoader(project, settingsManager, () => admission);
-			const hasLate = () => loader.getSkills().skills.some((skill) => skill.name === "late-widget");
+			const hasLate = async () => {
+				const { resources } = await resourcesFor(project, true, () => admission);
+				return (resources.skills ?? []).some((skill) => skill.name === "late-widget");
+			};
 
-			expect(hasLate()).toBe(false);
+			expect(await hasLate()).toBe(false);
 
 			writeSkill(join(home, ".claude", "skills"), "late-widget", "appeared after start");
-			await loader.reload();
-			expect(hasLate()).toBe(true);
+			expect(await hasLate()).toBe(true);
 		} finally {
 			restore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("keeps a late-appearing untrusted project alias behind the trust gate on reload", async () => {
-		const root = mkdtempSync(join(tmpdir(), "thinkrail-skill-latetrust-"));
-		const project = join(root, "project");
-		const home = join(root, "home");
-		const agentDir = join(root, "pi-agent");
-		mkdirSync(project, { recursive: true });
-		mkdirSync(home, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
+	it("keeps a late-appearing untrusted project alias behind the trust gate on rebuild", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-skill-latetrust-");
 		const restore = stubSkillEnv(home, agentDir);
 
 		try {
@@ -392,12 +459,54 @@ describe("buildResourceLoader", () => {
 				disabledGroups: [],
 				overrides: {},
 			};
-			const settingsManager = SettingsManager.create(project, agentDir, { projectTrusted: true });
-			const loader = await buildResourceLoader(project, settingsManager, () => admission);
+			const hasLate = async () => {
+				const { resources } = await resourcesFor(project, true, () => admission);
+				return (resources.skills ?? []).some((skill) => skill.name === "repo-late");
+			};
+			expect(await hasLate()).toBe(false);
 
 			writeSkill(join(project, ".claude", "skills"), "repo-late", "committed, appeared late");
-			await loader.reload();
-			expect(loader.getSkills().skills.some((skill) => skill.name === "repo-late")).toBe(false);
+			expect(await hasLate()).toBe(false);
+		} finally {
+			restore();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("project prompt files under trust", () => {
+	it("keeps a project's SYSTEM.md and rules out of an untrusted chat and in a trusted one", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-project-prompt-");
+		mkdirSync(join(project, ".omp", "rules"), { recursive: true });
+		writeFileSync(join(project, ".omp", "SYSTEM.md"), "PROJECT_SYSTEM_OVERRIDE\n");
+		writeFileSync(
+			join(project, ".omp", "rules", "repo-rule.md"),
+			"---\ndescription: repo rule\nalwaysApply: true\n---\nPROJECT_RULE_BODY\n",
+		);
+		const restore = stubSkillEnv(home, agentDir);
+		const prompt = async (projectTrusted: boolean) => {
+			const resolved = await resourcesFor(project, projectTrusted, () => ({
+				...ctx(false),
+				piResourceTrusted: projectTrusted,
+			}));
+			const ruleNames = (resolved.resources.rules ?? []).map((rule) => rule.name);
+			const text = await withSession(project, agentDir, resolved, (session) =>
+				session.systemPrompt.join("\n"),
+			);
+			return { ruleNames, text };
+		};
+		try {
+			const untrusted = await prompt(false);
+			expect(untrusted.text).not.toContain("PROJECT_SYSTEM_OVERRIDE");
+			expect(untrusted.ruleNames).not.toContain("repo-rule");
+			expect(untrusted.text).not.toContain("PROJECT_RULE_BODY");
+
+			writeFileSync(join(agentDir, "SYSTEM.md"), "USER_SYSTEM_OVERRIDE\n");
+			expect((await prompt(false)).text).toContain("USER_SYSTEM_OVERRIDE");
+
+			const trusted = await prompt(true);
+			expect(trusted.text).toContain("PROJECT_SYSTEM_OVERRIDE");
+			expect(trusted.text).toContain("PROJECT_RULE_BODY");
 		} finally {
 			restore();
 			rmSync(root, { recursive: true, force: true });
@@ -406,75 +515,60 @@ describe("buildResourceLoader", () => {
 });
 
 describe("registry extensions", () => {
-	async function visualizeTool(cwd: string, agentDir: string) {
-		const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: true });
-		const loader = await buildResourceLoader(cwd, settingsManager, () => ctx(true));
-		const extension = loader
-			.getExtensions()
-			.extensions.find((candidate) => candidate.tools.has("visualize"));
-		if (!extension) throw new Error("visualize is not loaded");
-		const tool = extension.tools.get("visualize");
-		if (!tool) throw new Error("visualize tool is missing");
-		return {
-			extension,
-			execute: (params: unknown) =>
-				tool.definition.execute("call", params, undefined, undefined, undefined as never),
-		};
+	async function withVisualize<T>(
+		project: string,
+		agentDir: string,
+		run: (session: AgentSession) => Promise<T>,
+	): Promise<T> {
+		return withSession(project, agentDir, await resourcesFor(project, true, () => ctx(true)), run);
 	}
 
-	it("loads visualize as a named inline extension with the strict mermaid validator", async () => {
-		const root = mkdtempSync(join(tmpdir(), "thinkrail-registry-"));
-		const project = join(root, "project");
-		const home = join(root, "home");
-		const agentDir = join(root, "pi-agent");
-		mkdirSync(project, { recursive: true });
-		mkdirSync(home, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
+	it("loads visualize as a registry extension that owns its tool, with the strict mermaid validator", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-registry-");
 		const restore = stubSkillEnv(home, agentDir);
 		try {
-			const { extension, execute } = await visualizeTool(project, agentDir);
-			expect(extension.path).toBe("<inline:visualize>");
-			await expect(
-				execute({ type: "diagram", mermaid: "flowchart LR\n A --> B" }),
-			).resolves.toMatchObject({ details: { type: "diagram" } });
-			await expect(execute({ type: "diagram", mermaid: "flowchart LR\n A -->" })).rejects.toThrow(
-				/invalid Mermaid syntax in `mermaid`[\s\S]*Parse error/,
-			);
+			await withVisualize(project, agentDir, async (session) => {
+				expect(session.extensionRunner?.getRegisteredTool("visualize")).toBeDefined();
+				expect(registryToolOwner("visualize")).toBe("visualize");
+				const execute = (params: Record<string, unknown>) => {
+					const tool = session.getToolByName("visualize");
+					if (!tool) throw new Error("visualize tool is missing");
+					return tool.execute("call", params);
+				};
+				await expect(
+					execute({ type: "diagram", mermaid: "flowchart LR\n A --> B" }),
+				).resolves.toMatchObject({ details: { type: "diagram" } });
+				await expect(execute({ type: "diagram", mermaid: "flowchart LR\n A -->" })).rejects.toThrow(
+					/invalid Mermaid syntax in `mermaid`[\s\S]*Parse error/,
+				);
+			});
 		} finally {
 			restore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("omits a disabled extension from a new loader and re-decides on reload", async () => {
-		const root = mkdtempSync(join(tmpdir(), "thinkrail-registry-off-"));
-		const project = join(root, "project");
-		const home = join(root, "home");
-		const agentDir = join(root, "pi-agent");
-		mkdirSync(project, { recursive: true });
-		mkdirSync(home, { recursive: true });
-		mkdirSync(agentDir, { recursive: true });
+	it("omits a disabled extension from a new chat and re-decides on the next build", async () => {
+		const { root, project, home, agentDir } = scratch("thinkrail-registry-off-");
 		const restore = stubSkillEnv(home, agentDir);
 		let disabled = new Set(["visualize"]);
 		setDisabledExtensionsResolver(() => disabled);
+		const hasVisualize = (session: AgentSession) =>
+			session.extensionRunner?.getRegisteredTool("visualize") !== undefined;
 		try {
-			const settingsManager = SettingsManager.create(project, agentDir, { projectTrusted: true });
-			const loader = await buildResourceLoader(project, settingsManager, () => ctx(true));
-			const paths = () => loader.getExtensions().extensions.map((extension) => extension.path);
-			const tools = () =>
-				loader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()]);
-			expect(paths()).not.toContain("<inline:visualize>");
-			expect(tools()).not.toContain("visualize");
-
+			const off = await resourcesFor(project, true, () => ctx(true));
 			disabled = new Set();
-			expect(paths()).not.toContain("<inline:visualize>");
-			await loader.reload();
-			expect(paths()).toContain("<inline:visualize>");
-			expect(tools()).toContain("visualize");
+			expect(
+				await withSession(project, agentDir, off, async (session) => hasVisualize(session)),
+			).toBe(false);
+			expect(await withVisualize(project, agentDir, async (session) => hasVisualize(session))).toBe(
+				true,
+			);
 
 			disabled = new Set(["visualize", "retired-extension"]);
-			await loader.reload();
-			expect(paths()).not.toContain("<inline:visualize>");
+			expect(await withVisualize(project, agentDir, async (session) => hasVisualize(session))).toBe(
+				false,
+			);
 		} finally {
 			setDisabledExtensionsResolver(() => new Set());
 			restore();
@@ -495,9 +589,9 @@ describe("registry extensions", () => {
 
 	it("keeps the curated child set and appends registry children", () => {
 		const children = childExtensionFactories();
-		expect(children).toHaveLength(3 + registryInlineExtensions("childExtensions").length);
-		expect(children.slice(0, 3).every((inline) => typeof inline === "function")).toBe(true);
-		expect(children.slice(3)).toEqual(registryInlineExtensions("childExtensions"));
+		expect(children).toHaveLength(1 + registryInlineExtensions("childExtensions").length);
+		expect(children[0]).toBe(specGraphExtension);
+		expect(children.slice(1)).toEqual(registryInlineExtensions("childExtensions"));
 	});
 
 	it("guards every child's images from the base set, not the opt-in curated set", () => {

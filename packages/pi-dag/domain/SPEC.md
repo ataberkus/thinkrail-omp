@@ -20,8 +20,8 @@ the same stored birth schema before entering state; the broader delegation contr
 
 ## Boundary
 
-The barrel exposes contracts, schemas, validation/error helpers and pure graph/state operations to
-package siblings. Allowed external dependencies are typebox and type-only public pi/delegation types.
+The barrel exposes contracts, schemas, validation/error helpers, `toolParameters` (a TypeBox schema
+as plain JSON Schema for omp tool registration) and pure graph/state operations to package siblings. Allowed external dependencies are typebox and type-only public pi/delegation types.
 Forbidden: filesystem, provider/session instantiation, transport, runtime or persistence imports.
 The parent spec owns sibling dependency edges. Public package exports select client contracts; private
 persisted state is not automatically published through the package barrel.

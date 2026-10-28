@@ -24,13 +24,16 @@ to preserve).
 ## Design
 - `extract.ts` — pure JSONL→`ExtractedSession | null` (`extractSession`): the session's identity
   (`id`/`cwd` from the header, mirroring pi's own rejection rule — the first parseable entry must be a
-  `type: "session"` header with a string `id`, else `null`), its `title` (the **latest** `session_info`
-  entry's name, including explicit clears — the same latest-wins rule as pi's `buildSessionInfo`), and its
+  `type: "session"` header with a string `id`, else `null`), its `title` (omp's header `title`, which
+  `parseSessionEntries` folds from the fixed-width title slot on the file's first line — a cleared slot
+  clears it; a pi 1.x transcript that has no header title falls back to its **latest** `session_info`
+  name, explicit clears included, pi's own rule), and its
   `HistoryEntry[]` — all from **one parse**, so the index never needs a second source (`listAll`) for
   metadata. Pi session files are **trees** (abandoned branches) that compaction rewrites, so it resolves
   the file the way pi does before the client renders it — `parseSessionEntries` →
-  `migrateSessionEntries` → `buildSessionContext` (follow the current leaf, apply the latest compaction,
-  drop summarized/abandoned entries) — then indexes the resolved messages, filtered through contracts'
+  `migrateSessionEntries` → `buildSessionContext` in omp's display-transcript mode (`transcript`,
+  `collapseCompactedHistory`: follow the current leaf, apply the latest compaction with its summary where
+  it fired, drop summarized/abandoned entries) — then indexes the resolved messages, filtered through contracts'
   **`isTranscriptMessageRole`**, the very guard `getSessionMessages` sends by (one policy, not a local copy
   of it). So `messageIndex` matches the client's `turnIdByMessageIndex` exactly
   (no raw-file-order drift), and abandoned/summarized text never becomes a hit — the compaction summary is
@@ -41,16 +44,19 @@ to preserve).
   `isRetriedAttempt` reading from contracts — an errored assistant immediately followed by another
   assistant, the adjacent shape pi's `_prepareRetry` produces,
   which hydration renders as no turn / null anchor) is skipped the same way, so a
-  failed partial's text never becomes a hit that could only resolve to "couldn't locate the message". Entry text is **full, never truncated** — a hit's `text` is what
+  failed partial's text never becomes a hit that could only resolve to "couldn't locate the message".
+  omp's default (model-context) mode would drop every `error`/`aborted` assistant turn and retried
+  attempt; the display mode keeps them, as pi's resolver did, and is the view `getSessionMessages` sends,
+  so a terminal failure stays searchable and indexes stay aligned. Entry text is **full, never truncated** — a hit's `text` is what
   recall inserts and what the overlay's preview presents as the whole prompt, so a cap would silently
   corrupt recall of long pasted-log prompts and make terms past the cutoff unsearchable (the memory
   precedent is pi itself: `SessionInfo.allMessagesText` holds every session's full text in memory). Tool
   results/thinking are not indexed.
 - `historyIndex.ts` — `HistoryIndex`: cold build on first search (async per-file IO yields the event loop;
   blocks the search up to a budget, then returns partial with `indexing: true`). Discovery is its own
-  async enumeration (see "pi file format" below for the pinned layout): a custom `sessionDir` is a flat,
-  non-recursive dir of `.jsonl` files; the default root is `<agentDir>/sessions` — agent dir resolved
-  **per refresh** via pi's exported `getAgentDir()`, which reads `PI_CODING_AGENT_DIR` live — holding one
+  async enumeration (see "omp file format" below for the pinned layout): a custom `sessionDir` is a flat,
+  non-recursive dir of `.jsonl` files; the default root is pi-utils `getSessionsDir()` (`<agentDir>/sessions`,
+  or the XDG data dir when omp uses one) resolved **per refresh** — holding one
   level of per-cwd directories, including top-level symlinks Pi treats as candidate directories. Broken
   or non-directory symlinks degrade to the same unreadable-directory empty result as Pi. Freshness = `(mtime, size)`
   revalidation throttled to ~2 s (pi appends live messages to the file, so the file IS the live feed — no
@@ -74,43 +80,44 @@ to preserve).
   the same two fields `MessageHit` always had — making the prompt row itself jumpable. Both fields are
   optional on `PromptHit` (absent only when the host predates this feature).
 - `testFixtures.ts` — test-only session-file builders (pinned by A5): `writeFixtureSession` writes a
-  minimal but real pi-shaped JSONL, one flat file per session, that `historyIndex` tests, the e2e fixture
-  seeder, and its own format-pinning test (`testFixtures.test.ts`) drive against; `defaultSessionDirFor`
-  replicates pi's private default-layout directory encoding (not importable — see "pi file format" below)
-  so fixtures can land where a real no-arg `listAll()` would actually look.
+  minimal but real omp-shaped JSONL (a `name` becomes the header `title`), one flat file per session, that
+  `historyIndex` tests, the e2e fixture seeder, and its own format-pinning test (`testFixtures.test.ts`)
+  drive against; `defaultSessionDirFor` is omp's public `SessionManager.getDefaultSessionDir(cwd, agentDir)`
+  so fixtures land where a real no-arg `listAll()` looks.
 
-## On-disk JSONL structure (observed from pi session files)
-- **`message` entries:** `{ type: "message", ..., message: { role: "system"|"user"|"assistant"|"toolResult", content: string|array, timestamp: ms-number } }`.
-  System messages carry prompt `sections` and/or `toolsAdded`/`toolsRemoved`; the first request persists the
-  full system message and later prompt/tool changes persist patches. `isTranscriptMessageRole` excludes system,
-  so it renders no transcript row and consumes no `messageIndex` slot. A `toolResult` whose tool ran nested
-  calls (`ctx.executeTool`) carries a bounded `nestedCalls` record; it is not a transcript row of its own.
-- **`usage` entries:** `{ type: "usage", ..., kind, provider, model, usage, note? }`; they are hidden from the
-  conversation tree and context, but pi includes their token/cost data in session totals. Compaction entries may
-  carry a `systemMessage` snapshot alongside their summary.
+## On-disk JSONL structure (omp session files)
+- **`message` entries:** `{ type: "message", ..., message: { role: "user"|"assistant"|"toolResult"|…, content: string|array, timestamp: ms-number } }`.
+  omp persists no system message: the system prompt is recorded once in a `session_init` entry
+  (`systemPrompt: string[]`), which is not a context message and consumes no `messageIndex` slot.
+- **`model_usage` entries:** `{ type: "model_usage", ..., purpose, api, provider, model, usage, stopReason }`; hidden from
+  the conversation tree and context (pi 1.x wrote these as `usage`).
 - **`custom_message` entries:** `{ type: "custom_message", customType: string, content: string|array, timestamp: ISO-string, display: boolean, ... }`.
   They have no `message` wrapper and become role `custom` context messages.
+- **Titles:** the title slot plus header `title`; each change also appends a `title_change` audit entry.
 
-## pi file format (`@earendil-works/pi-coding-agent`, the catalog-pinned version)
-Verified against the installed `dist/core/session-manager.{js,d.ts}`. Re-verify these facts on a pi bump;
+## omp file format (`@oh-my-pi/pi-coding-agent`, the catalog-pinned version)
+Verified against the installed `src/session/{session-loader,session-paths,session-entries}.ts`. Re-verify these facts on a pi bump;
 `testFixtures.ts` and `historyIndex.ts` both depend on the discovery layout.
-- **Header:** pi writes `{ type: "session", version: 3, id, timestamp, cwd, parentSession? }`; `CURRENT_SESSION_VERSION = 3`.
-  `cwd` is `path.resolve` of the cwd the `SessionManager` was handed (pinned in `testFixtures.test.ts`); stored
-  directories rely on it to compare by `===` (architecture Decision 22).
+- **Header:** omp writes a fixed-width title slot line (`{ type: "title", v: 1, title, source?, updatedAt, pad }`)
+  first, then `{ type: "session", version: 3, id, title?, titleSource?, timestamp, cwd, … }`; `CURRENT_SESSION_VERSION = 3`.
+  omp stores `cwd` **as handed to the `SessionManager`, unresolved** (`<dir>/./` stays `<dir>/./`) where pi
+  resolved it; stored directories rely on a resolved spelling to compare by `===` (architecture
+  Decision 22), so `testFixtures.test.ts`'s pin of pi's resolution fails until the host resolves before
+  handing a cwd to omp.
   Readers require the first *parseable* entry to be a session header with a string `id` (not necessarily physical line 1).
   `cwd` is recovered from that header; a missing/invalid header rejects the file.
 - **Naming and custom directories:** discovery only considers direct children whose names end in `.jsonl`; pi writes
   `<ISO timestamp with ':' and '.' replaced by '-'>_<sessionId>.jsonl`, but the filename otherwise has no meaning.
   `list(cwd, sessionDir)` and `listAll(sessionDir)` use a flat, non-recursive custom directory; custom-list filtering
   still compares the header `cwd` with `cwd`. Subdirectory placement is invisible.
-- **Default layout:** no-argument `listAll()` scans `<agentDir>/sessions/` one level deep, considering child directories
+- **Default layout:** no-argument `listAll()` scans the sessions root one level deep, considering child directories
   and symlinks, then their direct `.jsonl` children. Unreadable or broken symlink targets contribute no files. Each cwd
-  directory is `--<resolved cwd with a leading slash removed and slash/backslash/colon replaced by `-`>--`; `getDefaultSessionDirPath`
-  is private, while `getDefaultSessionDir` is not exported from the package root. `defaultSessionDirFor` replicates it.
+  directory is named relative to the temp root (`-tmp-<rest>`) or home (`-<rest>`), else pi's legacy
+  `--<absolute path>--`, with `/`, `\` and `:` replaced by `-`; `SessionManager.getDefaultSessionDir` is public.
 - **When a file appears:** a new session's file is first written once it holds a user or assistant message
   (setup-only sessions leave no file), so a prompt whose first turn never completes is still on disk.
-- **Environment:** `getAgentDir()` reads `PI_CODING_AGENT_DIR` when called, so changing that variable before a SessionManager
-  discovery call changes the root used by pi.
+- **Environment:** omp snapshots `PI_CODING_AGENT_DIR` when pi-utils loads; changing it later takes effect only through
+  `setAgentDir` / `refreshDirsFromEnv` (tests use `pi-faux`'s `isolateAgentDir`).
 
 ## Boundary
 - **Public surface (`index.ts`):** `HistoryIndex`, `getHistoryIndex()`, `matchesTerms`, `makeSnippet`,
@@ -119,8 +126,8 @@ Verified against the installed `dist/core/session-manager.{js,d.ts}`. Re-verify 
   through the server package's dedicated **`@thinkrail/server/history-test-fixtures`** subpath export
   (package.json), the sanctioned test boundary — same pattern as `@thinkrail/server/agent`. In-package
   tests import them relatively (`./testFixtures`); the e2e seeder imports the subpath.
-- **Allowed deps:** `@earendil-works/pi-coding-agent` (`getAgentDir` — the default sessions root — plus
-  the exported session-tree helpers `parseSessionEntries`/`migrateSessionEntries`/`buildSessionContext`
+- **Allowed deps:** `@oh-my-pi/pi-utils` (`getSessionsDir` — the default sessions root),
+  `@oh-my-pi/pi-coding-agent` (the exported session-tree helpers `parseSessionEntries`/`migrateSessionEntries`/`buildSessionContext`
   used by `extract.ts`; **not `SessionManager`** in production code — see Responsibility. Tests may use
   `SessionManager` to *pin* layout/format facts against the real thing), `@thinkrail/contracts`,
   `node:fs`, `node:fs/promises`, `node:path`.

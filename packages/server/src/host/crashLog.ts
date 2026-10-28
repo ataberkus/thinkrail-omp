@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { reportFatalError } from "../analytics";
 import { describeError } from "../log";
 import { dataDir } from "../persistence";
@@ -23,25 +24,39 @@ export function formatCrashRecord(
 
 let installed = false;
 
+const FATAL_REASONS: ReadonlyMap<postmortem.Reason, CrashKind> = new Map([
+	[postmortem.Reason.UNCAUGHT_EXCEPTION, "uncaughtException"],
+	[postmortem.Reason.UNHANDLED_REJECTION, "unhandledRejection"],
+]);
+
 export function installCrashLog(appVersion?: string): void {
 	if (installed || process.env.NODE_ENV === "test") return;
 	installed = true;
-	let crashing = false;
-	const report = (kind: CrashKind, error: unknown): void => {
-		const record = formatCrashRecord(kind, error, new Date(), process.uptime(), appVersion);
-		process.stderr.write(`\nthinkrail host: fatal ${kind}\n${record}`);
-		try {
-			const path = crashLogPath();
-			mkdirSync(join(path, ".."), { recursive: true });
-			appendFileSync(path, record);
-			process.stderr.write(`thinkrail host: wrote crash report to ${path}\n`);
-		} catch (writeError) {
-			process.stderr.write(`thinkrail host: could not write the crash report: ${writeError}\n`);
-		}
-		if (crashing) return;
-		crashing = true;
-		void reportFatalError(error, kind).finally(() => process.exit(1));
-	};
-	process.on("uncaughtException", (error) => report("uncaughtException", error));
-	process.on("unhandledRejection", (reason) => report("unhandledRejection", reason));
+	let fault: unknown;
+	process.on("uncaughtException", (error) => {
+		fault = error;
+	});
+	process.on("unhandledRejection", (reason) => {
+		fault = reason;
+	});
+	postmortem.register(
+		"thinkrail-crash-log",
+		async (reason) => {
+			const kind = FATAL_REASONS.get(reason);
+			if (!kind) return;
+			await Promise.resolve();
+			const record = formatCrashRecord(kind, fault, new Date(), process.uptime(), appVersion);
+			process.stderr.write(`\nthinkrail host: fatal ${kind}\n${record}`);
+			try {
+				const path = crashLogPath();
+				mkdirSync(join(path, ".."), { recursive: true });
+				appendFileSync(path, record);
+				process.stderr.write(`thinkrail host: wrote crash report to ${path}\n`);
+			} catch (writeError) {
+				process.stderr.write(`thinkrail host: could not write the crash report: ${writeError}\n`);
+			}
+			await reportFatalError(fault, kind);
+		},
+		{ exitOnly: true },
+	);
 }

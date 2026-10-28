@@ -31,7 +31,7 @@ used), and leaves every byte of the body untouched.
   and thinkrail (`additionalExtensionPaths` / `additionalSkillPaths`) load it — plus the **`pi-spec-graph/core`
   export** (the pi-free read model), consumable by hosts (thinkrail's server) without going through the
   agent. `tools/` stays internal.
-- **Allowed deps:** `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `typebox` (peer); `yaml`
+- **Allowed deps:** `@oh-my-pi/pi-coding-agent` (peer); `yaml`
   (frontmatter parse/serialize); Node built-ins.
 - **Forbidden:** any `@thinkrail/*` package — the dependency edge is one-way (thinkrail → this
   package), which is what keeps it portable.
@@ -73,23 +73,29 @@ Concept, schema, and workflow live in the **skill** (auto-discovered via the `pi
 `additionalSkillPaths`). The always-on rule keeps specs authoritative while making lookup contextual:
 consult the relevant spec when work is governed by or may alter a documented boundary, contract,
 invariant, behavior, or architecture decision; localized work need not read unrelated specs. The rule is
-contributed in `before_agent_start` as the `pi-spec-graph` entry of `systemPromptOptions.sections` — mutated
-in place, handler returns nothing — so it renders as its own XML-tagged block after `cwd`, the tail position
-the old free-text append had. Returning `systemPrompt` forces the whole prompt: a cache miss on any change,
-where a named section is one diffed patch. Not a `promptGuidelines` bullet, which would flatten this
-multi-line rule into pi's shared `rules` list. Tag = package name: globally unique, and a portable package
-must not carry a host brand. A third-party extension that returns `systemPrompt` forces the whole prompt and
-drops every structured section, ours included — pi's documented force semantics; accepted rather than
-re-appending the rule to a forced prompt.
-Each tool carries a `description` (its constraints) and a one-line `promptSnippet` (its entry in the system
-prompt's Available-tools list, matching the bundled `pi-web-access` / `visualize` tools). This is
-pi-native prompt influence through an extension, not host prompt assembly.
+contributed in `before_agent_start` by returning `{ systemPrompt: [...event.systemPrompt, block] }`, where
+`block` is the rule wrapped in a `<pi-spec-graph>` tag — omp's system prompt is a `string[]`, so the rule is
+one appended element at the tail, and omp chains handlers in registration order so other extensions' blocks
+survive. omp has no named-section patching (pi's `systemPromptOptions.sections`); the returned array is a
+per-turn override that replaces the base prompt for that turn only, so the block is byte-stable and appended
+last to keep the provider cache prefix intact. Tag = package name: globally unique, and a portable package
+must not carry a host brand. omp emits `before_agent_start` only for prompt-driven runs (user prompts and
+queued user batches); turns started by an extension custom message (`sendCustomMessage` with
+`triggerTurn`) skip it, and the extension API cannot touch the base prompt. A host that needs the rule on
+those turns seeds the exported `SPEC_BLOCK` into the base prompt (`createAgentSession`'s `systemPrompt`
+callback — ThinkRail's server does, for this rule and its siblings); the handler appends nothing when the
+block is already present, so a seeded rule appears once. Under plain omp custom-message turns run without it.
+Each tool carries a `description` (its constraints) and registers with `loadMode: "essential"`: omp
+defaults extension tools to `"discoverable"`, which mounts them under `xd://` (schemas on demand) when
+`tools.xdev` is on, so `essential` keeps them top-level with full schemas as pi did. omp has no
+`promptSnippet`; it lists every top-level tool in the system prompt's Tool Inventory by label and name, and
+the description carries the guidance.
 
 ## thinkrail integration
 
-`packages/server/src/agent/extensions.ts` layers this package into every session's
-`DefaultResourceLoader` the same way as `pi-web-access`: `require.resolve("pi-spec-graph/index.ts")` on
-`additionalExtensionPaths`, the package's `skills` dir on `additionalSkillPaths`. Server references it only
+`packages/server/src/agent/extensions.ts` layers this package into every session's resources:
+`require.resolve("pi-spec-graph/index.ts")` among the preloaded extension paths and the package's `skills`
+dir among the host's skill roots. Server references it only
 by resolved path (no value import), so it stays out of server's typecheck graph. Separately,
 `packages/server/src/spec/` value-imports **`pi-spec-graph/core`** (the pi-free model — no pi packages in
 that subtree) to serve the read-only Specs viewer over the wire — the same is-a-spec rule, parser, and
@@ -98,7 +104,7 @@ revalidate-on-read `SpecIndex` the agent tools use.
 ## Invariants
 
 - The dependency edge is one-way: thinkrail depends on this package; this package depends on nothing in the
-  monorepo, and `core/` imports no `@earendil-works/*`.
+  monorepo, and `core/` imports no `@oh-my-pi/*`.
 - The index is a derived read cache over the filesystem (the source of truth); it holds no authoritative
   state — `pi` owns state — and never serves a stale graph.
 - Tools never edit prose; `spec_update` is frontmatter-only, lossless (preserves comments / nested

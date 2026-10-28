@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
@@ -15,15 +15,15 @@ export const RESERVED_LABELS = [OTHER_LABEL, "Type something.", CHAT_LABEL, "Nex
 export interface AskUserQuestionOption {
 	label: string;
 	description: string;
-	preview?: string;
-	recommendedReason?: string;
+	preview?: string | undefined;
+	recommendedReason?: string | undefined;
 }
 
 export interface AskUserQuestionItem {
 	question: string;
 	header: string;
 	options: AskUserQuestionOption[];
-	multiSelect?: boolean;
+	multiSelect?: boolean | undefined;
 }
 
 export interface AskUserQuestionArgs {

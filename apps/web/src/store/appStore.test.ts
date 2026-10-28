@@ -379,12 +379,7 @@ test("stats refresh ticks survive batching at finalized Pi state boundaries", ()
 	expect(rt("a").statsRefreshTick).toBe(3);
 	store.handlePiEvent({ type: "entry_appended", entryType: "custom" }, "a");
 	expect(rt("a").statsRefreshTick).toBe(3);
-	for (const [index, entryType] of [
-		"usage",
-		"compaction",
-		"branch_summary",
-		"context_edit",
-	].entries()) {
+	for (const [index, entryType] of ["model_usage", "compaction", "branch_summary"].entries()) {
 		store.handlePiEvent({ type: "entry_appended", entryType }, "a");
 		expect(rt("a").statsRefreshTick).toBe(4 + index);
 	}

@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import {
 	ASK_UNAVAILABLE_TEXT,
 	ASK_USER_QUESTION_TOOL_NAME,
@@ -18,7 +18,6 @@ import { askInTerminal, renderAskCall, renderAskResult } from "./tui.ts";
 
 export interface AskUserQuestionGuidance {
 	description?: string;
-	promptSnippet?: string;
 	promptGuidelines?: readonly string[];
 }
 
@@ -26,6 +25,7 @@ export interface AskUserQuestionExtensionOptions {
 	ask?: AskUserQuestionAsker;
 	announce?: (toolCallId: string) => void;
 	guidance?: AskUserQuestionGuidance;
+	endRun?: (toolCallId: string) => void;
 }
 
 export const DEFAULT_DESCRIPTION = `Ask the user one or more structured, multiple-choice questions during execution, instead of guessing. Use when:
@@ -48,32 +48,64 @@ export const DEFAULT_PROMPT_GUIDELINES: readonly string[] = [
 	"Call ask_user_question as the only tool in the assistant response; continue with other tools after the answer.",
 ];
 
+export const DISCARDED_CALL_REASON = `Not executed: ${ASK_USER_QUESTION_TOOL_NAME} must be the only tool call in its assistant response. Re-issue this call after the user answers.`;
+export const NOT_MODEL_CALL_REASON = `${ASK_USER_QUESTION_TOOL_NAME} can only be called directly by the model, as the only tool call in its response.`;
+
 const askWithBuiltInUi: AskUserQuestionAsker = (request) =>
 	request.ctx.mode === "tui" ? askInTerminal(request) : askWithDialogs(request);
+
+function toolCallIds(message: { role: string }): string[] {
+	const content = (message as { content?: unknown }).content;
+	if (message.role !== "assistant" || !Array.isArray(content)) return [];
+	return content.flatMap((block: { type?: unknown; id?: unknown }) =>
+		block?.type === "toolCall" && typeof block.id === "string" ? [block.id] : [],
+	);
+}
+
+export function promptGuidelinesSection(guidelines: readonly string[]): string {
+	return [
+		`Guidelines for ${ASK_USER_QUESTION_TOOL_NAME}:`,
+		...guidelines.map((line) => `- ${line}`),
+	].join("\n");
+}
 
 export function createAskUserQuestionExtension(
 	options: AskUserQuestionExtensionOptions = {},
 ): ExtensionFactory {
 	const ask = options.ask ?? askWithBuiltInUi;
 	const guidance = options.guidance ?? {};
+	const promptGuidelines = [...(guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES)];
 	return (pi: ExtensionAPI): void => {
-		pi.on("message_end", (event) => {
-			const message = isolateAskUserQuestionBatch(event.message);
-			if (options.announce) {
-				for (const toolCallId of executableAskCallIds(message ?? event.message))
-					options.announce(toolCallId);
+		const kept = new Set<string>();
+		const discarded = new Set<string>();
+		pi.on("assistant_message", (event) => {
+			const isolated = isolateAskUserQuestionBatch(event.message) ?? event.message;
+			const executable = executableAskCallIds(isolated);
+			for (const toolCallId of executable) {
+				kept.add(toolCallId);
+				options.announce?.(toolCallId);
 			}
-			return message ? { message } : undefined;
+			const remaining = new Set(toolCallIds(isolated));
+			for (const toolCallId of toolCallIds(event.message))
+				if (!remaining.has(toolCallId)) discarded.add(toolCallId);
+		});
+		pi.on("tool_call", (event) => {
+			if (discarded.delete(event.toolCallId)) return { block: true, reason: DISCARDED_CALL_REASON };
+			if (event.toolName !== ASK_USER_QUESTION_TOOL_NAME || kept.delete(event.toolCallId))
+				return undefined;
+			return { block: true, reason: NOT_MODEL_CALL_REASON };
+		});
+		pi.on("before_agent_start", (event) => {
+			if (promptGuidelines.length === 0) return undefined;
+			if (!pi.getActiveTools().includes(ASK_USER_QUESTION_TOOL_NAME)) return undefined;
+			return { systemPrompt: [...event.systemPrompt, promptGuidelinesSection(promptGuidelines)] };
 		});
 		pi.registerTool({
 			name: ASK_USER_QUESTION_TOOL_NAME,
 			label: "Ask User Question",
 			description: guidance.description ?? DEFAULT_DESCRIPTION,
-			...(guidance.promptSnippet ? { promptSnippet: guidance.promptSnippet } : {}),
-			promptGuidelines: [...(guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES)],
 			parameters: AskUserQuestionSchema,
-			executionMode: "sequential",
-			exposure: "model-only",
+			loadMode: "essential",
 			async execute(toolCallId, params, signal, _onUpdate, ctx) {
 				const args: AskUserQuestionArgs = params;
 				if (!options.ask && !ctx.hasUI)
@@ -81,7 +113,9 @@ export function createAskUserQuestionExtension(
 				const validation = validateQuestionnaire(args);
 				if (!validation.ok) return textResult(validation.message, { answers: [], cancelled: true });
 				const outcome = await ask({ toolCallId, args, signal, ctx });
-				return outcomeResult(outcome, args);
+				const result = outcomeResult(outcome, args);
+				if (result.terminate) options.endRun?.(toolCallId);
+				return result;
 			},
 			renderCall: renderAskCall,
 			renderResult: renderAskResult,

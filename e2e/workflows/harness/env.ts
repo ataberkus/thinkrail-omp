@@ -4,7 +4,7 @@ import { E2E_HOME_DIR, E2E_PI_AGENT_DIR } from "../../fixtures/paths";
 
 const workerAgentDir = `${E2E_PI_AGENT_DIR}-w${process.pid}`;
 mkdirSync(workerAgentDir, { recursive: true });
-for (const file of ["auth.json", "models.json", "settings.json"]) {
+for (const file of ["agent.db", "agent.db-wal", "models.yml", "config.yml"]) {
 	const src = join(E2E_PI_AGENT_DIR, file);
 	if (existsSync(src)) copyFileSync(src, join(workerAgentDir, file));
 }

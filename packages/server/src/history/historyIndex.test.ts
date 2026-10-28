@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bu
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, SystemMessage, Usage } from "@earendil-works/pi-ai";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { isolateAgentDir } from "pi-faux";
 import { extractSession } from "./extract";
 import { getHistoryIndex, HistoryIndex, makeSnippet, matchesTerms } from "./historyIndex";
 import { defaultSessionDirFor, writeFixtureSession } from "./testFixtures";
@@ -55,8 +56,8 @@ describe("HistoryIndex.search", () => {
 		expect(result.indexing).toBe(false);
 	});
 
-	test("ignores persisted system and usage entries in extraction and search", async () => {
-		const manager = SessionManager.create("/repo/system-usage", dir, { id: "system-usage" });
+	test("ignores persisted system-prompt and usage entries in extraction and search", async () => {
+		const manager = SessionManager.create("/repo/system-usage", dir);
 		const usage: Usage = {
 			input: 2,
 			output: 3,
@@ -65,14 +66,22 @@ describe("HistoryIndex.search", () => {
 			totalTokens: 5,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
-		const system: SystemMessage = {
-			role: "system",
-			content: "private system instruction",
-			sections: { rules: "private system instruction" },
-			timestamp: 1,
-		};
-		manager.appendMessage(system);
-		manager.appendUsage("cache_warm", "test", "test-model", usage);
+		manager.appendSessionInit({
+			systemPrompt: ["private system instruction"],
+			task: "private system task",
+			tools: [],
+		});
+		manager.appendModelUsage(
+			{
+				purpose: "cache_warm",
+				api: "test",
+				provider: "test",
+				model: "test-model",
+				usage,
+				stopReason: "stop",
+			},
+			{ sessionId: manager.getSessionId(), parentId: manager.getLeafId() },
+		);
 		manager.appendMessage({ role: "user", content: "visible prompt", timestamp: 2 });
 		const assistant: AssistantMessage = {
 			role: "assistant",
@@ -85,10 +94,16 @@ describe("HistoryIndex.search", () => {
 			timestamp: 3,
 		};
 		manager.appendMessage(assistant);
+		await manager.flush();
 		const path = manager.getSessionFile();
 		expect(path).toBeString();
 		const jsonl = readFileSync(path as string, "utf8");
-		expect(JSON.parse(jsonl.split("\n")[1] ?? "{}").message.role).toBe("system");
+		const types = jsonl
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line).type);
+		expect(types).toContain("session_init");
+		expect(types).toContain("model_usage");
 		expect(extractSession(jsonl)?.entries).toEqual([
 			{ text: "visible prompt", role: "user", timestamp: 2, messageIndex: 0 },
 			{ text: "visible answer", role: "assistant", timestamp: 3, messageIndex: 1 },
@@ -299,8 +314,7 @@ describe("HistoryIndex.search", () => {
 	});
 
 	test("(j) default layout: a no-arg index discovers per-cwd subdirectories under the agent dir", async () => {
-		const prev = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = dir;
+		const isolated = isolateAgentDir(dir);
 		try {
 			writeFixtureSession(defaultSessionDirFor(dir, "/repo/a"), {
 				id: "sess-a",
@@ -323,14 +337,12 @@ describe("HistoryIndex.search", () => {
 			expect(result.prompts.map((p) => p.sessionId).sort()).toEqual(["sess-a", "sess-b"]);
 			expect(result.prompts.map((p) => p.cwd).sort()).toEqual(["/repo/a", "/repo/b"]);
 		} finally {
-			if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = prev;
+			isolated.restore();
 		}
 	});
 
 	test("(k) default layout discovers a session directory reached through a top-level symlink", async () => {
-		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = dir;
+		const isolated = isolateAgentDir(dir);
 		try {
 			const target = join(dir, "linked-session-target");
 			writeFixtureSession(target, {
@@ -354,8 +366,7 @@ describe("HistoryIndex.search", () => {
 
 			expect(result.prompts.map((prompt) => prompt.sessionId)).toEqual(["sess-linked"]);
 		} finally {
-			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			isolated.restore();
 		}
 	});
 

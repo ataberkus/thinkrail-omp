@@ -1,10 +1,10 @@
 # @thinkrail/pi-ask-user-question
 
-A [pi](https://pi.dev) extension that gives the agent an `ask_user_question` tool. Instead of guessing, the
+An [oh-my-pi](https://omp.sh) (`omp`) extension that gives the agent an `ask_user_question` tool. Instead of guessing, the
 agent asks you one or more structured multiple-choice questions and waits for your answers.
 
 ```bash
-pi install npm:@thinkrail/pi-ask-user-question
+omp plugin install @thinkrail/pi-ask-user-question
 ```
 
 ## What you get
@@ -20,14 +20,14 @@ pi install npm:@thinkrail/pi-ask-user-question
   - `n` attaches a note to an option.
   - The recommended option shows a `Why:` line.
   - An option's markdown preview appears beside the list on wide terminals and below it on narrow ones.
-  - Esc skips the questionnaire. **Chat about this** ends the turn so you can answer in your own words.
-- **Dialogs in RPC hosts.** In editors that drive pi over RPC (VS Code, Zed, …) the questions arrive one
+  - Esc skips the questionnaire. **Chat about this** hands the questions back so you can answer in your own words.
+- **Dialogs in RPC hosts.** In editors that drive omp over RPC (VS Code, Zed, …) the questions arrive one
   native dialog at a time: a choice list with "Other…" and "Chat about this". A multi-select question
   takes the numbers of the options you pick (`1,3`), optionally followed by `; your own answer`.
 - **Readable answers.** The tool result tells the model exactly what you chose, your own answers, your
   notes, and which questions you left unanswered. The transcript shows a compact summary.
 
-Without an interactive UI (`pi -p`, JSON mode) the tool reports that it cannot ask, so the agent states its
+Without an interactive UI (`omp -p`, JSON mode) the tool reports that it cannot ask, so the agent states its
 assumptions instead.
 
 ## Embedding
@@ -42,7 +42,7 @@ export default createAskUserQuestionExtension({
   // { kind: "answered", result }, { kind: "deferred" } (the answer arrives as a chat message)
   // or { kind: "abandoned" }. Reject to report the run as stopped.
   ask: async (request) => myHost.ask(request.toolCallId, request.args, request.signal),
-  // Optional: learn about each executable call before pi runs it.
+  // Optional: learn about each executable call before omp runs it.
   announce: (toolCallId) => myHost.expect(toolCallId),
   // Optional: describe your UI to the model.
   guidance: { description: "…", promptGuidelines: ["…"] },

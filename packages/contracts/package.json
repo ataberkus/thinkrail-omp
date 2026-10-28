@@ -11,9 +11,9 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-agent-core": "catalog:",
+		"@oh-my-pi/pi-agent-core": "catalog:",
 		"@types/bun": "catalog:",
-		"@earendil-works/pi-ai": "catalog:",
+		"@oh-my-pi/pi-ai": "catalog:",
 		"typescript": "catalog:"
 	}
 }

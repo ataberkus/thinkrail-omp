@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
 // Vanilla-parity gate for pi-extensions/*; the bar and its rationale live in pi-extensions/SPEC.md.
-import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	copyFileSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { packPiPackage, publishablePiPackages, repoRoot } from "./pi-packages.ts";
 
 interface ScriptedUi {
@@ -40,8 +41,8 @@ interface Expectation {
 const rootManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
 	workspaces: { catalog: Record<string, string> };
 };
-const piVersion = rootManifest.workspaces.catalog["@earendil-works/pi-coding-agent"];
-if (!piVersion) throw new Error("check-pi-packages: pi version missing from the root catalog");
+const ompVersion = rootManifest.workspaces.catalog["@oh-my-pi/pi-coding-agent"];
+if (!ompVersion) throw new Error("check-pi-packages: omp version missing from the root catalog");
 
 const ASK_LIBRARY = {
 	question: "Which library?",
@@ -222,51 +223,59 @@ const EXPECTATIONS: Record<string, Expectation> = {
 	},
 };
 
-const BUN_ONLY = [
-	/\bBun\./,
-	/from\s+["']bun(?::|["'])/,
-	/import\s*\(\s*["']bun:/,
-	/import\.meta\.(?:dir|require)\b/,
+const LEGACY_ENGINE_IMPORTS = [
+	/["'`]@(?:earendil-works|mariozechner)\/pi-[\w-]+(?:\/[^"'`]*)?["'`]/,
+	/["'`](?:@sinclair\/typebox|typebox)["'`]/,
+	/["'`]@oh-my-pi\/pi-coding-agent\/extensibility\/[^"'`]*legacy-pi-[^"'`]*["'`]/,
 ];
+
+interface PackedPackage {
+	name: string;
+	version: string;
+	tarball: string;
+	manifest: Record<string, unknown>;
+	bytes: Uint8Array;
+}
 
 function fail(message: string): never {
 	console.error(`check-pi-packages: FAIL — ${message}`);
 	process.exit(1);
 }
 
-function run(
+async function run(
 	command: string,
 	args: string[],
 	cwd: string,
-	env: NodeJS.ProcessEnv = process.env,
-): string {
-	const result = spawnSync(command, args, {
-		cwd,
-		env,
-		encoding: "utf8",
-		maxBuffer: 64 * 1024 * 1024,
-	});
-	if (result.status !== 0) {
-		fail(
-			`${command} ${args.join(" ")} (in ${cwd}) exited ${result.status}\n${result.stdout}\n${result.stderr}`,
-		);
-	}
-	return result.stdout;
+	env: Record<string, string | undefined> = process.env,
+): Promise<string> {
+	const proc = Bun.spawn([command, ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
+	const [status, stdout, stderr] = await Promise.all([
+		proc.exited,
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+	]);
+	if (status !== 0)
+		fail(`${command} ${args.join(" ")} (in ${cwd}) exited ${status}\n${stdout}\n${stderr}`);
+	return stdout;
 }
 
-function assertDualRuntime(tarball: string, scratch: string): void {
+function within(root: string, candidate: string): boolean {
+	return candidate === root || candidate.startsWith(`${root}${sep}`);
+}
+
+async function assertNoLegacyEngineImports(tarball: string, scratch: string): Promise<void> {
 	const extracted = mkdtempSync(join(scratch, "extract-"));
-	run("tar", ["-xzf", tarball, "-C", extracted], scratch);
+	await run("tar", ["-xzf", tarball, "-C", extracted], scratch);
 	const visit = (path: string): void => {
 		for (const entry of readdirSync(path, { withFileTypes: true })) {
 			const child = join(path, entry.name);
 			if (entry.isDirectory()) visit(child);
-			else if (/\.(?:[cm]?[jt]s)$/.test(entry.name)) {
+			else if (/\.(?:[cm]?[jt]sx?)$/.test(entry.name)) {
 				const source = readFileSync(child, "utf8");
-				for (const pattern of BUN_ONLY) {
+				for (const pattern of LEGACY_ENGINE_IMPORTS) {
 					if (pattern.test(source))
 						fail(
-							`${basename(tarball)}: ${child.slice(extracted.length + 1)} uses a Bun-only API (${pattern})`,
+							`${basename(tarball)}: ${child.slice(extracted.length + 1)} imports a legacy pi engine module (${pattern})`,
 						);
 				}
 			}
@@ -275,95 +284,144 @@ function assertDualRuntime(tarball: string, scratch: string): void {
 	visit(extracted);
 }
 
-const packages = publishablePiPackages();
+function serveScope(packed: PackedPackage[]): ReturnType<typeof Bun.serve> {
+	const byName = new Map(packed.map((pkg) => [pkg.name, pkg]));
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch(request) {
+			const path = decodeURIComponent(new URL(request.url).pathname.slice(1));
+			const tarballAt = path.indexOf("/-/");
+			const pkg = byName.get(tarballAt === -1 ? path : path.slice(0, tarballAt));
+			if (!pkg) return new Response("not found", { status: 404 });
+			if (tarballAt !== -1) return new Response(pkg.bytes);
+			const dist = {
+				tarball: `${server.url}${pkg.name}/-/${basename(pkg.tarball)}`,
+				integrity: `sha512-${createHash("sha512").update(pkg.bytes).digest("base64")}`,
+				shasum: createHash("sha1").update(pkg.bytes).digest("hex"),
+			};
+			return Response.json({
+				name: pkg.name,
+				"dist-tags": { latest: pkg.version },
+				versions: { [pkg.version]: { ...pkg.manifest, dist } },
+			});
+		},
+	});
+	return server;
+}
+
+function isolatedEnv(home: string, extra: Record<string, string>): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value === undefined) continue;
+		if (/^(?:OMP_|PI_)/.test(key)) continue;
+		if (/^XDG_(?:CONFIG|DATA|STATE|CACHE)_HOME$/.test(key)) continue;
+		env[key] = value;
+	}
+	return { ...env, HOME: home, USERPROFILE: home, ...extra };
+}
+
+const packagesDirFlag = process.argv.indexOf("--packages-dir");
+const packagesDirArg = packagesDirFlag === -1 ? undefined : process.argv[packagesDirFlag + 1];
+if (packagesDirFlag !== -1 && !packagesDirArg) fail("--packages-dir needs a directory");
+const packages = publishablePiPackages(packagesDirArg ? resolve(packagesDirArg) : undefined);
 if (packages.length === 0) {
 	console.log("check-pi-packages: no publishable packages under pi-extensions/");
 	process.exit(0);
 }
+const scope = packages[0]?.name.split("/")[0];
+if (!scope?.startsWith("@") || packages.some((pkg) => !pkg.name.startsWith(`${scope}/`)))
+	fail(`publishable packages must share one npm scope (got ${packages.map((pkg) => pkg.name)})`);
 
-const nodeVersion = run("node", ["--version"], repoRoot).trim();
-const npmVersion = run("npm", ["--version"], repoRoot).trim();
-console.log(`check-pi-packages: node ${nodeVersion}, npm ${npmVersion}, pi ${piVersion}`);
-
-const scratch = mkdtempSync(join(tmpdir(), "thinkrail-pi-parity-"));
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "thinkrail-pi-parity-")));
+if (within(realpathSync(repoRoot), scratch)) fail(`fixture ${scratch} must live outside the repo`);
 try {
-	const tarballs = new Map<string, string>();
+	const packed: PackedPackage[] = [];
 	for (const pkg of packages) {
-		const tarball = packPiPackage(pkg, scratch);
-		tarballs.set(pkg.dir, tarball);
-		assertDualRuntime(tarball, scratch);
-	}
-
-	for (const pkg of packages) {
-		const { dir } = pkg;
 		const expectation = EXPECTATIONS[pkg.name];
 		if (!expectation)
 			fail(`${pkg.name} has no parity expectations in scripts/check-pi-packages.ts`);
-		if (pkg.piExtensions.length === 0) fail(`${pkg.name} declares no pi.extensions`);
-
-		const agentDir = mkdtempSync(join(scratch, "agent-"));
-		const npmDir = join(agentDir, "npm");
-		const cwd = mkdtempSync(join(scratch, "project-"));
-		mkdirSync(npmDir, { recursive: true });
-		writeFileSync(
-			join(npmDir, "package.json"),
-			JSON.stringify({ name: "pi-parity-fixture", private: true }),
-		);
-
-		const workspaceDeps = packages
-			.filter((candidate) => pkg.dependencies[candidate.name] !== undefined)
-			.map((candidate) => tarballs.get(candidate.dir) as string);
-		run(
-			"npm",
-			[
-				"install",
-				"--prefix",
-				npmDir,
-				"--legacy-peer-deps",
-				"--no-audit",
-				"--no-fund",
-				"--loglevel=error",
-				`@earendil-works/pi-coding-agent@${piVersion}`,
-				...workspaceDeps,
-				tarballs.get(dir) as string,
-			],
-			npmDir,
-		);
-		writeFileSync(
-			join(agentDir, "settings.json"),
-			JSON.stringify({ packages: [`npm:${pkg.name}`] }, null, 2),
-		);
-
-		const spec = {
+		if (pkg.piExtensions.length === 0) fail(`${pkg.name} declares no omp.extensions`);
+		const tarball = packPiPackage(pkg, scratch);
+		await assertNoLegacyEngineImports(tarball, scratch);
+		const manifest = JSON.parse(
+			await run("tar", ["-xzOf", tarball, "package/package.json"], scratch),
+		) as Record<string, unknown>;
+		packed.push({
 			name: pkg.name,
-			packageDirName: `node_modules/${pkg.name}/`,
-			agentDir,
-			npmDir,
-			cwd,
-			tools: expectation.tools,
-			skills: expectation.skills,
-			cases: expectation.cases,
-		};
-		const specPath = join(agentDir, "parity-spec.json");
-		writeFileSync(specPath, JSON.stringify(spec));
-		const runner = join(npmDir, "pi-package-parity.node.mjs");
-		copyFileSync(join(repoRoot, "scripts", "pi-package-parity.node.mjs"), runner);
-		const result = spawnSync("node", [runner, specPath], {
-			cwd,
-			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
-			encoding: "utf8",
-			maxBuffer: 64 * 1024 * 1024,
+			version: pkg.version,
+			tarball,
+			manifest,
+			bytes: readFileSync(tarball),
 		});
-		process.stdout.write(result.stdout);
-		if (result.status !== 0) fail(`${pkg.name} failed vanilla parity under Node\n${result.stderr}`);
+	}
 
-		const size = execFileSync("du", ["-sh", join(npmDir, "node_modules")], {
-			encoding: "utf8",
-		}).split("\t")[0];
-		console.log(`  · ${pkg.name}: installed fixture (pi + package + deps) ${size}`);
+	const fixtureDir = join(scratch, "omp");
+	mkdirSync(fixtureDir);
+	writeFileSync(
+		join(fixtureDir, "package.json"),
+		JSON.stringify({ name: "omp-parity-fixture", private: true }),
+	);
+	await run(
+		process.execPath,
+		["add", "--exact", `@oh-my-pi/pi-coding-agent@${ompVersion}`, `@oh-my-pi/pi-tui@${ompVersion}`],
+		fixtureDir,
+	);
+	const omp = join(fixtureDir, "node_modules", ".bin", "omp");
+	const runner = join(fixtureDir, "pi-package-parity.omp.mjs");
+	copyFileSync(join(repoRoot, "scripts", "pi-package-parity.omp.mjs"), runner);
+	const installedOmp = (await run(omp, ["--version"], fixtureDir)).trim();
+	console.log(`check-pi-packages: bun ${Bun.version}, ${installedOmp}`);
+
+	const registry = serveScope(packed);
+	try {
+		for (const pkg of packed) {
+			const expectation = EXPECTATIONS[pkg.name] as Expectation;
+			const home = mkdtempSync(join(scratch, "home-"));
+			const agentDir = join(home, ".omp", "agent");
+			const pluginDir = join(home, ".omp", "plugins", "node_modules", pkg.name);
+			const cwd = mkdtempSync(join(scratch, "project-"));
+			const npmrc = join(home, ".npmrc");
+			writeFileSync(npmrc, `${scope}:registry=${registry.url}\n`);
+			const env = isolatedEnv(home, {
+				PI_CODING_AGENT_DIR: agentDir,
+				NPM_CONFIG_USERCONFIG: npmrc,
+				BUN_INSTALL_CACHE_DIR: join(home, ".bun-cache"),
+			});
+
+			await run(omp, ["plugin", "install", pkg.name], cwd, env);
+
+			const spec = {
+				name: pkg.name,
+				fixtureDir,
+				pluginDir,
+				agentDir,
+				cwd,
+				tools: expectation.tools,
+				skills: expectation.skills,
+				cases: expectation.cases,
+			};
+			const specPath = join(home, "parity-spec.json");
+			writeFileSync(specPath, JSON.stringify(spec));
+			const proc = Bun.spawn([process.execPath, runner, specPath], {
+				cwd,
+				env,
+				stdout: "inherit",
+				stderr: "pipe",
+			});
+			const [status, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+			if (status !== 0) fail(`${pkg.name} failed vanilla parity under omp\n${stderr}`);
+
+			const size = (
+				await run("du", ["-sh", join(home, ".omp", "plugins", "node_modules")], home)
+			).split("\t")[0];
+			console.log(`  · ${pkg.name}: \`omp plugin install\` tree ${size}`);
+		}
+	} finally {
+		registry.stop(true);
 	}
 	console.log(
-		`check-pi-packages: OK (${packages.length} package(s) verified under Node ${nodeVersion})`,
+		`check-pi-packages: OK (${packages.length} package(s) installed and loaded by ${installedOmp})`,
 	);
 } finally {
 	rmSync(scratch, { recursive: true, force: true });

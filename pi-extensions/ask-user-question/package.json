@@ -1,13 +1,13 @@
 {
 	"name": "@thinkrail/pi-ask-user-question",
 	"version": "0.0.0",
-	"description": "A pi extension adding an `ask_user_question` tool: the agent asks structured multiple-choice questions instead of guessing, answered in a terminal questionnaire, in an RPC host's dialogs, or in a host's own UI.",
+	"description": "An oh-my-pi (omp) extension adding an `ask_user_question` tool: the agent asks structured multiple-choice questions instead of guessing, answered in a terminal questionnaire, in an RPC host's dialogs, or in a host's own UI.",
 	"license": "Apache-2.0",
 	"type": "module",
 	"keywords": [
 		"pi-package",
-		"pi",
-		"pi-coding-agent",
+		"oh-my-pi",
+		"omp",
 		"extension",
 		"ask-user-question",
 		"questionnaire"
@@ -37,7 +37,7 @@
 		"access": "public",
 		"provenance": true
 	},
-	"pi": {
+	"omp": {
 		"extensions": [
 			"./index.ts"
 		]
@@ -47,16 +47,15 @@
 		"test": "bun test"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
-		"typebox": "*"
+		"@oh-my-pi/pi-coding-agent": "*",
+		"@oh-my-pi/pi-tui": "*"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-ai": "catalog:",
-		"@earendil-works/pi-coding-agent": "catalog:",
-		"@earendil-works/pi-tui": "catalog:",
+		"@oh-my-pi/pi-agent-core": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-tui": "catalog:",
 		"@types/bun": "catalog:",
-		"typebox": "catalog:",
+		"pi-faux": "workspace:*",
 		"typescript": "catalog:"
 	}
 }

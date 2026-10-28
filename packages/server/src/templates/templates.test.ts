@@ -31,7 +31,7 @@ let dirs: TemplateDirs;
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "trpi-templates-test-"));
 	globalDir = join(root, "agent-home", "prompts");
-	projectDir = join(root, "worktree", ".pi", "prompts");
+	projectDir = join(root, "worktree", ".omp", "prompts");
 	dirs = { globalDir, projectDir };
 });
 
@@ -40,10 +40,10 @@ afterEach(() => {
 });
 
 describe("templateDirs", () => {
-	test("computes globalDir under agentDir/prompts and projectDir under cwd/.pi/prompts", () => {
+	test("computes globalDir under agentDir/prompts and projectDir under cwd/.omp/prompts", () => {
 		const result = templateDirs("/some/cwd", "/some/agent-dir");
 		expect(result.globalDir).toBe(join("/some/agent-dir", "prompts"));
-		expect(result.projectDir).toBe(join("/some/cwd", ".pi", "prompts"));
+		expect(result.projectDir).toBe(join("/some/cwd", ".omp", "prompts"));
 	});
 
 	test("projectDir is absent when cwd is omitted", () => {
@@ -146,7 +146,7 @@ describe("saveTemplate -> listTemplates -> getTemplate", () => {
 
 	test(
 		"a name with an interior dot (foo.bar) round-trips through save -> list -> get -> delete " +
-			"(list/get parity: pi lists any *.md with no sanitization, so this module must accept it too)",
+			"(list/get parity: omp lists any *.md with no sanitization, so this module must accept it too)",
 		() => {
 			const content = "Body for a dotted name.";
 			const saved = saveTemplate(dirs, "global", "foo.bar", content);
@@ -191,12 +191,17 @@ describe("listTemplates precedence + freshness", () => {
 		expect(listTemplates(dirs).map((t) => t.name)).toEqual(["late"]);
 	});
 
-	test("skips a file it can't parse (malformed frontmatter) without throwing, keeps the rest", () => {
+	test("lists a file with malformed frontmatter through omp's line-by-line fallback, without throwing", () => {
 		mkdirSync(globalDir, { recursive: true });
-		writeFileSync(join(globalDir, "broken.md"), "---\nbad: [unterminated\n---\nbody");
+		writeFileSync(
+			join(globalDir, "broken.md"),
+			"---\nbad: [unterminated\ndescription: Still listed\n---\nbody",
+		);
 		saveTemplate(dirs, "global", "ok", "a fine template");
 
-		expect(listTemplates(dirs).map((t) => t.name)).toEqual(["ok"]);
+		const listed = listTemplates(dirs);
+		expect(listed.map((t) => t.name)).toEqual(["broken", "ok"]);
+		expect(listed[0]?.description).toBe("Still listed");
 	});
 
 	test("skips dot-leading filenames entirely (list/get parity: the gate would reject the name too)", () => {
@@ -244,11 +249,14 @@ describe("getTemplate", () => {
 		expect(() => getTemplate(dirs, "missing", "project")).toThrow();
 	});
 
-	test("throws on a directly-named file with malformed frontmatter (asymmetric vs listTemplates's swallow)", () => {
+	test("a directly-named file with malformed frontmatter reads with the same fallback metadata as the listing", () => {
 		mkdirSync(globalDir, { recursive: true });
-		writeFileSync(join(globalDir, "broken.md"), "---\nbad: [unterminated\n---\nbody");
+		const content = "---\nbad: [unterminated\ndescription: Still readable\n---\nbody";
+		writeFileSync(join(globalDir, "broken.md"), content);
 
-		expect(() => getTemplate(dirs, "broken", "global")).toThrow();
+		const template = getTemplate(dirs, "broken", "global");
+		expect(template.description).toBe("Still readable");
+		expect(template.content).toBe(content);
 	});
 });
 
@@ -340,24 +348,24 @@ describe("symlink containment", () => {
 		expect(existsSync(outsideTarget)).toBe(true);
 	});
 
-	for (const level of ["prompts", ".pi"] as const) {
-		test(`a symlinked ${level === ".pi" ? ".pi" : ".pi/prompts"} directory: writes refuse, list/get treat the project dir as empty`, () => {
+	for (const level of ["prompts", ".omp"] as const) {
+		test(`a symlinked ${level === ".omp" ? ".omp" : ".omp/prompts"} directory: writes refuse, list/get treat the project dir as empty`, () => {
 			const evilRoot = mkdtempSync(join(tmpdir(), "trpi-templates-evil-"));
 			try {
 				const elsewhere = join(evilRoot, "elsewhere");
-				const elsewherePrompts = level === ".pi" ? join(elsewhere, "prompts") : elsewhere;
+				const elsewherePrompts = level === ".omp" ? join(elsewhere, "prompts") : elsewhere;
 				mkdirSync(elsewherePrompts, { recursive: true });
 				writeFileSync(join(elsewherePrompts, "secret.md"), "outside content");
 				const worktree = join(evilRoot, "worktree");
 				let promptsDir: string;
-				if (level === ".pi") {
+				if (level === ".omp") {
 					mkdirSync(worktree, { recursive: true });
-					symlinkSync(elsewhere, join(worktree, ".pi"));
-					promptsDir = join(worktree, ".pi", "prompts");
+					symlinkSync(elsewhere, join(worktree, ".omp"));
+					promptsDir = join(worktree, ".omp", "prompts");
 				} else {
-					mkdirSync(join(worktree, ".pi"), { recursive: true });
-					symlinkSync(elsewhere, join(worktree, ".pi", "prompts"));
-					promptsDir = join(worktree, ".pi", "prompts");
+					mkdirSync(join(worktree, ".omp"), { recursive: true });
+					symlinkSync(elsewhere, join(worktree, ".omp", "prompts"));
+					promptsDir = join(worktree, ".omp", "prompts");
 				}
 				const evilDirs: TemplateDirs = { globalDir, projectDir: promptsDir };
 
@@ -387,7 +395,7 @@ describe("symlink containment", () => {
 	});
 });
 
-describe("frontmatter value fidelity (pi's real YAML parser)", () => {
+describe("frontmatter value fidelity (omp's real YAML parser)", () => {
 	test("a single-quoted scalar parses to its value — quotes are never part of the description", () => {
 		mkdirSync(globalDir, { recursive: true });
 		writeFileSync(join(globalDir, "sq.md"), "---\ndescription: 'Review safely'\n---\nBody\n");

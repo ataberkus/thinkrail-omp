@@ -144,7 +144,7 @@ test("a model-authored Thinking heading stays bounded and appears only while fol
 		messages: [{ role: "user", text: "Check the formatter output.", timestamp: BASE_TS }],
 	});
 	const assistantId = `${chat.id}-a1`;
-	const toolNames = ["get_search_content", "fetch_content", "web_search", "spec_grep", "read"];
+	const toolNames = ["grep", "glob", "web_search", "spec_grep", "read"];
 	appendMessage(chat.path, assistantId, `${chat.id}-m0`, {
 		role: "assistant",
 		content: [
@@ -194,7 +194,7 @@ test("a model-authored Thinking heading stays bounded and appears only while fol
 	const toggle = thinking.getByTestId("thinking-group-toggle");
 	const heading = thinking.getByTestId("thinking-group-headline");
 	const thinkingLabel = toggle.locator("span", { hasText: /^Thinking$/ });
-	const metadata = "5 steps · get_search_content, fetch_content, web_search, spec_grep, +1 more";
+	const metadata = "5 steps · grep, glob, web_search, spec_grep, +1 more";
 	await expect(heading).toBeVisible();
 	await expect(heading).toHaveText("Evaluating formatting process");
 	await expect(heading).toHaveCSS("font-weight", "370");

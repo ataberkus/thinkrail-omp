@@ -1,37 +1,34 @@
-import { DEFAULT_MAX_BYTES, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { DEFAULT_GREP_LIMIT, formatGrepMatch, type GrepResult, grepSpecs } from "../core/index.ts";
-import { errorResult, getIndex, textResult } from "./shared.ts";
+import { errorResult, getIndex, MAX_OUTPUT_BYTES, textResult } from "./shared.ts";
 
-const parameters = Type.Object({
-	pattern: Type.String({ description: "Regex or substring to search for within spec files." }),
-	regex: Type.Optional(
-		Type.Boolean({ description: "Treat pattern as a regular expression (default: substring)." }),
-	),
-	ignoreCase: Type.Optional(
-		Type.Boolean({ description: "Case-insensitive match (default: true)." }),
-	),
-	type: Type.Optional(
-		Type.String({ description: "Only search specs with this frontmatter type." }),
-	),
-	tag: Type.Optional(Type.String({ description: "Only search specs carrying this tag." })),
-	parent: Type.Optional(Type.String({ description: "Only search specs whose parent is this id." })),
-	dependsOn: Type.Optional(
-		Type.String({ description: "Only search specs that depend-on this id." }),
-	),
-	limit: Type.Optional(
-		Type.Integer({
-			minimum: 1,
-			description: `Matches per page (default/max: ${DEFAULT_GREP_LIMIT}; the byte limit may return fewer).`,
-		}),
-	),
-	offset: Type.Optional(
-		Type.Integer({
-			minimum: 0,
-			description:
-				"Zero-based match offset (default: 0). Continue with the offset given in the result and the same filters; restart after source changes.",
-		}),
-	),
+const parameters = z.object({
+	pattern: z.string().describe("Regex or substring to search for within spec files."),
+	regex: z
+		.boolean()
+		.optional()
+		.describe("Treat pattern as a regular expression (default: substring)."),
+	ignoreCase: z.boolean().optional().describe("Case-insensitive match (default: true)."),
+	type: z.string().optional().describe("Only search specs with this frontmatter type."),
+	tag: z.string().optional().describe("Only search specs carrying this tag."),
+	parent: z.string().optional().describe("Only search specs whose parent is this id."),
+	dependsOn: z.string().optional().describe("Only search specs that depend-on this id."),
+	limit: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe(
+			`Matches per page (default/max: ${DEFAULT_GREP_LIMIT}; the byte limit may return fewer).`,
+		),
+	offset: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe(
+			"Zero-based match offset (default: 0). Continue with the offset given in the result and the same filters; restart after source changes.",
+		),
 });
 
 export function registerSpecGrep(pi: ExtensionAPI): void {
@@ -40,8 +37,7 @@ export function registerSpecGrep(pi: ExtensionAPI): void {
 		label: "Spec Grep",
 		description:
 			"Search the project's spec-graph: regex or substring match within spec files (files whose frontmatter carries `id` + `type`), optionally narrowed by metadata (type / tag / parent / depends-on). Returns size-bounded pages of path:line matches; follow the returned offset only if needed. Oversized text is capped at 2,000 lines / 50 KiB with full output in a temporary file. Read a matched file's body with the normal read tool.",
-		promptSnippet:
-			"spec_grep — search specs by content when documented decisions, contracts, or boundaries may govern the work.",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const offset = params.offset ?? 0;
@@ -60,7 +56,7 @@ export function registerSpecGrep(pi: ExtensionAPI): void {
 					...(params.dependsOn !== undefined ? { dependsOn: params.dependsOn } : {}),
 					limit: Math.min(params.limit ?? DEFAULT_GREP_LIMIT, DEFAULT_GREP_LIMIT),
 					offset,
-					maxBytes: DEFAULT_MAX_BYTES - 2048,
+					maxBytes: MAX_OUTPUT_BYTES - 2048,
 				});
 			} catch (err) {
 				return errorResult(`Invalid search pattern: ${(err as Error).message}`);

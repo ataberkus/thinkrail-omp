@@ -17,7 +17,6 @@ export const MCP_STATE_KEY: Readonly<Record<McpServerState, MessageKey>> = {
 	"invalid-config": "lib.mcpState.invalidConfig",
 	"pending-reload": "lib.mcpState.pendingReload",
 	"not-running": "lib.mcpState.notRunning",
-	"handled-elsewhere": "lib.mcpState.handledElsewhere",
 	unknown: "common.unknown",
 };
 
@@ -38,7 +37,6 @@ const MCP_STATE_TONE: Readonly<Record<McpServerState, McpStateTone>> = {
 	"invalid-config": "error",
 	"pending-reload": "info",
 	"not-running": "neutral",
-	"handled-elsewhere": "neutral",
 	unknown: "neutral",
 };
 

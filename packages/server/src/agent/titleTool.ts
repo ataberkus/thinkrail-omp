@@ -1,36 +1,41 @@
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { type Static, Type } from "typebox";
+import { type ExtensionAPI, type ToolDefinition, z } from "@oh-my-pi/pi-coding-agent";
 
 export const SET_TITLE_TOOL_NAME = "set_title";
 
-export const SetTitleSchema = Type.Object({
-	chat_title: Type.Optional(
-		Type.String({ description: "3–6 words naming this conversation, in the user's language." }),
-	),
-	workspace_name: Type.Optional(
-		Type.String({ description: "2–5 words naming the task, in the user's language." }),
-	),
-	branch: Type.Optional(
-		Type.String({
-			description:
-				'Short English kebab-case slug for the workspace branch, e.g. "fix-auth-redirect". Only together with workspace_name.',
-		}),
-	),
+export const SetTitleSchema = z.object({
+	chat_title: z
+		.string()
+		.optional()
+		.describe("3–6 words naming this conversation, in the user's language."),
+	workspace_name: z
+		.string()
+		.optional()
+		.describe("2–5 words naming the task, in the user's language."),
+	branch: z
+		.string()
+		.optional()
+		.describe(
+			'Short English kebab-case slug for the workspace branch, e.g. "fix-auth-redirect". Only together with workspace_name.',
+		),
 });
 
-export type SetTitleParams = Static<typeof SetTitleSchema>;
+export interface SetTitleParams {
+	chat_title?: string | undefined;
+	workspace_name?: string | undefined;
+	branch?: string | undefined;
+}
 
-const DESCRIPTION =
-	"Name this conversation and its workspace. Call it once, as soon as the task is clear, passing every name still missing in that one call. A name that is already set — by an earlier call or by the user — is kept; the result says what was applied.";
-
-const PROMPT_SNIPPET = "Name this conversation and its workspace (once, at the start of the task)";
-
-const PROMPT_GUIDELINES = [
+const GUIDELINES = [
 	"Call set_title once per conversation, with chat_title, workspace_name and branch together, as your first action in the first turn that has a concrete task, before answering or using other tools, even when the answer is a single sentence. When the request links a PR, issue, or ticket, call it right after you have read that item's number and title. Only skip it while there is no concrete task yet (a greeting, an open question), then call it in the first later turn that has one.",
 	"Write chat_title and workspace_name in the language the user writes in; branch is always a short English kebab-case slug.",
 	"When the task is about a PR, issue, or ticket, read it first and name it `<Verb> #<number> <its exact title>`, e.g. `Review #567 Add page zoom shortcuts` with branch `review-567-page-zoom`.",
 	"A name the result reports as kept is final: do not call set_title again to change it.",
 ];
+
+const DESCRIPTION = [
+	"Name this conversation and its workspace. Call it once, as soon as the task is clear, passing every name still missing in that one call. A name that is already set — by an earlier call or by the user — is kept; the result says what was applied.",
+	...GUIDELINES,
+].join("\n\n");
 
 export interface TitleToolHost {
 	apply: (sessionId: string, params: SetTitleParams) => Promise<string>;
@@ -49,8 +54,6 @@ let host: TitleToolHost = unavailableHost;
 export function setTitleToolHost(next: TitleToolHost | null): void {
 	host = next ?? unavailableHost;
 }
-
-const TITLE_SECTION = "pending-naming";
 
 export function pendingNamingRule(chatUnnamed: boolean, workspaceUnnamed: boolean): string | null {
 	const missing = [
@@ -72,13 +75,11 @@ export function createSetTitleTool(): ToolDefinition<typeof SetTitleSchema, SetT
 		name: SET_TITLE_TOOL_NAME,
 		label: "Set Title",
 		description: DESCRIPTION,
-		promptSnippet: PROMPT_SNIPPET,
-		promptGuidelines: PROMPT_GUIDELINES,
+		loadMode: "essential",
 		parameters: SetTitleSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const input = params as SetTitleParams;
-			const text = await host.apply(ctx.sessionManager.getSessionId(), input);
-			return { content: [{ type: "text", text }], details: input };
+			const text = await host.apply(ctx.sessionManager.getSessionId(), params);
+			return { content: [{ type: "text", text }], details: params };
 		},
 	};
 }
@@ -91,7 +92,8 @@ export function setTitleExtension(pi: ExtensionAPI): void {
 			ctx.sessionManager.getSessionName() === undefined,
 			host.workspaceNeedsName(sessionId),
 		);
-		if (rule) event.systemPromptOptions.sections[TITLE_SECTION] = rule;
-		else delete event.systemPromptOptions.sections[TITLE_SECTION];
+		return rule && !event.systemPrompt.includes(rule)
+			? { systemPrompt: [...event.systemPrompt, rule] }
+			: undefined;
 	});
 }

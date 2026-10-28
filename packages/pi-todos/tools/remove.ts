@@ -1,9 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { errorResult, storeFor, textResult } from "./shared.ts";
 
-const parameters = Type.Object({
-	id: Type.String({ description: "Id of the item to remove." }),
+const parameters = z.object({
+	id: z.string().describe("Id of the item to remove."),
 });
 
 export function registerTodoRemove(pi: ExtensionAPI): void {
@@ -12,8 +11,7 @@ export function registerTodoRemove(pi: ExtensionAPI): void {
 		label: "Todo Remove",
 		description:
 			"Delete an item from the list by id. Rarely needed: a finished item is marked done (todo_update), not removed — done items stay as the user's history. Remove only when the user explicitly asks to drop an item; to take a loose item into work, use todo_promote.",
-		promptSnippet:
-			"todo_remove — delete an item (only when the user asks; done items stay, not removed).",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const removed = storeFor(ctx).remove(params.id);

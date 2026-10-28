@@ -4,12 +4,13 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 import {
@@ -24,6 +25,7 @@ import {
 	DEFAULT_E2E_MODEL,
 	isExactE2eModel,
 	isRealCentralE2e,
+	LOCAL_AGENT_MODEL_AND_AUTH_FILES,
 	REAL_CENTRAL_E2E_ENV,
 	removeLocalAgentModelAndAuth,
 	resolveE2eModel,
@@ -67,7 +69,7 @@ test("Central agent staging copies only the restricted artifact and settings", (
 		const agentDir = join(root, "pi-agent");
 		writeFileSync(source, "export default function central() {}\n");
 		mkdirSync(agentDir, { recursive: true });
-		for (const file of ["auth.json", "models.json", "auth.json.bak", "models.json.bak"]) {
+		for (const file of LOCAL_AGENT_MODEL_AND_AUTH_FILES) {
 			writeFileSync(join(agentDir, file), "sensitive\n");
 		}
 
@@ -81,12 +83,11 @@ test("Central agent staging copies only the restricted artifact and settings", (
 			expect(statSync(seed).mode & 0o777).toBe(0o600);
 			expect(statSync(artifact).mode & 0o777).toBe(0o600);
 		}
-		for (const file of ["auth.json", "models.json", "auth.json.bak", "models.json.bak"]) {
+		for (const file of LOCAL_AGENT_MODEL_AND_AUTH_FILES) {
 			expect(existsSync(join(agentDir, file))).toBe(false);
 		}
-		expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({
-			defaultProvider: "anthropic",
-			defaultModel: "exact-model",
+		expect(Bun.YAML.parse(readFileSync(join(agentDir, "config.yml"), "utf8"))).toEqual({
+			modelRoles: { default: "anthropic/exact-model" },
 			defaultThinkingLevel: "low",
 		});
 	} finally {
@@ -94,21 +95,32 @@ test("Central agent staging copies only the restricted artifact and settings", (
 	}
 });
 
-test("credential denylist covers every environment name in pi-ai's pinned discovery source", () => {
-	const source = readFileSync(
-		fileURLToPath(
-			new URL(
-				"../packages/contracts/node_modules/@earendil-works/pi-ai/dist/env-api-keys.js",
-				import.meta.url,
-			),
+test("credential denylist covers every environment name in omp's pinned discovery sources", () => {
+	const piAi = realpathSync(
+		fileURLToPath(new URL("../packages/contracts/node_modules/@oh-my-pi/pi-ai", import.meta.url)),
+	);
+	const rules: {
+		providers: Record<string, { envVars?: string[] }>;
+		auth: { providers: { env?: { vars?: string[] } }[] };
+	} = JSON.parse(
+		readFileSync(
+			join(dirname(Bun.resolveSync("@oh-my-pi/pi-catalog", piAi)), "compat", "rules.json"),
+			"utf8",
 		),
-		"utf8",
 	);
-	const discoveredNames = new Set(
-		[...source.matchAll(/"([A-Z][A-Z0-9_]{3,})"/g)]
-			.map((match) => match[1])
-			.filter((name): name is string => name !== undefined),
-	);
+	const discoveredNames = new Set([
+		...Object.values(rules.providers).flatMap((provider) => provider.envVars ?? []),
+		...rules.auth.providers.flatMap((provider) => provider.env?.vars ?? []),
+	]);
+	for (const file of ["src/env-api-key.ts", "src/registry/hooks/env.ts"]) {
+		const source = readFileSync(join(piAi, file), "utf8");
+		for (const match of source.matchAll(
+			/"([A-Z][A-Z0-9]*_[A-Z0-9_]+)"|\$env\.([A-Z][A-Z0-9_]+)/g,
+		)) {
+			const name = match[1] ?? match[2];
+			if (name) discoveredNames.add(name);
+		}
+	}
 	const denied = new Set<string>(AMBIENT_PI_CREDENTIAL_ENV_NAMES);
 	expect(discoveredNames.size).toBeGreaterThan(0);
 	for (const name of discoveredNames) expect(denied.has(name)).toBe(true);
@@ -153,6 +165,7 @@ test("agent run plan ignores ambient skip, trusts only internal build readiness,
 	expect(plan.playwrightCommand).toEqual([
 		"/developer/bin/bun",
 		"x",
+		"--bun",
 		"playwright",
 		"test",
 		"e2e/agent.live.spec.ts",

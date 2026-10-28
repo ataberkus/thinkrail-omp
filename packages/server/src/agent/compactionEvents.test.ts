@@ -1,18 +1,27 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import {
 	type AgentSessionEvent,
 	createAgentSession,
-	DefaultResourceLoader,
-	ModelRuntime,
+	type ExtensionFactory,
 	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+	Settings,
+	z,
+} from "@oh-my-pi/pi-coding-agent";
+import { waitForSessionSettlement } from "@oh-my-pi/pi-coding-agent/session/session-settle";
 import { isTranscriptMessageRole } from "@thinkrail/contracts";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	type FauxResponseStep,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+	registerFaux,
+} from "pi-faux";
 
 const MODEL = {
 	id: "compaction-probe",
@@ -27,8 +36,39 @@ const MODEL = {
 interface ScenarioOptions {
 	extensionCompaction: boolean;
 	abortCompaction?: boolean;
-	responses: Parameters<ReturnType<typeof createFauxCore>["setResponses"]>[0];
+	responses: FauxResponseStep[];
 }
+
+const COMPACTION_THRESHOLD = 20_000;
+const PROBE_TOOL = "probe_output";
+const probeParameters = z.object({});
+const probeTool: ExtensionFactory = (pi) => {
+	pi.registerTool({
+		name: PROBE_TOOL,
+		label: PROBE_TOOL,
+		description: "Returns a large block of text.",
+		parameters: probeParameters,
+		loadMode: "essential",
+		execute: async () => ({
+			content: [{ type: "text", text: "y".repeat(120_000) }],
+			details: {},
+		}),
+	});
+};
+const toolTurn = () => fauxAssistantMessage(fauxToolCall(PROBE_TOOL, {}));
+
+const root = mkdtempSync(join(tmpdir(), "thinkrail-compaction-events-"));
+let isolated: IsolatedAgentDir | undefined;
+let sequence = 0;
+
+beforeAll(() => {
+	isolated = isolateAgentDir(join(root, "agent"));
+});
+
+afterAll(() => {
+	isolated?.restore();
+	rmSync(root, { recursive: true, force: true });
+});
 
 async function runCompactionScenario({
 	extensionCompaction,
@@ -36,106 +76,115 @@ async function runCompactionScenario({
 	abortCompaction,
 }: ScenarioOptions): Promise<{
 	events: AgentSessionEvent[];
+	settled: boolean;
+	contextTokens: number | undefined;
 	callCount: number;
-	messages: { role: string }[];
+	messages: { role: string; summary?: string }[];
 }> {
-	const cwd = mkdtempSync(join(tmpdir(), "thinkrail-compaction-events-"));
-	const agentDir = join(cwd, ".pi-agent");
-	mkdirSync(agentDir);
+	const cwd = mkdtempSync(join(root, "cwd-"));
+	const ambient = await createFauxModelRegistry();
+	const ambientProviders = [
+		...new Set(ambient.modelRegistry.getAvailable().map((available) => available.provider)),
+	];
+	const settings = Settings.isolated({
+		disabledProviders: ambientProviders,
+		"compaction.enabled": true,
+		"compaction.methodOrder": ["soft"],
+		"compaction.keepRecentTokens": 1,
+		"compaction.thresholdTokens": COMPACTION_THRESHOLD,
+		"compaction.midTurnEnabled": false,
+		"compaction.asyncEnabled": false,
+		"retry.enabled": false,
+	});
+	const { authStorage, modelRegistry } = await createFauxModelRegistry(settings);
 	const faux = createFauxCore({
-		provider: "compaction-probe",
-		api: "compaction-probe",
+		provider: `compaction-probe-${++sequence}`,
 		models: [MODEL],
 		tokensPerSecond: 100_000,
 	});
-	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	runtime.registerProvider("compaction-probe", {
-		api: faux.api,
-		baseUrl: "http://faux.local",
-		apiKey: "faux",
-		streamSimple: faux.streamSimple,
-		models: [{ ...MODEL, api: faux.api }],
-	});
-	const settingsManager = SettingsManager.inMemory({
-		compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 199_000 },
-		retry: { enabled: false },
-	});
-	const resourceLoader = new DefaultResourceLoader({
-		cwd,
-		agentDir,
-		settingsManager,
-		extensionFactories: extensionCompaction
-			? [
-					(pi) => {
-						pi.on("session_before_compact", (event) => ({
-							compaction: {
-								summary: "Earlier work summarized.",
-								firstKeptEntryId: event.preparation.firstKeptEntryId,
-								tokensBefore: event.preparation.tokensBefore,
-							},
-						}));
-					},
-				]
-			: [],
-	});
-	await resourceLoader.reload();
+	const model = registerFaux(modelRegistry, faux);
+	const summarize: ExtensionFactory = (pi) => {
+		pi.on("session_before_compact", (event) => ({
+			compaction: {
+				summary: "Earlier work summarized.",
+				firstKeptEntryId: event.preparation.firstKeptEntryId,
+				tokensBefore: event.preparation.tokensBefore,
+			},
+		}));
+	};
 	faux.setResponses(responses);
 	const { session } = await createAgentSession({
 		cwd,
-		agentDir,
-		model: faux.getModel(),
-		modelRuntime: runtime,
-		settingsManager,
-		resourceLoader,
+		agentDir: join(root, "agent"),
+		settings,
+		authStorage,
+		modelRegistry,
+		model,
 		sessionManager: SessionManager.inMemory(cwd),
+		extensions: extensionCompaction ? [probeTool, summarize] : [probeTool],
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
 	});
 	const events: AgentSessionEvent[] = [];
 	const unsubscribe = session.subscribe((event) => {
 		events.push(event);
-		if (abortCompaction && event.type === "compaction_start") session.abortCompaction();
+		if (abortCompaction && event.type === "auto_compaction_start") session.abortCompaction();
 	});
 	try {
 		await session.prompt("x".repeat(5000));
+		await session.waitForIdle();
 		return {
 			events,
+			settled: await waitForSessionSettlement(session, { isCurrent: () => true }),
+			contextTokens: session.getContextUsage()?.tokens,
 			callCount: faux.state.callCount,
-			messages: session.messages.map((message) => ({ role: message.role })),
+			messages: session.messages.map((message) => ({
+				role: message.role,
+				...("summary" in message ? { summary: String(message.summary) } : {}),
+			})),
 		};
 	} finally {
 		unsubscribe();
-		session.dispose();
-		rmSync(cwd, { recursive: true, force: true });
+		await session.dispose();
 	}
 }
+
+const isTerminalEnd = (event: AgentSessionEvent | undefined): boolean =>
+	event?.type === "agent_end" && event.isTerminal === true;
 
 test("threshold compaction after a completed response: visible lifecycle, no unsolicited continuation", async () => {
 	const result = await runCompactionScenario({
 		extensionCompaction: true,
-		responses: [fauxAssistantMessage("all done")],
+		responses: [toolTurn(), fauxAssistantMessage("all done")],
 	});
 
-	expect(result.callCount).toBe(1);
+	expect(result.callCount).toBe(2);
 	expect(result.events.filter((event) => event.type === "agent_start")).toHaveLength(1);
 
 	const types = result.events.map((event) => event.type);
-	const starts = result.events.filter((event) => event.type === "compaction_start");
-	const ends = result.events.filter((event) => event.type === "compaction_end");
+	const starts = result.events.filter((event) => event.type === "auto_compaction_start");
+	const ends = result.events.filter((event) => event.type === "auto_compaction_end");
 	expect(starts.map((event) => event.reason)).toEqual(["threshold"]);
 	expect(ends).toHaveLength(1);
 	const end = ends[0];
-	expect(end?.reason).toBe("threshold");
+	expect(starts[0]?.action).toBeDefined();
+	expect(end?.action).toBe(starts[0]?.action);
 	expect(end?.aborted).toBe(false);
 	expect(end?.willRetry).toBe(false);
 	expect(end?.errorMessage).toBeUndefined();
-	expect(typeof end?.result?.tokensBefore).toBe("number");
-	expect(typeof end?.result?.estimatedTokensAfter).toBe("number");
-	expect(types.indexOf("agent_end")).toBeLessThan(types.indexOf("compaction_start"));
-	expect(types.indexOf("compaction_start")).toBeLessThan(types.indexOf("compaction_end"));
-	expect(types.at(-1)).toBe("agent_settled");
+	const tokensBefore = end?.result?.tokensBefore ?? 0;
+	expect(tokensBefore).toBeGreaterThan(COMPACTION_THRESHOLD);
+	expect(result.contextTokens ?? Number.POSITIVE_INFINITY).toBeLessThan(tokensBefore);
+	expect(types.lastIndexOf("turn_end")).toBeLessThan(types.indexOf("auto_compaction_start"));
+	expect(types.indexOf("auto_compaction_start")).toBeLessThan(types.indexOf("auto_compaction_end"));
+	expect(isTerminalEnd(result.events.at(-1))).toBe(true);
+	expect(result.settled).toBe(true);
 
 	expect(result.messages.some((message) => message.role === "compactionSummary")).toBe(true);
 	expect(isTranscriptMessageRole("compactionSummary")).toBe(true);
@@ -145,41 +194,43 @@ test("cancelled compaction settles without persisting a summary", async () => {
 	const result = await runCompactionScenario({
 		extensionCompaction: false,
 		abortCompaction: true,
-		responses: [fauxAssistantMessage("all done"), fauxAssistantMessage("partial")],
+		responses: [toolTurn(), fauxAssistantMessage("all done"), fauxAssistantMessage("partial")],
 	});
-	const ends = result.events.filter((event) => event.type === "compaction_end");
+	const ends = result.events.filter((event) => event.type === "auto_compaction_end");
 	expect(ends).toHaveLength(1);
 	expect(ends[0]?.aborted).toBe(true);
 	expect(ends[0]?.result).toBeUndefined();
 	expect(ends[0]?.willRetry).toBe(false);
 	expect(result.messages.some((message) => message.role === "compactionSummary")).toBe(false);
-	expect(result.events.at(-1)?.type).toBe("agent_settled");
+	expect(isTerminalEnd(result.events.at(-1))).toBe(true);
+	expect(result.settled).toBe(true);
 });
 
-test("a length-limited summary is never persisted as a successful compaction", async () => {
+test("omp keeps a length-limited summary as a successful compaction (upstream canary)", async () => {
 	const result = await runCompactionScenario({
 		extensionCompaction: false,
 		responses: [
+			toolTurn(),
 			fauxAssistantMessage("all done"),
 			fauxAssistantMessage("partial", { stopReason: "length" }),
 		],
 	});
-	expect(result.callCount).toBe(2);
-	const ends = result.events.filter((event) => event.type === "compaction_end");
+	const ends = result.events.filter((event) => event.type === "auto_compaction_end");
 	expect(ends).toHaveLength(1);
-	expect(ends[0]?.result).toBeUndefined();
-	expect(ends[0]?.errorMessage).toContain(
-		"generation hit the token cap and the summary is incomplete",
-	);
+	expect(ends[0]?.errorMessage).toBeUndefined();
 	expect(ends[0]?.willRetry).toBe(false);
-	expect(result.messages.some((message) => message.role === "compactionSummary")).toBe(false);
-	expect(result.events.at(-1)?.type).toBe("agent_settled");
+	expect(ends[0]?.result).toBeDefined();
+	const summary = result.messages.find((message) => message.role === "compactionSummary");
+	expect(summary?.summary).toContain("partial");
+	expect(isTerminalEnd(result.events.at(-1))).toBe(true);
+	expect(result.settled).toBe(true);
 });
 
 test("a failed compaction emits a visible error end and does not loop", async () => {
 	const result = await runCompactionScenario({
 		extensionCompaction: false,
 		responses: [
+			toolTurn(),
 			fauxAssistantMessage("all done"),
 			() => {
 				throw new Error("compaction summarizer down");
@@ -187,17 +238,18 @@ test("a failed compaction emits a visible error end and does not loop", async ()
 		],
 	});
 
-	expect(result.callCount).toBe(2);
+	expect(result.callCount).toBe(3);
 
 	expect(result.events.filter((event) => event.type === "agent_start")).toHaveLength(1);
-	const ends = result.events.filter((event) => event.type === "compaction_end");
+	const ends = result.events.filter((event) => event.type === "auto_compaction_end");
 	expect(ends).toHaveLength(1);
 	const end = ends[0];
 	expect(end?.aborted).toBe(false);
 	expect(end?.willRetry).toBe(false);
 	expect(end?.result).toBeUndefined();
 	expect(end?.errorMessage).toContain("compaction summarizer down");
-	expect(result.events.at(-1)?.type).toBe("agent_settled");
+	expect(isTerminalEnd(result.events.at(-1))).toBe(true);
+	expect(result.settled).toBe(true);
 
 	expect(result.messages.some((message) => message.role === "compactionSummary")).toBe(false);
 });

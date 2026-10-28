@@ -1,6 +1,22 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type IsolatedAgentDir, isolateAgentDir } from "pi-faux";
 import { type BackgroundCommandCompletion, createBackgroundCommands } from "../index";
 import { controlledOperations, waitFor } from "./test-support";
+
+const agentDir = mkdtempSync(join(tmpdir(), "pi-background-service-"));
+let agentDirIsolation: IsolatedAgentDir | undefined;
+
+beforeAll(() => {
+	agentDirIsolation = isolateAgentDir(agentDir);
+});
+
+afterAll(() => {
+	agentDirIsolation?.restore();
+	rmSync(agentDir, { recursive: true, force: true });
+});
 
 function fixture() {
 	const executor = controlledOperations();
@@ -291,12 +307,13 @@ test("real executor handles stderr, nonzero exits, launch failure and timeout", 
 		await service.dispose();
 	}
 	const broken = createBackgroundCommands({
-		sessionId: "bad-shell",
-		getContext: () => ({ cwd: process.cwd(), shellPath: "/no-such-background-shell" }),
+		sessionId: "bad-cwd",
+		getContext: () => ({ cwd: join(process.cwd(), "no-such-background-cwd") }),
 	});
 	try {
 		const failed = broken.start({ command: "true" });
-		await waitFor(() => failed.snapshot.status === "error");
+		await waitFor(() => failed.snapshot.finishedAt !== undefined);
+		expect(failed.snapshot.status).toBe("error");
 		expect(failed.snapshot.errorMessage).toBeTruthy();
 		expect(broken.find(failed.id)).toBe(failed);
 	} finally {
@@ -304,19 +321,18 @@ test("real executor handles stderr, nonzero exits, launch failure and timeout", 
 	}
 });
 
-test("context, shell settings, timeout and session identity are captured independently for every launch", async () => {
+test("context, command prefix, timeout and session identity are captured independently for every launch", async () => {
 	const executor = controlledOperations();
-	const shells: Array<string | undefined> = [];
+	let constructed = 0;
 	let context = {
 		cwd: "/first",
 		commandPrefix: "export SETTING=one",
-		shellPath: "/first-shell",
 		sessionFile: "/first.jsonl",
 	};
 	const binding = { sessionId: "immutable", getContext: () => context };
 	const service = createBackgroundCommands(binding, {
-		createOperations(options) {
-			shells.push(options.shellPath);
+		createOperations() {
+			constructed++;
 			return executor.createOperations();
 		},
 	});
@@ -325,18 +341,19 @@ test("context, shell settings, timeout and session identity are captured indepen
 	context = {
 		cwd: "/second",
 		commandPrefix: "export SETTING=two",
-		shellPath: "/second-shell",
 		sessionFile: "/second.jsonl",
 	};
 	const second = service.start({ command: "command2" });
-	expect(shells).toEqual(["/first-shell", "/second-shell"]);
+	expect(constructed).toBe(2);
 	expect(executor.call().command).toBe("export SETTING=one\ncommand1");
 	expect(executor.call().cwd).toBe("/first");
 	expect(executor.call().options.timeout).toBe(2);
-	expect(executor.call().options.env?.PI_SESSION_FILE).toBe("/first.jsonl");
+	expect(executor.call().options.env.PI_SESSION_FILE).toBe("/first.jsonl");
 	expect(executor.call(1).command).toBe("export SETTING=two\ncommand2");
+	expect(executor.call(1).cwd).toBe("/second");
 	expect(executor.call(1).options.timeout).toBeUndefined();
-	expect(executor.call(1).options.env?.PI_SESSION_ID).toBe("immutable");
+	expect(executor.call(1).options.env.PI_SESSION_ID).toBe("immutable");
+	expect(executor.call(1).options.env.PI_SESSION_FILE).toBe("/second.jsonl");
 	expect(first.snapshot.sessionId).toBe("immutable");
 	expect(second.snapshot.sessionId).toBe("immutable");
 	for (const call of executor.calls) call.resolve({ exitCode: 0 });

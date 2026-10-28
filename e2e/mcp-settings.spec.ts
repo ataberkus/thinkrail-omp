@@ -14,7 +14,7 @@ const STDIO_SERVER = fileURLToPath(
 );
 const USER_CONFIG = join(E2E_PI_AGENT_DIR, "mcp.json");
 const MCP_LOG = join(E2E_PI_AGENT_DIR, "mcp.log");
-const PROJECT_CONFIG_DIR = join(E2E_FIXTURE_REPO, ".pi");
+const PROJECT_CONFIG_DIR = join(E2E_FIXTURE_REPO, ".omp");
 
 async function openMcpSettings(page: Page): Promise<void> {
 	await page.getByTestId("open-settings").click();
@@ -296,13 +296,14 @@ test("a not-running server opens a chat; a failed one reconnects per chat and sh
 		const reconnect = row.getByTestId("mcp-server-action");
 		await expect(reconnect).toHaveAttribute("data-action", "reconnect");
 		await reconnect.click();
-		await expect(row.getByRole("alert")).toContainText("failed to connect", { timeout: 30_000 });
+		const failure = /MCP subprocess (closed stdout|exited with code 1) before responding/;
+		await expect(row.getByRole("alert")).toContainText(failure, { timeout: 30_000 });
 
 		const showLog = row.getByTestId("mcp-server-secondary");
 		await expect(showLog).toHaveAttribute("data-action", "show-log");
 		await showLog.click();
 		const log = page.getByTestId("mcp-log-dialog");
-		await expect(log.getByTestId("mcp-log-report")).toContainText("fixture boom");
+		await expect(log.getByTestId("mcp-log-report")).toContainText(failure);
 		await expect(log.getByTestId("mcp-log-text")).toHaveText(
 			"2026-10-08T09:00:00.000Z [broken] error fixture log line api_key=***",
 		);

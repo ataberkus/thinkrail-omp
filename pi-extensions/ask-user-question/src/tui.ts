@@ -3,12 +3,13 @@ import {
 	getMarkdownTheme,
 	type Theme,
 	type ToolRenderResultOptions,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import {
 	type Component,
 	Editor,
 	type EditorTheme,
 	type Focusable,
+	getSymbolTheme,
 	Key,
 	Markdown,
 	matchesKey,
@@ -17,7 +18,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+} from "@oh-my-pi/pi-tui";
 import {
 	type AskOutcome,
 	type AskRequest,
@@ -57,6 +58,7 @@ const NEEDS_CHOICE = "Choose an option first";
 const NEEDS_ANSWER = "Answer at least one question first, or press Esc to skip";
 
 function editorTheme(theme: Theme): EditorTheme {
+	const symbols = getSymbolTheme();
 	return {
 		borderColor: (text) => theme.fg("accent", text),
 		selectList: {
@@ -65,7 +67,9 @@ function editorTheme(theme: Theme): EditorTheme {
 			description: (text) => theme.fg("muted", text),
 			scrollInfo: (text) => theme.fg("dim", text),
 			noMatch: (text) => theme.fg("warning", text),
+			symbols,
 		},
+		symbols,
 	};
 }
 
@@ -108,7 +112,7 @@ export class QuestionnaireComponent implements Component, Focusable {
 	) {
 		this.states = args.questions.map(() => emptyQuestionState());
 		this.cursors = [...args.questions.map(() => 0), args.questions.length];
-		this.editor = new Editor(tui, editorTheme(theme));
+		this.editor = new Editor(editorTheme(theme));
 		this.editor.onSubmit = (text) => this.saveEditor(text, true);
 	}
 
@@ -593,7 +597,11 @@ function partialQuestions(args: unknown): Partial<AskUserQuestionItem>[] {
 		: [];
 }
 
-export function renderAskCall(args: unknown, theme: Theme): Component {
+export function renderAskCall(
+	args: unknown,
+	_options: ToolRenderResultOptions,
+	theme: Theme,
+): Component {
 	const questions = partialQuestions(args);
 	const headers = questions
 		.map((question) => question.header?.trim())
@@ -617,17 +625,17 @@ export function renderAskResult(
 	result: AgentToolResult<unknown>,
 	_options: ToolRenderResultOptions,
 	theme: Theme,
-	context: { args?: unknown; isError?: boolean },
+	args?: unknown,
 ): Component {
-	const { details } = result;
-	if (context.isError || (!isAckDetails(details) && !isAskUserQuestionResult(details)))
-		return new Text(theme.fg(context.isError ? "error" : "text", resultText(result)), 0, 0);
+	const { details, isError } = result;
+	if (isError || (!isAckDetails(details) && !isAskUserQuestionResult(details)))
+		return new Text(theme.fg(isError ? "error" : "text", resultText(result)), 0, 0);
 	if (isAckDetails(details)) return new Text(theme.fg("muted", "Continuing in chat"), 0, 0);
 	if (details.cancelled && details.answers.length === 0) {
 		const text = resultText(result);
 		return new Text(theme.fg("warning", text === DECLINE_MESSAGE ? "Skipped" : text), 0, 0);
 	}
-	const questions = partialQuestions(context.args);
+	const questions = partialQuestions(args);
 	const count = Math.max(questions.length, ...details.answers.map((a) => a.questionIndex + 1));
 	const lines: string[] = [];
 	for (let index = 0; index < count; index++) {

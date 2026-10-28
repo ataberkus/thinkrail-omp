@@ -1,12 +1,7 @@
-import {
-	createAgentSessionServices,
-	DefaultResourceLoader,
-	getAgentDir,
-	ModelRuntime,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+import { getAgentDir, loadExtensions } from "@oh-my-pi/pi-coding-agent";
 import { logger } from "../log";
 import { accountAvailableModels, type ModelAvailabilityRuntime } from "./modelAvailability";
+import { type LoginOptions, ModelRuntime, registryProviderConfig } from "./modelRuntime";
 
 const log = logger("agent");
 
@@ -26,9 +21,7 @@ export type PreparePiRuntimeGenerationResult =
 
 export type PiRuntimeGenerationInitializer = (runtime: ModelRuntime) => void | Promise<void>;
 
-export const piLoginOptions: NonNullable<Parameters<ModelRuntime["login"]>[3]> = {
-	getDeviceId: () => SettingsManager.create(process.cwd()).getOrCreateDeviceId(),
-};
+export const piLoginOptions: LoginOptions = {};
 
 let nextGenerationId = 1;
 let activeGeneration: Promise<PiRuntimeGeneration> | null = null;
@@ -48,7 +41,7 @@ function captureProviderStatus(runtime: ModelRuntime): {
 	ids: ReadonlySet<string>;
 	names: ReadonlyMap<string, string>;
 } {
-	const providers = runtime.getProviders?.() ?? [];
+	const providers = runtime.getProviders();
 	return {
 		ids: new Set(providers.map((provider) => provider.id)),
 		names: new Map(providers.map((provider) => [provider.id, provider.name])),
@@ -104,37 +97,28 @@ export function configurePiRuntimeSessionExtensionExclusions(paths: readonly str
 	configuredSessionExtensionExclusions = [...new Set(paths)];
 }
 
-async function createRuntimeOfflineByDefault(): Promise<ModelRuntime> {
-	const prior = process.env.PI_OFFLINE;
-	process.env.PI_OFFLINE = "1";
-	try {
-		return await ModelRuntime.create({ allowModelNetwork: false });
-	} finally {
-		if (prior === undefined) delete process.env.PI_OFFLINE;
-		else process.env.PI_OFFLINE = prior;
-	}
-}
-
-async function advanceExtensionCacheGeneration(): Promise<void> {
+async function loadExtensionProviders(
+	runtime: ModelRuntime,
+	additionalExtensionPaths: readonly string[],
+): Promise<void> {
+	if (additionalExtensionPaths.length === 0) return;
 	const agentDir = getAgentDir();
-	const loader = new DefaultResourceLoader({
-		cwd: agentDir,
-		agentDir,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await loader.reload();
-	await loader.reload();
+	const result = await loadExtensions([...additionalExtensionPaths], agentDir);
+	if (result.errors.length > 0) {
+		for (const failure of result.errors)
+			log.warn(`extension ${failure.path} failed to load: ${failure.error}`);
+		throw new Error("PI runtime extension loading failed");
+	}
+	for (const registration of result.runtime.pendingProviderRegistrations)
+		runtime.registerProvider(registration.name, registryProviderConfig(registration.config));
+	result.runtime.pendingProviderRegistrations = [];
+	await runtime.modelRegistry.refreshRuntimeProviders("offline");
 }
 
 async function createRuntimeWithExtensions(
 	additionalExtensionPaths: readonly string[],
 ): Promise<PreparedRuntime> {
-	await advanceExtensionCacheGeneration();
-	const runtime = await createRuntimeOfflineByDefault();
+	const runtime = await ModelRuntime.create({ allowModelNetwork: false });
 	await generationInitializer(runtime);
 	const providerStatus = captureProviderStatus(runtime);
 	const priorRegistrations = new Map(
@@ -146,37 +130,7 @@ async function createRuntimeWithExtensions(
 			},
 		]),
 	);
-	const priorJitiRebuild = process.env.JITI_REBUILD_FS_CACHE;
-	const priorJitiTryNative = process.env.JITI_TRY_NATIVE;
-	process.env.JITI_REBUILD_FS_CACHE = "1";
-	process.env.JITI_TRY_NATIVE = "false";
-	let services: Awaited<ReturnType<typeof createAgentSessionServices>>;
-	try {
-		services = await createAgentSessionServices({
-			cwd: getAgentDir(),
-			modelRuntime: runtime,
-			resourceLoaderOptions: {
-				noExtensions: true,
-				additionalExtensionPaths: [...additionalExtensionPaths],
-				noSkills: true,
-				noPromptTemplates: true,
-				noThemes: true,
-				noContextFiles: true,
-			},
-		});
-	} finally {
-		if (priorJitiRebuild === undefined) delete process.env.JITI_REBUILD_FS_CACHE;
-		else process.env.JITI_REBUILD_FS_CACHE = priorJitiRebuild;
-		if (priorJitiTryNative === undefined) delete process.env.JITI_TRY_NATIVE;
-		else process.env.JITI_TRY_NATIVE = priorJitiTryNative;
-	}
-	const extensionErrors = services.resourceLoader.getExtensions().errors;
-	if (
-		extensionErrors.length > 0 ||
-		services.diagnostics.some((diagnostic) => diagnostic.type === "error")
-	) {
-		throw new Error("PI runtime extension loading failed");
-	}
+	await loadExtensionProviders(runtime, additionalExtensionPaths);
 	const postExtensionProviderStatus = captureProviderStatus(runtime);
 	const opaqueProviderIds = new Set(
 		additionalExtensionPaths.length > 0

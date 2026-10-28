@@ -23,7 +23,7 @@
 		"react": "catalog:"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
 		"@types/bun": "catalog:",
 		"@types/react": "catalog:",
 		"typescript": "catalog:"

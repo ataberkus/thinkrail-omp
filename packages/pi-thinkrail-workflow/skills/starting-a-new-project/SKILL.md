@@ -55,7 +55,7 @@ unsaved (writing-specs). The one always-offered extra is alternatives research (
    personal / first-person pain / `depth=light` → **Personal spec**; public / named users / `depth=full`
    → **PRD**.
 5. **Elicit the branch's sections** (below), inferring and confirming each, saving as you go.
-6. **Research alternatives** (always offered, never forced): `web_search` + `fetch_content` for the
+6. **Research alternatives** (always offered, never forced): `web_search` and `read` on the result URLs for the
    closest open-source projects / products, then offer to add an **Alternatives Considered** section
    (name, one-line gap, URL). On a pre-filled brief, ask permission first.
 7. **Review** the full draft in plain markdown and confirm, then finalize.

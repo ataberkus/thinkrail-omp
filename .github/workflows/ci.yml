@@ -89,8 +89,8 @@ jobs:
       - run: bun run test
 
   pi-packages:
-    name: Pi package parity (vanilla pi under Node)
-    timeout-minutes: 10
+    name: Pi package parity (installed and loaded by vanilla omp)
+    timeout-minutes: 20
     needs: changes
     if: needs.changes.outputs.app == 'true'
     runs-on: ubuntu-latest
@@ -99,10 +99,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-      # Vanilla pi is an npm CLI on Node; the gate loads the packed packages under Node on purpose.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - name: Cache bun install
         uses: actions/cache@v5
         with:

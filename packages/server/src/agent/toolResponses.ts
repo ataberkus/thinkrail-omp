@@ -213,6 +213,7 @@ export interface ToolResponseWaiters {
 	supersede(): boolean;
 	currentInteraction(): { toolCallId: string; needsInput: boolean } | null;
 	hasRecoverableCall(): boolean;
+	awaitsResponse(): boolean;
 	prepareShutdown(): Promise<void> | null;
 	prepareAbort(): Promise<void> | null;
 	abandon(): void;
@@ -334,6 +335,11 @@ export function createToolResponseWaiters(): ToolResponseWaiters {
 				(waiter) => waiter.phase !== "stopped" && waiter.phase !== "superseded",
 			);
 		},
+		awaitsResponse() {
+			return [...waiting.values()].some(
+				(waiter) => waiter.phase === "expected" || waiter.phase === "waiting",
+			);
+		},
 		prepareShutdown() {
 			shutdownPrepared = true;
 			return acceptedResponsePersistence();
@@ -367,6 +373,7 @@ export function createToolResponseWaiters(): ToolResponseWaiters {
 
 export function toolResponseSessionServices(
 	waiters: ToolResponseWaiters,
+	endRun: (toolCallId: string) => void,
 ): ExtensionSessionServices {
 	return {
 		expectToolResponse: (toolCallId) => waiters.expect(toolCallId),
@@ -374,5 +381,6 @@ export function toolResponseSessionServices(
 			const outcome = await waiters.wait(toolCallId, signal);
 			return outcome.kind === "superseded" ? { kind: "deferred" } : outcome;
 		},
+		endRun,
 	};
 }

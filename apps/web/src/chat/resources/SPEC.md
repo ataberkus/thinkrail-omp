@@ -101,8 +101,7 @@ the list) the roster adds a third section after Finished. Rows are not listbox o
 dock — a server is not work: plug glyph with a state dot · name · the shared state label (with the tool
 count when connected) · transport (stdio "runs on host"), attention rows first. Actions follow the state:
 **Disable in this chat** / **Enable in this chat** (applied at the chat's next idle reload, which restarts
-its other servers — a helper line under the list says so; never offered on a `registered` row, a server an
-extension registered, which the host refuses to disable per chat), **Reconnect** for failed or
+its other servers — a helper line under the list says so), **Reconnect** for failed or
 disconnected, and Sign in / Review / Edit for needs-sign-in, pending approval or invalid config, which open
 Settings (`resource-mcp-settings`), like the section header's **Settings** button (`resources-mcp-settings`, `Button soft-primary s`).
 There is no PID and no immediate stop: pi offers neither. Controls are disabled without

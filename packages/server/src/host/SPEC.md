@@ -159,10 +159,13 @@ channel fan-out, and the process-boot wrapper both launchers share.
   bounded settle includes hidden delegation children even when their parent is
   idle, plus child cascades already started by a concurrent removal, so graceful quit does not let a
   background child lose its terminal abort/tool result; `crashLog.ts` (`installCrashLog` — the `uncaughtException`/`unhandledRejection` report
-  appended to `<dataDir>/logs/crash.log` and echoed to stderr, then — for the first fault only — an awaited,
-  ≤ 1 s analytics `reportFatalError` (tagged with the crash kind) before `exit(1)`; later faults in that window are still appended but
-  neither re-report nor re-exit: in-process pi means such a
-  fault is the whole host's, and a launcher started without a terminal otherwise loses its only trace.
+  appended to `<dataDir>/logs/crash.log` and echoed to stderr, then an awaited ≤ 1 s analytics
+  `reportFatalError` (tagged with the crash kind). omp's postmortem (`@oh-my-pi/pi-utils`, installed on
+  import) owns the fatal path — it decides which faults are fatal (it contains worker-IPC and cleanup
+  faults), runs registered cleanups, then exits 1 — so ThinkRail's listeners only remember the fault and the
+  report runs as an exit-only postmortem cleanup: omp waits for it, and a fault omp contains is never
+  logged as a crash. In-process omp means a fatal fault is the whole host's, and a launcher started without
+  a terminal otherwise loses its only trace.
   Never a recovery, and never installed under `NODE_ENV=test` — a unit-test process reports its own
   faults. It renders the throw via the `log` module's `describeError`, so crash reports and log lines
   agree, but keeps its own sync append — the death path must not depend on the logger's state);
@@ -174,7 +177,9 @@ channel fan-out, and the process-boot wrapper both launchers share.
   runtime bootstrap for low-level embedders), and write the `listening on` info line (see
   `submodule-server-log`); `reportDesktopError(error, scope)` is the desktop launcher's handled-error door
   into analytics (source `desktop`). Its
-  SIGINT/SIGTERM handlers await that same shutdown before process exit. Settling aborts streaming sessions
+  graceful shutdown is an exit-only omp postmortem cleanup run for SIGINT/SIGTERM/SIGHUP (omp owns those
+  signals and would exit 130/143/129 as soon as its cleanups settle), so a signal awaits that same
+  shutdown, which then ends the process with 0 as before (`processSignals.test.ts`, `smoke:binary`). Settling aborts streaming sessions
   and waits bounded so pi persists their "Operation aborted" tool results and transcripts land paired,
   except a session blocked on `ask_user_question`: shutdown deliberately leaves that call dangling and the
   next attach repairs it to an answerable ack; explicit user Stop remains the terminal-abort path); `handlers.ts` (the WS method→handler
@@ -204,16 +209,15 @@ channel fan-out, and the process-boot wrapper both launchers share.
   service with `projects` (approvals, overrides, pi-level trust) and publishes `mcp.status` snapshots (topic
   subscribed only by clients at `MCP_PROTOCOL_VERSION` or later) plus `session.resourcesChanged`
   invalidations. Every request resolves its workspace and that workspace's project. Management mutations
-  and probes re-read both after asynchronous ownership resolution, then check ownership and admit work
-  in one synchronous call stack. A changed project identity, cwd or pi-level trust rejects the request
-  for retry; approvals and overrides come from the latest record, not the pre-await snapshot. Project
+  and probes resolve both and admit work in one synchronous call stack (the host owns MCP in every chat,
+  so there is no ownership to await), reading approvals and overrides from the latest record. Project
   override patches merge atomically against the latest stored override. Wire enablement must be a boolean
   and record exposure must be `deferred`, `direct` or `hidden`; invalid values are rejected before record
   or per-chat disabled-set mutations. No write approves
   repository content the user has not reviewed: a project-file `mcp.add` (a name the file does not define
   yet) is the user's own entry, so its fingerprint is approved in the same request; `mcp.update` and
   `mcp.remove` read the on-disk entry's fingerprint in the scope's own file (the global `mcp.json` for
-  user scope, the worktree's `.pi/mcp.json` for project scope) in the same synchronous step as the write
+  user scope, the worktree's `.omp/mcp.json` for project scope) in the same synchronous step as the write
   and refuse, file untouched, when the request's `expectedFingerprint` differs from it
   (a missing fingerprint is refused at either scope); `mcp.update` carries approval to the written
   fingerprint only when the record approved that on-disk fingerprint — a rewrite of a pending or changed entry stays pending (a toggle rebuilt from a checkout's
@@ -238,9 +242,7 @@ channel fan-out, and the process-boot wrapper both launchers share.
   its `loginId` (`mcp.logout` awaits the probe). Probe admission resolves the valid effective server from
   agent's host config loader with the current trust and policy; missing or invalid targets are refused,
   and Test connection requires that admitted config to be HTTP. An approved but invalid project entry
-  never shadows a valid user target merely because its summary looks approved. All three refuse with
-  `MCP_HANDLED_ELSEWHERE` wherever
-  `mcp.list` would report `handledElsewhere` (the probe's loader forces `builtin:mcp`);
+  never shadows a valid user target merely because its summary looks approved;
   `provider.loginReply` / `provider.loginCancel` route `mcplogin_*` ids to the probe with the caller's
   `clientKey`, and `createServer` sends probe frames to the owner's socket only, cancels the probes of a
   client when its retention timer finally reaps it (`cancelMcpProbesOwnedBy`, beside `releaseInterview`;
@@ -371,9 +373,7 @@ channel fan-out, and the process-boot wrapper both launchers share.
   workspaces to agent's `applyPiResourceTrust` so live chats reload into the new trust (idle now, busy at
   settlement); `createServer` wires `setMcpPolicyResolver` (workspace → its project's `mcpApprovals` /
   `mcpOverrides` / `mcpToolGrants`, fail-closed to none) and `setMcpToolGrantWriter` (an "Always allow"
-  answer → `grantProjectMcpTool` on the workspace's project) next to the admission resolver, and injects agent's
-  `piTrustsProjectPath` as the projects trust seed
-  (`setPiTrustSeed`), so a newly added project starts from pi's own decision; `project.acknowledgeSkills` / `project.setSkillEnabled` /
+  answer → `grantProjectMcpTool` on the workspace's project) next to the admission resolver; `project.acknowledgeSkills` / `project.setSkillEnabled` /
   `project.setGroupEnabled` / `project.aliasSkills` / `workspace.setSkillOverride` mutate/read the persisted
   toggles; `session.reloadResources` re-scans a running session — the composition stays here; `agent` never
   imports its sibling. `createServer` also wires **`setSkillAdmissionResolver`**, mapping a session's

@@ -87,7 +87,7 @@ test("a chat's Skills dialog names the project's Pi resources and grants them wi
 			} catch {}
 		});
 	});
-	const prompts = join(E2E_FIXTURE_REPO, ".pi", "prompts");
+	const prompts = join(E2E_FIXTURE_REPO, ".omp", "prompts");
 	mkdirSync(prompts, { recursive: true });
 	writeFileSync(join(prompts, "e2e-kickoff.md"), "---\ndescription: Kick off\n---\nGo\n");
 	try {
@@ -102,6 +102,6 @@ test("a chat's Skills dialog names the project's Pi resources and grants them wi
 		await expect(banner).toHaveCount(0);
 		expect(trustRequests.at(-1)).toMatchObject({ trusted: true, resources: true });
 	} finally {
-		rmSync(join(E2E_FIXTURE_REPO, ".pi"), { recursive: true, force: true });
+		rmSync(join(E2E_FIXTURE_REPO, ".omp"), { recursive: true, force: true });
 	}
 });

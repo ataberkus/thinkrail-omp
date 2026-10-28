@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { createFauxCore, fauxAssistantMessage } from "pi-faux";
+import { ModelRuntime } from "./modelRuntime";
 import { completeOnce, pickModel } from "./oneshot";
 import { configurePiRuntime } from "./piRuntime";
 
@@ -17,16 +17,38 @@ function modelDef(id: string, cost = 0) {
 	};
 }
 
-function stubAvailable(models: ReturnType<typeof withProvider>[]): void {
-	configurePiRuntime({
-		getAvailableSnapshot: () => models,
-		getModels: () => [],
-		isUsingOAuth: () => false,
-	} as unknown as ModelRuntime);
+interface StubModel {
+	provider: string;
+	id: string;
+	cost: number;
 }
 
-function withProvider(provider: string, id: string, cost = 0) {
-	return { ...modelDef(id, cost), api: `faux-${provider}`, provider, baseUrl: "http://faux.local" };
+async function stubAvailable(models: StubModel[]): Promise<void> {
+	const runtime = await ModelRuntime.create({
+		inMemoryCredentials: true,
+		modelsPath: null,
+		allowModelNetwork: false,
+	});
+	for (const provider of new Set(models.map((model) => model.provider))) {
+		runtime.registerProvider(provider, {
+			api: `faux-${provider}`,
+			baseUrl: "http://faux.local",
+			apiKey: "faux",
+			models: models
+				.filter((model) => model.provider === provider)
+				.map((model) => ({ ...modelDef(model.id, model.cost), api: `faux-${provider}` })),
+		});
+	}
+	const registered = models.flatMap((model): Model<Api>[] => {
+		const found = runtime.getModel(model.provider, model.id);
+		return found ? [found] : [];
+	});
+	runtime.getAvailableSnapshot = () => registered;
+	configurePiRuntime(runtime);
+}
+
+function withProvider(provider: string, id: string, cost = 0): StubModel {
+	return { provider, id, cost };
 }
 
 afterEach(() => {
@@ -34,7 +56,7 @@ afterEach(() => {
 });
 
 test("pickModel(cheap) prefers a known small model (allowlist) over a cheaper unlisted one", async () => {
-	stubAvailable([
+	await stubAvailable([
 		withProvider("anthropic", "claude-haiku-faux", 10),
 		withProvider("cheapo", "cheapo-1", 1),
 	]);
@@ -42,27 +64,33 @@ test("pickModel(cheap) prefers a known small model (allowlist) over a cheaper un
 });
 
 test("pickModel(cheap) falls back to the cheapest by token cost when nothing is allowlisted", async () => {
-	stubAvailable([withProvider("pricey", "pricey-1", 10), withProvider("cheapo", "cheapo-1", 1)]);
+	await stubAvailable([
+		withProvider("pricey", "pricey-1", 10),
+		withProvider("cheapo", "cheapo-1", 1),
+	]);
 	expect((await pickModel("cheap"))?.id).toBe("cheapo-1");
 });
 
 test("pickModel(cheap) skips unpriced models and falls back to the default model when none is priced", async () => {
-	stubAvailable([withProvider("free", "free-1", 0), withProvider("cheapo", "cheapo-1", 1)]);
+	await stubAvailable([withProvider("free", "free-1", 0), withProvider("cheapo", "cheapo-1", 1)]);
 	expect((await pickModel("cheap"))?.id).toBe("cheapo-1");
-	stubAvailable([withProvider("free", "free-1", 0), withProvider("openai", "gpt-5.5", 0)]);
+	await stubAvailable([withProvider("free", "free-1", 0), withProvider("openai", "gpt-5.5", 0)]);
 	expect((await pickModel("cheap"))?.id).toBe("gpt-5.5");
 });
 
 test("pickModel(default) returns the first available model; empty set → null", async () => {
-	stubAvailable([withProvider("pricey", "pricey-1", 10), withProvider("cheapo", "cheapo-1", 1)]);
+	await stubAvailable([
+		withProvider("pricey", "pricey-1", 10),
+		withProvider("cheapo", "cheapo-1", 1),
+	]);
 	expect((await pickModel("default"))?.id).toBe("pricey-1");
-	stubAvailable([]);
+	await stubAvailable([]);
 	expect(await pickModel("cheap")).toBeNull();
 	expect(await pickModel("default")).toBeNull();
 });
 
 test("completeOnce throws 'no-model' when nothing is authenticated", async () => {
-	stubAvailable([]);
+	await stubAvailable([]);
 	await expect(completeOnce({ prompt: "hi" })).rejects.toThrow("no-model");
 });
 
@@ -74,19 +102,21 @@ test("completeOnce dispatches a single request on the picked model and returns i
 		tokensPerSecond: 5000,
 	});
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
-	runtime.registerProvider("anthropic", {
-		api: "faux-anthropic",
-		baseUrl: "http://faux.local",
-		apiKey: "faux",
-		streamSimple: faux.streamSimple,
-		models: [{ ...modelDef("claude-haiku-faux"), api: "faux-anthropic" }],
-	});
+	runtime.registerProvider("anthropic", faux.providerConfig());
+	const haiku = runtime.getModel("anthropic", "claude-haiku-faux");
+	runtime.getAvailableSnapshot = () => (haiku ? [haiku] : []);
 	configurePiRuntime(runtime);
-	faux.setResponses([fauxAssistantMessage("add-login-flow")]);
+	let systemPrompt: readonly string[] | undefined;
+	faux.setResponses([
+		(context) => {
+			systemPrompt = context.systemPrompt;
+			return fauxAssistantMessage("add-login-flow");
+		},
+	]);
 
 	const result = await completeOnce({
 		system: "name it",
@@ -94,5 +124,6 @@ test("completeOnce dispatches a single request on the picked model and returns i
 		maxTokens: 24,
 	});
 	expect(result.text).toBe("add-login-flow");
+	expect(systemPrompt).toEqual(["name it"]);
 	expect(result.model).toEqual({ provider: "anthropic", id: "claude-haiku-faux" });
 });

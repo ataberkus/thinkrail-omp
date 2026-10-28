@@ -458,13 +458,6 @@ test("MCP rows offer per-chat actions by state: disable, enable, reconnect, and 
 	expect(actions("pending-approval")).toEqual(["settings"]);
 	expect(actions("pending-reload")).toEqual([]);
 	expect(actions("disabled-in-project")).toEqual([]);
-	const registered = (state: McpServerResourceSummary["state"]) =>
-		mcpRowActions({ name: "ext", state, transport: "http", registered: true }).map(
-			(action) => action.id,
-		);
-	expect(registered("connected")).toEqual([]);
-	expect(registered("failed")).toEqual(["reconnect"]);
-	expect(registered("needs-sign-in")).toEqual(["settings"]);
 });
 
 test("the inspector lists the chat's MCP servers as a third section and hides it for older hosts", () => {

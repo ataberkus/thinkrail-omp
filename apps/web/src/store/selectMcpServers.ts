@@ -27,7 +27,6 @@ export interface McpServerRow {
 }
 
 const PRECEDENCE: readonly McpServerState[] = [
-	"handled-elsewhere",
 	"pending-approval",
 	"invalid-config",
 	"needs-sign-in",
@@ -144,13 +143,8 @@ export function deriveMcpServerRows(
 				!summary.configError &&
 				(summary.scope === "user" || summary.approval?.state === "approved"));
 		const approvalPending = !!summary.approval && summary.approval.state !== "approved";
-		const base = projection?.handledElsewhere
-			? {
-					state: "handled-elsewhere" as const,
-					sessions: { total: sessions.length, reporting: [], connected: 0 },
-					startingStalled: false,
-				}
-			: admitted === summary
+		const base =
+			admitted === summary
 				? aggregate(summary, sessions, now)
 				: {
 						state:
@@ -167,9 +161,7 @@ export function deriveMcpServerRows(
 			effective,
 			...base,
 			approvalPending,
-			attention:
-				(base.state !== "replaced" && isMcpAttentionState(base.state)) ||
-				(approvalPending && base.state !== "handled-elsewhere"),
+			attention: (base.state !== "replaced" && isMcpAttentionState(base.state)) || approvalPending,
 		};
 	});
 	return rows.sort(

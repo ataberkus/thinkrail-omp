@@ -30,7 +30,7 @@ async function run(command: string[], env: NodeJS.ProcessEnv = process.env): Pro
 }
 
 function playwrightCommand(args: string[]): string[] {
-	return [bun, "x", "playwright", "test", ...args];
+	return [bun, "x", "--bun", "playwright", "test", ...args];
 }
 
 function childEnv(): NodeJS.ProcessEnv {

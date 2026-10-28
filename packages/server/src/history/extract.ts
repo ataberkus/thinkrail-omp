@@ -3,7 +3,7 @@ import {
 	migrateSessionEntries,
 	parseSessionEntries,
 	type SessionEntry,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { isControlMessage, isRetriedAttempt, isTranscriptMessageRole } from "@thinkrail/contracts";
 
 export interface HistoryEntry {
@@ -33,17 +33,33 @@ function textOf(content: unknown): string {
 		.join("\n");
 }
 
+function isPiSessionInfo(value: unknown): value is { type: "session_info"; name?: unknown } {
+	return (
+		typeof value === "object" && value !== null && "type" in value && value.type === "session_info"
+	);
+}
+
+function piSessionName(entries: readonly unknown[]): string | undefined {
+	let title: string | undefined;
+	for (const entry of entries) {
+		if (isPiSessionInfo(entry))
+			title = typeof entry.name === "string" ? entry.name.trim() || undefined : undefined;
+	}
+	return title;
+}
+
 export function extractSession(jsonl: string): ExtractedSession | null {
 	const parsed = parseSessionEntries(jsonl);
 	const header = parsed[0];
 	if (header?.type !== "session" || typeof header.id !== "string") return null;
 	migrateSessionEntries(parsed);
 	const entries = parsed.filter((e): e is SessionEntry => e.type !== "session");
-	let title: string | undefined;
-	for (const entry of entries) {
-		if (entry.type === "session_info") title = entry.name?.trim() || undefined;
-	}
-	const { messages } = buildSessionContext(entries);
+	const title =
+		header.title === undefined ? piSessionName(parsed) : header.title.trim() || undefined;
+	const { messages } = buildSessionContext(entries, undefined, undefined, {
+		transcript: true,
+		collapseCompactedHistory: true,
+	});
 
 	const renderable = messages.filter((message) => isTranscriptMessageRole(message.role));
 	const out: HistoryEntry[] = [];

@@ -43,7 +43,7 @@ export function createAgentRunPlan(
 	delete childEnv.PLAYWRIGHT_BLOB_OUTPUT_FILE;
 	return {
 		buildCommand,
-		playwrightCommand: [bun, "x", "playwright", "test", ...playwrightArgs, "--workers=1"],
+		playwrightCommand: [bun, "x", "--bun", "playwright", "test", ...playwrightArgs, "--workers=1"],
 		env: childEnv,
 	};
 }

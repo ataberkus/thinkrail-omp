@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import {
 	childFileUsage,
 	createRunUsageRecorder,
@@ -11,6 +11,7 @@ import {
 	type SubagentUsage,
 	unrecordedUsage,
 } from "./subagentUsage";
+import { usagePurpose } from "./usagePurpose";
 
 const header = (extra: Record<string, unknown> = {}) =>
 	JSON.stringify({ type: "session", version: 3, id: "child", timestamp: "", cwd: "/w", ...extra });
@@ -99,15 +100,16 @@ function parentRecords(dir: string) {
 		timestamp = new Date(0).toISOString(),
 	) => {
 		entries.push({
-			type: "usage",
+			type: "model_usage",
 			id: `u${entries.length}`,
 			parentId: null,
 			timestamp,
-			kind: SUBAGENT_USAGE_KIND,
+			purpose: usagePurpose(SUBAGENT_USAGE_KIND, childSessionId),
+			api: "anthropic-messages",
 			provider,
 			model,
 			usage,
-			note: childSessionId,
+			stopReason: "stop",
 		});
 	};
 	const reconcile = () =>
@@ -117,7 +119,7 @@ function parentRecords(dir: string) {
 			isLive: () => false,
 			record: (usage) => record(usage),
 		});
-	const inputs = () => entries.map((entry) => entry.type === "usage" && entry.usage.input);
+	const inputs = () => entries.map((entry) => entry.type === "model_usage" && entry.usage.input);
 	return { entries, record, reconcile, inputs };
 }
 
@@ -172,9 +174,9 @@ test("cost-only child spend is reconciled once", async () => {
 	const parent = parentRecords(dir);
 	await parent.reconcile();
 	await parent.reconcile();
-	expect(parent.entries.map((entry) => entry.type === "usage" && entry.usage.cost.total)).toEqual([
-		0.5,
-	]);
+	expect(
+		parent.entries.map((entry) => entry.type === "model_usage" && entry.usage.cost.total),
+	).toEqual([0.5]);
 });
 
 function recorderHarness(outcomes: boolean[] = []) {

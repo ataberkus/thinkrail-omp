@@ -99,6 +99,12 @@ turned unrelated state writes into rebuild requests. The drain's quiet-window as
 `configuring` active while repeatedly preparing runtimes. Each leaf contract was locally consistent, but
 no spec owned their liveness in composition.
 
+**Post-mortem (omp port).** Under omp the `provider.status` read the card polls every 500 ms while
+`configuring` refreshed each provider's catalog in turn and cost seconds; overlapping polls saturated the
+host, so a candidate (and even the `central --version` probe) took longer than any client wait and the card
+never left `configuring`. The bounded exit therefore also depends on status reads staying cheap relative to
+the poll cadence; the runtime now rebuilds its catalog only when local inputs change.
+
 ## Out of scope
 
 The adapter's exact argv/schema/timeouts; provider-card and top-bar interaction/copy; settings validation;

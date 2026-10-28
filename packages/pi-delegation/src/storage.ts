@@ -8,9 +8,8 @@ import {
 	readFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-
-import { parseTranscript, type Transcript } from "./history";
+import { getAgentDir, parseSessionContent } from "@oh-my-pi/pi-coding-agent";
+import { parseTranscriptValues, type Transcript } from "./history";
 import { DelegationError, type DelegationErrorCode } from "./types";
 
 export const DEFAULT_SCOPE = "default";
@@ -99,8 +98,11 @@ export function locateResourceTranscript(
 		try {
 			if (!fstatSync(fd).isFile())
 				throw new DelegationError("invalid-child-transcript", "Transcript is not a regular file");
-			const transcript = parseTranscript(readFileSync(fd, "utf8"), sessionId);
-			return { file, transcript };
+			const content = readFileSync(fd, "utf8");
+			const parsed = parseSessionContent(content);
+			if (!content.endsWith("\n") || parsed.malformedRecords > 0 || parsed.invalidHeader)
+				throw new DelegationError("invalid-child-transcript", "Malformed transcript JSONL");
+			return { file, transcript: parseTranscriptValues(parsed.entries, sessionId) };
 		} finally {
 			closeSync(fd);
 		}

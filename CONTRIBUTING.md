@@ -18,8 +18,9 @@ bug reports, include:
 
 ## Development setup
 
-**Prerequisites:** [Bun](https://bun.sh) 1.4.4 (the repository's pinned package manager and runtime),
-Node.js ≥ 22.19 (required by the in-process `pi` engine), and an authenticated `pi` provider for agent work.
+**Prerequisites:** [Bun](https://bun.sh) 1.4.4 (the repository's pinned package manager and runtime; the
+in-process `omp` engine requires Bun ≥ 1.3.14 and does not run on Node.js), and an authenticated `omp`
+provider for agent work.
 
 ```bash
 git clone <repo-url>

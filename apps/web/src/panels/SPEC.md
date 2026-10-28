@@ -384,7 +384,7 @@ workspace yet): **presence-gated** — renders nothing unless the selected proje
 grant would load. Presence comes from `chat/useProjectTrustSummary` (`project.trustSummary` on hosts at
 `PROJECT_TRUST_PROTOCOL_VERSION`, gated by the store's `selectSupportsProjectTrust`: alias skill names and
 the kinds of pi's own trust-requiring resources and project subagent definitions, and the count of
-`.pi/mcp.json` entries; older hosts answer
+`.omp/mcp.json` entries; older hosts answer
 `project.aliasSkills` only, read as "aliases only"), and the
 pure `chat/projectTrust` derivation — shared with `chat/SkillsDialog`'s trust banner and New Workspace, so
 the three surfaces cannot disagree about what a grant loads — `deriveProjectTrustNotice` evaluates the alias grant (`Project.trusted`) and pi-level trust
@@ -392,7 +392,7 @@ the three surfaces cannot disagree about what a grant loads — `deriveProjectTr
 its own Pi resources → *Trust project*", plus — when pi-level resources are gated — exactly the kinds a
 grant loads (the summary's `piResources`: skills, prompts, themes, system prompt, subagent definitions) and,
 only when `extensions` or `settings` are among them, that those run code on this machine, and that its N MCP
-servers still need approval one by one (a repository whose only gated content is `.pi/mcp.json` still shows the
+servers still need approval one by one (a repository whose only gated content is `.omp/mcp.json` still shows the
 notice and its grant asks for pi-level trust). *Trust project* sends
 `project.setTrust` built by `trustGrantParams`: `resources: true` only when the notice names pi-level
 resources (and so said what they load and run); an alias-only notice grants alias trust only. After trust
@@ -566,15 +566,11 @@ a project picker, the prompt hero, and the reused
   reload while the chat is busy", which stays pending and reloads by itself once idle), one line per chat
   named by its tab title when several were targeted, shown only while the row keeps that state — never a
   toast. Open a chat closes Settings and starts a chat in the workspace through `openChat`'s
-  `startChatInTab`, the same path as the workbench's New chat. Show log opens `McpLogDialog`: pi's last
-  report for the server (`detail`, with a stdio server's stderr tail) and its lines from pi's `mcp.log`
+  `startChatInTab`, the same path as the workbench's New chat. Show log opens `McpLogDialog`: omp's last
+  report for the server (`detail`: the transport failure, since omp drops a stdio server's stderr) and its lines from the host-written `mcp.log`
   (`mcp.readLog`, masked by the host). Details lists no tools: apart from always-allowed ones, no payload
   carries tool names yet (pi's `/mcp` text and `SessionResources` report a count). Attention
-  rows sort first and disabled rows stay listed last; `handledElsewhere` makes the section read-only with a
-  notice (`mcpHandledElsewhereText`): "MCP is handled by <path> in this workspace; ThinkRail's MCP
-  management is read-only." for a replacing extension, and for the host's `by: "pi settings
-  (-builtin:mcp)"` "MCP is turned off in pi settings (-builtin:mcp); remove that entry to manage servers
-  here." A problem with a whole `mcp.json` (`McpListResult.configErrors`: unparsable
+  rows sort first and disabled rows stay listed last. A problem with a whole `mcp.json` (`McpListResult.configErrors`: unparsable
   JSON, `mcpServers` not an object, a mistyped key) renders as one error notice per file
   (`McpConfigFileErrors`) naming its path, pi's message and "Edit the file directly to fix it", above the
   list or the empty state alike — so a file pi cannot read never passes for "no servers". Status details
@@ -582,7 +578,7 @@ a project picker, the prompt hero, and the reused
   **Enablement and exposure follow one routing rule (`mcpSettingWrite`):** a user-level server
   changes for this project only, through `mcp.setProjectOverride` (the host merges fields atomically,
   so only the changed field travels), and the global `mcp.json` is never written; a repo-defined server is
-  rewritten in `.pi/mcp.json` with `mcp.update`, whose whole-entry replacement starts from the entry as
+  rewritten in `.omp/mcp.json` with `mcp.update`, whose whole-entry replacement starts from the entry as
   written, read through `fs.readFile`. Every `mcp.update` (toggle, exposure, Edit) is built by
   `mcpEntryUpdate` and carries the fingerprint the row was rendered with as `expectedFingerprint`
   (`summary.fingerprint`, the same identity Remove sends at either scope), so the host refuses a write
@@ -655,7 +651,7 @@ a project picker, the prompt hero, and the reused
   host notice. Live sections: **`ProvidersSettings`** (the in-app
   provider-auth surface — a header line with an in-page **Refresh** (`providers-refresh`, disabled while a
   status read is in flight) over the groups **Connected** (each row with a **Sign-out only when
-  `canLogout`** — env / models.json auth shows a "Managed" tag instead, since the host can't unset it; a
+  `canLogout`** — env / models.yml auth shows a "Managed" tag instead, since the host can't unset it; a
   `kind: "central"` row is labelled "JetBrains AI" and its Managed tag points at the JetBrains AI card,
   which owns that connection), the **JetBrains AI** card, **Subscriptions** (unconfigured `canOAuth`
   providers) and **Available (N)** (the `canApiKey`-only rest, capped with a "Show N more" expander).
@@ -826,7 +822,7 @@ a project picker, the prompt hero, and the reused
   used that same workspace-scoped call for its Global group too, a shadowed global template would vanish
   from view entirely with no way to find, edit, or delete it
   (`data-testid="template-row"`: name + description, and — project rows only — an
-  **Open as file** action that opens `.pi/prompts/<name>.md` through the exact same `openTabs.ts`
+  **Open as file** action that opens `.omp/prompts/<name>.md` through the exact same `openTabs.ts`
   `openFileInTab` the file tree uses — at the **`keep`** intent, since a deliberate "open in editor" must
   not land in a preview slot a later click would silently replace — then closes Settings, and an
   **Edit** action; a global template has
@@ -842,12 +838,12 @@ a project picker, the prompt hero, and the reused
   the shared `prompt` module's `assembleTemplate`, the same helper `TemplateEditorDialog` uses) sequentially,
   then bumps `templatesVersion` once, the same invalidation the row list already refetches on — the
   offer disappears on its own next render once the list is non-empty, no dismiss state to track. The five
-  (review/explain/tests/commit/rename) are **the same set this repo checks into its own `.pi/prompts/`**:
+  (review/explain/tests/commit/rename) are **the same set this repo checks into its own `.omp/prompts/`**:
   those ship at *project* scope, so only a ThinkRail checkout ever sees them, and "the templates ThinkRail
   ships" must mean one thing rather than two — change one, change the other. The composer's `/` menu
   carries the discoverability half (`chat/SPEC.md`: a `slash-templates-empty` footer nudge deep-linking
   here when no template exists anywhere), since this offer is otherwise two clicks deep in a dialog. The
-  project group's empty state is a plain, icon-less notice naming the project's `.pi/prompts/` — the offer is
+  project group's empty state is a plain, icon-less notice naming the project's `.omp/prompts/` — the offer is
   Global-only, since it only ever seeds global files. No server change. **`NotificationsSettings`** is the single master on/off control
   for out-of-app attention notifications (default on), persisting `{ notificationsEnabled }` through
   `settings.update`. While enabled it also surfaces the live browser permission via the

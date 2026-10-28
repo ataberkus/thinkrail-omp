@@ -12,21 +12,27 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import { parse } from "jsonc-parser";
+import { createAgentSession, SessionManager, Settings } from "@oh-my-pi/pi-coding-agent";
+import { type IsolatedAgentDir, isolateAgentDir } from "pi-faux";
+import { parse } from "yaml";
 import {
 	listModelContextSettings,
 	setModelContextPublisher,
 	setModelContextWindow,
 } from "./modelContext";
+import { ModelRuntime } from "./modelRuntime";
 import { configurePiRuntime } from "./piRuntime";
 
 let directory: string;
 let path: string;
-let priorAgentDir: string | undefined;
+let agentDir: IsolatedAgentDir;
 let priorOffline: string | undefined;
-const ref = { provider: "openai", id: "gpt-5.5" };
+const ambientAws = Object.fromEntries(
+	Object.keys(process.env)
+		.filter((key) => key.startsWith("AWS_"))
+		.map((key) => [key, process.env[key]]),
+);
+const ref = { provider: "fixture-openai", id: "gpt-5.5" };
 const model = {
 	id: "gpt-5.5",
 	name: "GPT-5.5",
@@ -40,30 +46,30 @@ const model = {
 
 beforeEach(() => {
 	directory = mkdtempSync(join(tmpdir(), "thinkrail-model-context-"));
-	path = join(directory, "models.json");
-	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+	path = join(directory, "models.yml");
+	agentDir = isolateAgentDir(directory);
 	priorOffline = process.env.PI_OFFLINE;
-	process.env.PI_CODING_AGENT_DIR = directory;
 	process.env.PI_OFFLINE = "1";
+	for (const key of Object.keys(ambientAws)) delete process.env[key];
 });
 
 afterEach(() => {
 	setModelContextPublisher(null);
 	configurePiRuntime(null);
-	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+	agentDir.restore();
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
+	Object.assign(process.env, ambientAws);
 	rmSync(directory, { recursive: true, force: true });
 });
 
 async function runtime(
 	providers: readonly (readonly [string, "openai-responses" | "openai-codex-responses"])[] = [
-		["openai", "openai-responses"],
+		["fixture-openai", "openai-responses"],
 	],
 ) {
 	const result = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		allowModelNetwork: false,
 	});
 	for (const [provider, api] of providers) {
@@ -90,7 +96,7 @@ async function runtime(
 }
 
 function config(): Record<string, unknown> {
-	return parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""), [], { allowTrailingComma: true });
+	return parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
 }
 
 function temporaryFiles(): string[] {
@@ -101,33 +107,46 @@ test("only OpenAI Responses models capped at 272K or already overridden are offe
 	writeFileSync(
 		path,
 		JSON.stringify({
-			providers: { openai: { modelOverrides: { "gpt-5.5-pro": { contextWindow: 900_000 } } } },
+			providers: {
+				"fixture-openai": { modelOverrides: { "gpt-5.5-pro": { contextWindow: 900_000 } } },
+			},
 		}),
 	);
 	await runtime();
 	expect(await listModelContextSettings()).toEqual([
 		{ ...ref, name: "GPT-5.5", contextWindow: 272_000, override: null },
 		{
-			provider: "openai",
+			provider: "fixture-openai",
 			id: "gpt-5.5-pro",
 			name: "GPT-5.5",
 			contextWindow: 900_000,
 			override: 900_000,
 		},
 	]);
-	await setModelContextWindow({ provider: "openai", id: "gpt-5.5-pro" }, null);
+	await setModelContextWindow({ provider: "fixture-openai", id: "gpt-5.5-pro" }, null);
 	expect((await listModelContextSettings()).map((entry) => entry.id)).toEqual(["gpt-5.5"]);
 });
 
-test("saving 1M updates Pi metadata for new chats, keeps live session models, and notifies", async () => {
+test("saving 1M updates omp metadata for new chats, keeps live session models, and notifies", async () => {
 	const pi = await runtime();
-	const before = pi.getModel("openai", "gpt-5.5");
+	const before = pi.getModel("fixture-openai", "gpt-5.5");
 	if (!before) throw new Error("Missing fixture model");
 	const { session } = await createAgentSession({
 		cwd: directory,
-		modelRuntime: pi,
+		agentDir: directory,
+		settings: Settings.isolated(),
+		authStorage: pi.authStorage,
+		modelRegistry: pi.modelRegistry,
 		model: before,
-		sessionManager: SessionManager.inMemory(),
+		sessionManager: SessionManager.inMemory(directory),
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
 	});
 	let published = 0;
 	setModelContextPublisher(() => {
@@ -138,27 +157,29 @@ test("saving 1M updates Pi metadata for new chats, keeps live session models, an
 		expect(settings).toEqual([
 			{ ...ref, name: "GPT-5.5", contextWindow: 1_000_000, override: 1_000_000 },
 		]);
-		expect(pi.getModel("openai", "gpt-5.5")).toMatchObject({
+		expect(pi.getModel("fixture-openai", "gpt-5.5")).toMatchObject({
 			contextWindow: 1_000_000,
 			cost: model.cost,
 			maxTokens: 128_000,
 		});
 		expect(session.model?.contextWindow).toBe(272_000);
 		expect(config()).toEqual({
-			providers: { openai: { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } } },
+			providers: {
+				"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } },
+			},
 		});
 		expect(statSync(path).mode & 0o777).toBe(0o600);
 		expect(published).toBe(1);
 		await setModelContextWindow(ref, 1_000_000);
 		expect(published).toBe(1);
 	} finally {
-		session.dispose();
+		await session.dispose();
 	}
 });
 
 test("Default removes only the override and preserves credentials, comments, mode and BOM", async () => {
 	const original =
-		'\uFEFF{ // keep this note\n  "providers": {\n    "openai": {\n      "apiKey": "private-fixture-sentinel",\n      "modelOverrides": {\n        "gpt-5.5": { "maxTokens": 8192, "contextWindow": 500000, },\n        "gpt-5": { "contextWindow": 350000 },\n      },\n    },\n  },\n}\n';
+		"\uFEFF# keep this note\nproviders:\n  fixture-openai:\n    apiKey: private-fixture-sentinel # inline note\n    modelOverrides:\n      gpt-5.5: { maxTokens: 8192, contextWindow: 500000 }\n      gpt-5:\n        contextWindow: 350000\n";
 	writeFileSync(path, original);
 	chmodSync(path, 0o640);
 	const pi = await runtime();
@@ -166,20 +187,26 @@ test("Default removes only the override and preserves credentials, comments, mod
 	expect(JSON.stringify(settings)).not.toContain("private-fixture-sentinel");
 	expect(settings).toEqual([
 		{ ...ref, name: "GPT-5.5", contextWindow: 272_000, override: null },
-		{ provider: "openai", id: "gpt-5", name: "GPT-5.5", contextWindow: 350_000, override: 350_000 },
+		{
+			provider: "fixture-openai",
+			id: "gpt-5",
+			name: "GPT-5.5",
+			contextWindow: 350_000,
+			override: 350_000,
+		},
 	]);
 	const saved = readFileSync(path, "utf8");
-	expect(saved.startsWith("\uFEFF// keep")).toBe(false);
-	expect(saved.startsWith("\uFEFF{ // keep this note")).toBe(true);
+	expect(saved.startsWith("\uFEFF# keep this note\n")).toBe(true);
+	expect(saved).toContain("apiKey: private-fixture-sentinel # inline note");
 	expect(config()).toEqual({
 		providers: {
-			openai: {
+			"fixture-openai": {
 				apiKey: "private-fixture-sentinel",
 				modelOverrides: { "gpt-5.5": { maxTokens: 8192 }, "gpt-5": { contextWindow: 350_000 } },
 			},
 		},
 	});
-	expect(pi.getModel("openai", "gpt-5.5")?.maxTokens).toBe(8192);
+	expect(pi.getModel("fixture-openai", "gpt-5.5")?.maxTokens).toBe(8192);
 	expect(pi.getError()).toBeUndefined();
 	expect(statSync(path).mode & 0o777).toBe(0o640);
 });
@@ -188,7 +215,9 @@ test("Default prunes override objects it empties but never the providers map", a
 	writeFileSync(
 		path,
 		JSON.stringify({
-			providers: { openai: { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } } },
+			providers: {
+				"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } },
+			},
 		}),
 	);
 	await runtime();
@@ -198,23 +227,23 @@ test("Default prunes override objects it empties but never the providers map", a
 
 test("one bulk save covers API, Codex and proxy providers and leaves ineligible models alone", async () => {
 	const pi = await runtime([
-		["openai", "openai-responses"],
-		["openai-codex", "openai-codex-responses"],
+		["fixture-openai", "openai-responses"],
+		["fixture-codex", "openai-codex-responses"],
 		["configured-proxy", "openai-responses"],
 	]);
 	const result = await setModelContextWindow("available", 600_000);
 	expect(result.map((entry) => [entry.provider, entry.override])).toEqual([
-		["openai", 600_000],
-		["openai-codex", 600_000],
+		["fixture-openai", 600_000],
+		["fixture-codex", 600_000],
 		["configured-proxy", 600_000],
 	]);
-	expect(pi.getModel("openai", "gpt-5")?.contextWindow).toBe(400_000);
-	expect(pi.getModel("openai", "gpt-5.5-pro")?.contextWindow).toBe(1_050_000);
+	expect(pi.getModel("fixture-openai", "gpt-5")?.contextWindow).toBe(400_000);
+	expect(pi.getModel("fixture-openai", "gpt-5.5-pro")?.contextWindow).toBe(1_050_000);
 	expect(pi.getModel("other", "claude")?.contextWindow).toBe(272_000);
 	expect(config()).toEqual({
 		providers: {
-			openai: { modelOverrides: { "gpt-5.5": { contextWindow: 600_000 } } },
-			"openai-codex": { modelOverrides: { "gpt-5.5": { contextWindow: 600_000 } } },
+			"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 600_000 } } },
+			"fixture-codex": { modelOverrides: { "gpt-5.5": { contextWindow: 600_000 } } },
 			"configured-proxy": { modelOverrides: { "gpt-5.5": { contextWindow: 600_000 } } },
 		},
 	});
@@ -224,18 +253,20 @@ test("a bulk save from a mixed state replaces every override and bulk Default cl
 	writeFileSync(
 		path,
 		JSON.stringify({
-			providers: { openai: { modelOverrides: { "gpt-5.5": { contextWindow: 500_000 } } } },
+			providers: {
+				"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 500_000 } } },
+			},
 		}),
 	);
 	const pi = await runtime([
-		["openai", "openai-responses"],
-		["openai-codex", "openai-codex-responses"],
+		["fixture-openai", "openai-responses"],
+		["fixture-codex", "openai-codex-responses"],
 		["configured-proxy", "openai-responses"],
 	]);
 	const overrides = (settings: { override: number | null }[]) =>
 		settings.map((entry) => entry.override);
 	const effective = () =>
-		["openai", "openai-codex", "configured-proxy"].map(
+		["fixture-openai", "fixture-codex", "configured-proxy"].map(
 			(provider) => pi.getModel(provider, ref.id)?.contextWindow,
 		);
 	expect(overrides(await listModelContextSettings())).toEqual([500_000, null, null]);
@@ -243,7 +274,7 @@ test("a bulk save from a mixed state replaces every override and bulk Default cl
 		1_000_000, 1_000_000, 1_000_000,
 	]);
 	expect(
-		overrides(await setModelContextWindow({ provider: "openai-codex", id: ref.id }, null)),
+		overrides(await setModelContextWindow({ provider: "fixture-codex", id: ref.id }, null)),
 	).toEqual([1_000_000, null, 1_000_000]);
 	expect(overrides(await setModelContextWindow("available", 600_000))).toEqual([
 		600_000, 600_000, 600_000,
@@ -258,12 +289,14 @@ test("shared saves skip overrides outside the app range; only a targeted save ch
 	writeFileSync(
 		path,
 		JSON.stringify({
-			providers: { openai: { modelOverrides: { "gpt-5.5": { contextWindow: 1_050_000 } } } },
+			providers: {
+				"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 1_050_000 } } },
+			},
 		}),
 	);
 	const pi = await runtime([
-		["openai", "openai-responses"],
-		["openai-codex", "openai-codex-responses"],
+		["fixture-openai", "openai-responses"],
+		["fixture-codex", "openai-codex-responses"],
 	]);
 	const overrides = (settings: { override: number | null }[]) =>
 		settings.map((entry) => entry.override);
@@ -272,9 +305,9 @@ test("shared saves skip overrides outside the app range; only a targeted save ch
 		1_050_000, 1_000_000,
 	]);
 	expect(overrides(await setModelContextWindow("available", null))).toEqual([1_050_000, null]);
-	expect(pi.getModel("openai", ref.id)?.contextWindow).toBe(1_050_000);
+	expect(pi.getModel("fixture-openai", ref.id)?.contextWindow).toBe(1_050_000);
 	expect(overrides(await setModelContextWindow(ref, null))).toEqual([null, null]);
-	expect(pi.getModel("openai", ref.id)?.contextWindow).toBe(272_000);
+	expect(pi.getModel("fixture-openai", ref.id)?.contextWindow).toBe(272_000);
 });
 
 test("budgets outside 272K–1M and unknown targets are refused before touching the file", async () => {
@@ -283,28 +316,28 @@ test("budgets outside 272K–1M and unknown targets are refused before touching 
 		await expect(setModelContextWindow(ref, value)).rejects.toThrow("whole number between");
 	}
 	await expect(
-		setModelContextWindow({ provider: "openai", id: "gpt-5" }, 1_000_000),
+		setModelContextWindow({ provider: "fixture-openai", id: "gpt-5" }, 1_000_000),
 	).rejects.toThrow("ineligible");
 	await expect(
 		setModelContextWindow({ provider: "other", id: "claude" }, 1_000_000),
 	).rejects.toThrow("ineligible");
-	expect(readdirSync(directory)).not.toContain("models.json");
+	expect(readdirSync(directory)).not.toContain("models.yml");
 	await setModelContextWindow(ref, 272_000);
 	expect(config()).toEqual({
-		providers: { openai: { modelOverrides: { "gpt-5.5": { contextWindow: 272_000 } } } },
+		providers: { "fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 272_000 } } } },
 	});
 });
 
-test("an invalid models.json is refused rather than patched", async () => {
+test("an invalid models.yml is refused rather than patched", async () => {
 	writeFileSync(path, '{"providers": {');
 	await runtime();
-	await expect(setModelContextWindow(ref, 1_000_000)).rejects.toThrow("isn't valid JSON");
-	await expect(listModelContextSettings()).rejects.toThrow("isn't valid JSON");
+	await expect(setModelContextWindow(ref, 1_000_000)).rejects.toThrow("isn't valid YAML");
+	await expect(listModelContextSettings()).rejects.toThrow("isn't valid YAML");
 	expect(readFileSync(path, "utf8")).toBe('{"providers": {');
 	expect(temporaryFiles()).toEqual([]);
 });
 
-test("a read-only models.json is refused and left byte-for-byte intact", async () => {
+test("a read-only models.yml is refused and left byte-for-byte intact", async () => {
 	writeFileSync(path, '{"providers": {}}');
 	chmodSync(path, 0o400);
 	await runtime();
@@ -313,8 +346,8 @@ test("a read-only models.json is refused and left byte-for-byte intact", async (
 	expect(temporaryFiles()).toEqual([]);
 });
 
-test("writes follow a symlinked models.json and leave no temporary files", async () => {
-	const target = join(directory, "dotfiles-models.json");
+test("writes follow a symlinked models.yml and leave no temporary files", async () => {
+	const target = join(directory, "dotfiles-models.yml");
 	writeFileSync(target, '{"providers":{}}');
 	symlinkSync(target, path);
 	await runtime();
@@ -324,14 +357,16 @@ test("writes follow a symlinked models.json and leave no temporary files", async
 	expect(temporaryFiles()).toEqual([]);
 });
 
-test("a dangling models.json symlink is kept and its missing target is created", async () => {
-	const target = join(directory, "dotfiles", "pi", "models.json");
+test("a dangling models.yml symlink is kept and its missing target is created", async () => {
+	const target = join(directory, "dotfiles", "omp", "models.yml");
 	symlinkSync(target, path);
 	await runtime();
 	await setModelContextWindow(ref, 1_000_000);
 	expect(lstatSync(path).isSymbolicLink()).toBe(true);
-	expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({
-		providers: { openai: { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } } },
+	expect(parse(readFileSync(target, "utf8"))).toEqual({
+		providers: {
+			"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } },
+		},
 	});
 	expect(statSync(target).mode & 0o777).toBe(0o600);
 	expect(temporaryFiles()).toEqual([]);
@@ -339,17 +374,17 @@ test("a dangling models.json symlink is kept and its missing target is created",
 
 test("concurrent saves serialize so neither edit is lost", async () => {
 	await runtime([
-		["openai", "openai-responses"],
-		["openai-codex", "openai-codex-responses"],
+		["fixture-openai", "openai-responses"],
+		["fixture-codex", "openai-codex-responses"],
 	]);
 	await Promise.all([
 		setModelContextWindow(ref, 1_000_000),
-		setModelContextWindow({ provider: "openai-codex", id: "gpt-5.5" }, 800_000),
+		setModelContextWindow({ provider: "fixture-codex", id: "gpt-5.5" }, 800_000),
 	]);
 	expect(config()).toEqual({
 		providers: {
-			openai: { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } },
-			"openai-codex": { modelOverrides: { "gpt-5.5": { contextWindow: 800_000 } } },
+			"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 1_000_000 } } },
+			"fixture-codex": { modelOverrides: { "gpt-5.5": { contextWindow: 800_000 } } },
 		},
 	});
 });
@@ -360,12 +395,14 @@ test("external edits are re-read on every read", async () => {
 	writeFileSync(
 		path,
 		JSON.stringify({
-			providers: { openai: { modelOverrides: { "gpt-5.5": { contextWindow: 700_000 } } } },
+			providers: {
+				"fixture-openai": { modelOverrides: { "gpt-5.5": { contextWindow: 700_000 } } },
+			},
 		}),
 	);
 	expect((await listModelContextSettings())[0]).toMatchObject({
 		contextWindow: 700_000,
 		override: 700_000,
 	});
-	expect(pi.getModel("openai", "gpt-5.5")?.contextWindow).toBe(700_000);
+	expect(pi.getModel("fixture-openai", "gpt-5.5")?.contextWindow).toBe(700_000);
 });

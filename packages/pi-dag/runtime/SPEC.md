@@ -55,8 +55,9 @@ Post-open realpath/lstat checks before and after reading require the live contai
 the opened descriptor, rejecting intermediate-directory replacement. Two positioned reads plus
 before/after descriptor identity and nanosecond metadata reject same-size mutation instead of
 persisting torn evidence. A later sole-batch proposal within the same active
-pi invocation supersedes its predecessor; queued steering/recovery can continue pi after a protocol
-result requests termination. An input gate cannot be replaced this way: answering it requires the
+pi invocation supersedes its predecessor. Worker tools are the resource's delegation
+`terminalTools`, so a successful protocol result ends the invocation before another provider call;
+queued steering/recovery can continue pi after it. An input gate cannot be replaced this way: answering it requires the
 configured authority. Large submitted bodies and error details are files;
 current snapshots and history carry bounded summaries and metadata. History/notice entries record
 admission decisions, rejected execution, uncertainty, interventions and releases, without provider

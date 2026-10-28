@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { initTheme, type Theme } from "@oh-my-pi/pi-coding-agent";
+import { stripTerminalSequences, visibleWidth } from "@oh-my-pi/pi-tui";
 import {
 	callSummary,
 	DiagramComponent,
@@ -17,9 +17,9 @@ const theme = {
 const FLOW = "flowchart LR\n  A[Start] --> B{Ok?}\n  B -->|yes| C[Done]";
 const OVER_SIZE_CAP = `flowchart LR\n${Array.from({ length: 140 }, (_, i) => `  N${i} --> N${i + 1}`).join("\n")}`;
 
-beforeAll(() => initTheme("dark", false));
+beforeAll(() => initTheme(false));
 
-function plain(lines: string[]): string[] {
+function plain(lines: readonly string[]): string[] {
 	return lines.map((line) => stripTerminalSequences(line).trimEnd());
 }
 
@@ -156,7 +156,10 @@ describe("renderVisualizeCall / renderVisualizeResult", () => {
 		expect(callSummary({ type: "diagram" })).toBe("diagram");
 		expect(callSummary({ type: "file", path: "a.html" })).toBe("a.html");
 		expect(callSummary({ type: "file", path: "a.html", before: "b.html" })).toBe("b.html → a.html");
-		const call = plain(renderVisualizeCall({ type: "diagram", mermaid: FLOW }, theme).render(80));
+		const options = { expanded: false, isPartial: false };
+		const call = plain(
+			renderVisualizeCall({ type: "diagram", mermaid: FLOW }, options, theme).render(80),
+		);
 		expect(call[0]).toBe("*visualize *diagram");
 		const narrow = renderVisualizeCall(
 			{
@@ -164,6 +167,7 @@ describe("renderVisualizeCall / renderVisualizeResult", () => {
 				mermaid: FLOW,
 				title: "A very long title that does not fit in twenty columns",
 			},
+			options,
 			theme,
 		).render(20);
 		expect(narrow).toHaveLength(1);
@@ -176,17 +180,16 @@ describe("renderVisualizeCall / renderVisualizeResult", () => {
 			{ content: [], details: undefined },
 			{ ...options, isPartial: true },
 			theme,
-			{ isError: false },
 		);
 		expect(plain(partial.render(80))[0]).toContain("Rendering");
 		const error = renderVisualizeResult(
 			{
 				content: [{ type: "text", text: "visualize: invalid Mermaid syntax" }],
 				details: undefined,
+				isError: true,
 			},
 			options,
 			theme,
-			{ isError: true },
 		);
 		expect(plain(error.render(80))[0]).toContain("invalid Mermaid syntax");
 		const diagram = renderVisualizeResult(
@@ -196,7 +199,6 @@ describe("renderVisualizeCall / renderVisualizeResult", () => {
 			},
 			options,
 			theme,
-			{ isError: false },
 		);
 		expect(diagram).toBeInstanceOf(DiagramComponent);
 		const comparison = renderVisualizeResult(
@@ -206,7 +208,6 @@ describe("renderVisualizeCall / renderVisualizeResult", () => {
 			},
 			options,
 			theme,
-			{ isError: false },
 		);
 		const lines = plain(comparison.render(80)).join("\n");
 		expect(lines).toContain("A");

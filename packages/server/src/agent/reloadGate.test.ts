@@ -2,9 +2,13 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	createSession,
 	disposeAllSessions,
@@ -18,6 +22,7 @@ import {
 	setSessionManagerFactory,
 	settleSessionsForShutdown,
 } from "./agentSessionManager";
+import { ModelRuntime } from "./modelRuntime";
 import { configurePiRuntime } from "./piRuntime";
 
 const model = {
@@ -37,7 +42,6 @@ const faux = createFauxCore({
 	tokensPerSecond: 40,
 });
 const saved = {
-	agent: process.env.PI_CODING_AGENT_DIR,
 	data: process.env.THINKRAIL_DATA_DIR,
 	offline: process.env.PI_OFFLINE,
 };
@@ -48,9 +52,10 @@ const latch = join(root, "COMMAND_MAY_FINISH");
 const inputHold = join(root, "HOLD_SLOW_INPUT");
 const reloadHold = join(root, "HOLD_RELOAD");
 let sequence = 0;
+let isolated: IsolatedAgentDir | undefined;
 
 beforeAll(async () => {
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	isolated = isolateAgentDir(agentDir);
 	process.env.THINKRAIL_DATA_DIR = join(root, "data");
 	process.env.PI_OFFLINE = "1";
 	mkdirSync(join(agentDir, "extensions"), { recursive: true });
@@ -66,10 +71,15 @@ beforeAll(async () => {
 			"  while (existsSync(file)) await new Promise((resolve) => setTimeout(resolve, 10));",
 			"};",
 			"export default function probe(pi) {",
-			'  pi.on("session_shutdown", async (event) => {',
-			'    if (event.reason === "reload") await held(reloadHold);',
+			'  pi.on("session_shutdown", async (_event, ctx) => {',
+			"    const session = ctx.sessionManager.getSessionId();",
+			"    await held(reloadHold);",
 			"    await new Promise((resolve) => setTimeout(resolve, 40));",
-			'    appendFileSync(marker, JSON.stringify({ kind: "shutdown", reason: event.reason }) + "\\n");',
+			'    appendFileSync(marker, JSON.stringify({ kind: "shutdown", session }) + "\\n");',
+			"  });",
+			'  pi.on("session_start", async (_event, ctx) => {',
+			"    const session = ctx.sessionManager.getSessionId();",
+			'    appendFileSync(marker, JSON.stringify({ kind: "start", session }) + "\\n");',
 			"  });",
 			'  pi.on("input", async (event) => {',
 			'    if (event.text.startsWith("slow:")) await held(inputHold);',
@@ -86,7 +96,7 @@ beforeAll(async () => {
 		].join("\n"),
 	);
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -106,8 +116,7 @@ afterAll(async () => {
 	disposeAllSessions();
 	configurePiRuntime(null);
 	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
-	if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = saved.agent;
+	isolated?.restore();
 	if (saved.data === undefined) delete process.env.THINKRAIL_DATA_DIR;
 	else process.env.THINKRAIL_DATA_DIR = saved.data;
 	if (saved.offline === undefined) delete process.env.PI_OFFLINE;
@@ -115,17 +124,20 @@ afterAll(async () => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-function events(): { kind: string; reason?: string }[] {
+function events(): { kind: string; session?: string }[] {
 	try {
 		return readFileSync(marker, "utf8")
 			.split("\n")
 			.filter(Boolean)
-			.map((line) => JSON.parse(line) as { kind: string; reason?: string });
+			.map((line) => JSON.parse(line) as { kind: string; session?: string });
 	} catch {
 		return [];
 	}
 }
-const reloads = () => events().filter((e) => e.kind === "shutdown" && e.reason === "reload").length;
+const reloads = (sessionId: string) =>
+	events().filter((e) => e.kind === "shutdown" && e.session === sessionId).length;
+const starts = (sessionId: string) =>
+	events().filter((e) => e.kind === "start" && e.session === sessionId).length;
 
 async function waitFor(read: () => boolean, ms = 8000): Promise<void> {
 	const until = Date.now() + ms;
@@ -148,38 +160,38 @@ async function parent() {
 
 test("an idle session reloads immediately and extensions see the reload lifecycle", async () => {
 	const p = await parent();
-	const before = reloads();
+	const before = reloads(p.sessionId);
 	expect(await requestSessionReload(p.sessionId)).toBe("reloaded");
-	expect(reloads()).toBe(before + 1);
+	expect(reloads(p.sessionId)).toBe(before + 1);
 	await reloadSessionResources(p.sessionId);
-	expect(reloads()).toBe(before + 2);
+	expect(reloads(p.sessionId)).toBe(before + 2);
 });
 
 test("a reload requested while the turn streams is deferred and runs at settlement", async () => {
 	const p = await parent();
-	const before = reloads();
+	const before = reloads(p.sessionId);
 	faux.setResponses([fauxAssistantMessage("word ".repeat(60))]);
 	const turn = promptSession(p.sessionId, "Say many words.");
 	await waitFor(() => getSessionState(p.sessionId).execution === "running");
 	expect(await requestSessionReload(p.sessionId)).toBe("deferred");
 	await expect(reloadSessionResources(p.sessionId)).rejects.toThrow(/busy/);
-	expect(reloads()).toBe(before);
+	expect(reloads(p.sessionId)).toBe(before);
 	await turn;
-	await waitFor(() => reloads() === before + 1);
+	await waitFor(() => reloads(p.sessionId) === before + 1);
 });
 
 test("a prompt held in preflight (a slash command) defers the reload until it is released", async () => {
 	const p = await parent();
-	const before = reloads();
+	const before = reloads(p.sessionId);
 	rmSync(latch, { force: true });
 	const command = promptSession(p.sessionId, "/gate-wait");
 	await Bun.sleep(50);
 	expect(getSessionState(p.sessionId).execution).not.toBe("running");
 	expect(await requestSessionReload(p.sessionId)).toBe("deferred");
-	expect(reloads()).toBe(before);
+	expect(reloads(p.sessionId)).toBe(before);
 	writeFileSync(latch, "");
 	await command;
-	await waitFor(() => reloads() === before + 1);
+	await waitFor(() => reloads(p.sessionId) === before + 1);
 	expect(events().some((e) => e.kind === "command")).toBe(true);
 });
 
@@ -197,7 +209,8 @@ function userTexts(messages: Awaited<ReturnType<typeof getSessionMessages>>["mes
 
 test("removing a queued message keeps the others when the run settles with a reload pending meanwhile", async () => {
 	const p = await parent();
-	const before = reloads();
+	const before = reloads(p.sessionId);
+	const started = starts(p.sessionId);
 	faux.setResponses([
 		fauxAssistantMessage("word ".repeat(60)),
 		fauxAssistantMessage("kept two"),
@@ -217,12 +230,13 @@ test("removing a queued message keeps the others when the run settles with a rel
 		await Bun.sleep(100);
 		rmSync(inputHold, { force: true });
 		expect((await removal).removed).toEqual({ text: "drop me" });
-		expect(reloads()).toBe(before);
+		expect(reloads(p.sessionId)).toBe(before);
 	} finally {
 		rmSync(inputHold, { force: true });
 		rmSync(reloadHold, { force: true });
 	}
-	await waitFor(() => reloads() === before + 1);
+	await waitFor(() => reloads(p.sessionId) === before + 1);
+	await waitFor(() => starts(p.sessionId) === started + 1);
 	const { messages } = await getSessionMessages(p.sessionId, p.workspaceId, p.cwd);
 	const texts = userTexts(messages);
 	expect(texts).toContain("slow: keep one");

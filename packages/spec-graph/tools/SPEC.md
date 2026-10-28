@@ -12,7 +12,7 @@ tags: [spec-graph, pi-extension]
 
 The seven `pi` custom tools that expose the spec model to the agent — `spec_grep`, `spec_get`,
 `spec_graph`, `spec_create`, `spec_update`, `spec_delete`, `spec_validate`. Each is a **thin wrapper** over
-`core/`: parse the typebox params, call a `core/` function, format a text result + structured `details`.
+`core/`: parse the params (omp `z` schemas), call a `core/` function, format a text result + structured `details`.
 None edit prose.
 
 ## Boundary
@@ -21,9 +21,8 @@ None edit prose.
   `spec_create` scaffold headings (`shared.ts`).
 - **Public surface:** the `index.ts` **barrel** exporting `registerSpecTools(pi)`; the extension entry
   (`../index.ts`) is the only caller.
-- **Allowed deps:** `core/` (via its barrel), `@earendil-works/pi-coding-agent` (types and public
-  truncation helpers), `@earendil-works/pi-ai` (`StringEnum`, from the package root), `typebox`, Node
-  built-ins. Project writes remain confined to write tools; any tool may capture oversized responses
+- **Allowed deps:** `core/` (via its barrel), `@oh-my-pi/pi-coding-agent` (types, the `z` schema
+  builder, and public truncation helpers), Node built-ins. Project writes remain confined to write tools; any tool may capture oversized responses
   in private OS temporary files, never in the project.
 - **Forbidden:** reaching into `core/` leaf files (import only the barrel); any `@thinkrail/*` package.
 
@@ -36,7 +35,8 @@ file; the other four are read-only.
 
 ## Invariants
 
-- Model-facing text, notices included, stays within Pi's 2,000-line / 50 KiB limits. Overflow is
+- Model-facing text, notices included, stays within a 2,000-line / 50 KiB budget (`MAX_OUTPUT_LINES` /
+  `MAX_OUTPUT_BYTES` in `shared.ts`, pinned explicitly because omp's `DEFAULT_MAX_LINES` is 3,000). Overflow is
   captured in a private temporary file, which may expire; capture failure is explicit and never fails
   a completed mutation. Tool errors set `isError: true` and retain a visible error marker even if
   capture fails. Structured `details` remain presentation data, outside model context.
@@ -50,7 +50,7 @@ file; the other four are read-only.
   place by `core`'s `updateFrontmatterText`, so comments, nested/unknown fields, field order, and the
   file's line endings are preserved.
 - Frontmatter field keys the tools read/write come from `core`'s `FIELDS` registry, and params over a
-  finite vocabulary use `StringEnum` seeded by the `core/` tuple (`spec_create.type` ← `SPEC_TYPES`,
+  finite vocabulary use `z.enum` seeded by the `core/` tuple (`spec_create.type` ← `SPEC_TYPES`,
   `spec_create.status` ← `SPEC_STATUSES`, `spec_graph.direction` ← `SLICE_DIRECTIONS`,
   `spec_graph.edge` ← `LINK_KINDS`) — never re-typed literals, so a `core` rename flows here with no edit
   (pinned by `tools/tools.test.ts`).

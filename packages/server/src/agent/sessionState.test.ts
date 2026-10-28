@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import type { Message } from "@thinkrail/contracts";
 import type { InteractiveTools } from "../extensions";
 import { deriveSessionState } from "./sessionState";

@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import type { HistorySearchResult, MessageHit, PromptHit } from "@thinkrail/contracts";
 import { MAX_HISTORY_LIMIT, MAX_HISTORY_QUERY_LENGTH } from "@thinkrail/contracts";
 import { extractSession, type HistoryEntry } from "./extract";
@@ -57,7 +57,7 @@ export class HistoryIndex {
 
 	private async listFiles(): Promise<string[]> {
 		if (this.sessionDir) return listJsonl(this.sessionDir);
-		const root = join(getAgentDir(), "sessions");
+		const root = getSessionsDir();
 		let subdirs: string[] = [];
 		try {
 			subdirs = (await readdir(root, { withFileTypes: true }))

@@ -2,7 +2,7 @@ import "./env";
 import { cpSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { setSessionManagerFactory } from "@thinkrail/server/agent";
 import { E2E_DATA_DIR } from "../../fixtures/paths";
 

@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 
 export interface ReplayToolCall {
 	toolCallId: string;

@@ -21,14 +21,12 @@ export interface McpHeldSnapshot {
 export interface McpWorkspaceProjection {
 	servers: McpServerSummary[] | null;
 	configErrors: McpConfigFileError[];
-	handledElsewhere: { by: string } | null;
 	sessions: Record<string, McpHeldSnapshot>;
 }
 
 export const EMPTY_MCP_PROJECTION: McpWorkspaceProjection = {
 	servers: null,
 	configErrors: [],
-	handledElsewhere: null,
 	sessions: {},
 };
 
@@ -93,7 +91,6 @@ export function foldMcpList(
 	return {
 		servers: result.servers,
 		configErrors: result.configErrors ?? [],
-		handledElsewhere: result.handledElsewhere ?? null,
 		sessions,
 	};
 }

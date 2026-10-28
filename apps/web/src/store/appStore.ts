@@ -633,7 +633,7 @@ function clearRetryTurns(rt: SessionRuntime, source: RetrySource): SessionRuntim
 		: rt;
 }
 
-const STATS_ENTRY_TYPES = new Set(["usage", "compaction", "branch_summary", "context_edit"]);
+const STATS_ENTRY_TYPES = new Set(["model_usage", "compaction", "branch_summary"]);
 
 function invalidatesSessionStats(event: PiEvent): boolean {
 	return (

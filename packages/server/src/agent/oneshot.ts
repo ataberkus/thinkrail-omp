@@ -1,4 +1,4 @@
-import type { Api, Context, Model } from "@earendil-works/pi-ai";
+import type { Api, Context, Model } from "@oh-my-pi/pi-ai";
 import { usePiRuntime } from "./agentSessionManager";
 import { preferredDefaultModel } from "./modelDefaults";
 import { type AvailableModelsRuntime, settledAvailableModels } from "./piRuntime";
@@ -63,7 +63,7 @@ export function completeOnce(req: OneShotRequest): Promise<OneShotResult> {
 		if (!model) throw new Error("no-model");
 
 		const context: Context = {
-			...(req.system ? { systemPrompt: req.system } : {}),
+			...(req.system ? { systemPrompt: [req.system] } : {}),
 			messages: [{ role: "user", content: req.prompt, timestamp: Date.now() }],
 		};
 		const message = await runtime.completeSimple(model, context, {

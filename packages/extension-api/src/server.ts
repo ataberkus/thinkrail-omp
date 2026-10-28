@@ -1,4 +1,4 @@
-import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 
 export type ToolResponse =
 	| { kind: "response"; value: unknown }
@@ -8,6 +8,7 @@ export type ToolResponse =
 export interface ExtensionSessionServices {
 	expectToolResponse(toolCallId: string): void;
 	awaitToolResponse(toolCallId: string, signal: AbortSignal | undefined): Promise<ToolResponse>;
+	endRun(toolCallId: string): void;
 }
 
 export interface InteractiveTool {

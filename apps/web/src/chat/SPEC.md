@@ -12,10 +12,10 @@ tags: [chat]
 
 The chat/agent conversation UI: **presentational React primitives** that render pi's **canonical
 message / content-block model**, a **tool-renderer registry** (the extension point), and `ChatView`
-(the app-integration layer). Hand-rolled — pi ships no web UI, and the official
-`@earendil-works/pi-web-ui` (MIT, **Lit**, runs the agent in-browser / "Direct Mode") is the canonical
+(the app-integration layer). Hand-rolled — the engine ships no web UI we can host, and upstream pi's
+`pi-web-ui` package (MIT, **Lit**, runs the agent in-browser / "Direct Mode") is the canonical
 event→render *reference* we learn from but do **not** adopt (architecture + framework mismatch with our
-host-runs-pi / typed-WS / React+shadcn model). Built so others can reuse/contribute (extraction-ready as
+host-runs-the-engine / typed-WS / React+shadcn model). Built so others can reuse/contribute (extraction-ready as
 a future `packages/chat-ui`). Built-in tool renderers live in the child
 [tools/SPEC.md](tools/SPEC.md); extracted extension renderers live in [[module-thinkrail-extensions]].
 
@@ -917,11 +917,11 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
   latter reused by `panels` pre-session). All props-driven; behavior detail lives in the components' jsdoc.
 - **Live session telemetry follows Pi's finalized boundaries.** `SessionStatsBar` renders only the host's
   authoritative `session.getStats` snapshot; the web never derives billed totals or context usage from
-  message content. Totals include delegated subagent spend, which the host records into the parent as pi
-  `usage` entries after each response of a running subagent and at its run's end, so the toolbar moves
+  message content. Totals include delegated subagent spend, which the host records into the parent as omp
+  `model_usage` entries after each response of a running subagent and at its run's end, so the toolbar moves
   while a subagent works instead of jumping when it finishes. The mounted chat refreshes on mount/reconnect, after each finalized message, compaction,
-  settlement, and appended spend- or context-bearing entry (`usage` from subagent runs or cache warming,
-  `compaction`, `branch_summary`, `context_edit`), and after Pi accepts a model change. A reconnect read may race a restarted host before
+  settlement, and appended spend- or context-bearing entry (`model_usage` from subagent runs or cache
+  warming, `compaction`, `branch_summary`), and after Pi accepts a model change. A reconnect read may race a restarted host before
   transcript sync has reattached the persisted session, so that sync edge retriggers the read. Consecutive
   Pi events batched into one store commit
   collapse to one read, and a response superseded by a newer session revision, host generation, or unmount
@@ -1255,7 +1255,7 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
     earlier `splitTemplate` here handled only bare/double-quoted scalars, so a pi-native
     `description: 'single-quoted'` loaded into the form with literal quotes and saved back corrupted).
     Its boundary
-    rule mirrors pi's own `extractFrontmatter` (`@earendil-works/pi-coding-agent`'s
+    rule mirrors pi's own `extractFrontmatter` (`@oh-my-pi/pi-coding-agent`'s
     `dist/utils/frontmatter.js` + `dist/utils/text.js` of the catalog-pinned pi — the same facts
     `packages/server/src/templates/SPEC.md` relies on server-side; re-verify both on a pi bump): strip
     one leading UTF-8 BOM, normalize newlines, then end the frontmatter block at the FIRST later `\n---`
@@ -1327,7 +1327,7 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
     — the history path already covers "reuse what I already wrote"; a second entry point for the same
     "type it, then decide to save it" gesture would be redundant surface, not a distinct use case.
   - **Edit-as-file** — project-scoped rows only get an `Open as file` action (`panels/TemplatesSettings.tsx`),
-    reusing `openTabs.ts`'s exact `openFileInTab(workspaceId, ".pi/prompts/<name>.md", "keep")` (the same
+    reusing `openTabs.ts`'s exact `openFileInTab(workspaceId, ".omp/prompts/<name>.md", "keep")` (the same
     action file-tree clicks use) — at the **`keep`** intent deliberately, since an explicit "open in editor"
     must not land in the preview slot a later browse click would silently replace (see `panels/SPEC.md`'s
     Preview tabs bullet) — then `store.closeSettings()`. **Global rows are dialog-only** — a deliberate

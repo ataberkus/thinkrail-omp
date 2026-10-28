@@ -1,55 +1,66 @@
-// Must run under Node from inside the fixture: the bare import resolves pi from there, never from the repo.
 import { readFileSync, realpathSync } from "node:fs";
-import { dirname } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const [, , specPath] = process.argv;
 const spec = JSON.parse(readFileSync(specPath, "utf8"));
-const pi = await import("@earendil-works/pi-coding-agent");
+const within = (root, candidate) => candidate === root || candidate.startsWith(root + sep);
+
+const fixtureDir = realpathSync(spec.fixtureDir);
 const runnerDir = realpathSync(dirname(fileURLToPath(import.meta.url)));
-if (runnerDir !== realpathSync(spec.npmDir)) {
-	console.error(`parity runner must execute from the fixture ${spec.npmDir}, got ${runnerDir}`);
+const ompEntry = realpathSync(fileURLToPath(import.meta.resolve("@oh-my-pi/pi-coding-agent")));
+if (runnerDir !== fixtureDir || !within(join(fixtureDir, "node_modules"), ompEntry)) {
+	console.error(
+		`parity runner must execute from the fixture ${fixtureDir} and load its omp, got ${runnerDir} → ${ompEntry}`,
+	);
 	process.exit(1);
 }
+if (process.env.PI_CODING_AGENT_DIR !== spec.agentDir) {
+	console.error(`parity runner needs PI_CODING_AGENT_DIR=${spec.agentDir} at spawn`);
+	process.exit(1);
+}
+
+const omp = await import("@oh-my-pi/pi-coding-agent");
+const { stripTerminalSequences } = await import("@oh-my-pi/pi-tui");
 
 const failures = [];
 const fail = (message) => failures.push(message);
 
-const settingsManager = pi.SettingsManager.create(spec.cwd, spec.agentDir);
-const loader = new pi.DefaultResourceLoader({
-	cwd: spec.cwd,
-	agentDir: spec.agentDir,
-	settingsManager,
-});
-await loader.reload();
-
-const { extensions, errors } = loader.getExtensions();
+const settings = await omp.Settings.loadIsolated({ cwd: spec.cwd, agentDir: spec.agentDir });
+const paths = await omp.discoverSessionExtensionPaths({}, spec.cwd, settings);
+const { extensions, errors } = await omp.loadExtensions(paths, spec.cwd);
 for (const error of errors) fail(`extension error at ${error.path}: ${error.error}`);
-const extension = extensions.find((entry) => entry.path.includes(spec.packageDirName));
+
+const pluginDir = realpathSync(spec.pluginDir);
+const extension = extensions.find((entry) => within(pluginDir, realpathSync(entry.resolvedPath)));
 if (!extension) {
 	fail(
-		`package ${spec.name} did not load (loaded: ${extensions.map((e) => e.path).join(", ") || "none"})`,
+		`package ${spec.name} was not discovered from ${pluginDir} (discovered: ${paths.join(", ") || "none"})`,
 	);
 }
 
 const tools = new Map(extension ? [...extension.tools.entries()] : []);
 for (const name of spec.tools) {
-	if (!tools.has(name))
-		fail(`tool ${name} not registered (have: ${[...tools.keys()].join(", ") || "none"})`);
+	const tool = tools.get(name);
+	if (!tool) fail(`tool ${name} not registered (have: ${[...tools.keys()].join(", ") || "none"})`);
+	else if (tool.definition.loadMode !== "essential")
+		fail(`tool ${name} has loadMode ${tool.definition.loadMode}, expected "essential"`);
 }
 
-const skills = loader.getSkills().skills.map((skill) => skill.name);
+const { skills } = await omp.discoverSkills(spec.cwd);
+const skillNames = skills.map((skill) => skill.name);
 for (const name of spec.skills) {
-	if (!skills.includes(name))
-		fail(`skill ${name} not discovered (have: ${skills.join(", ") || "none"})`);
+	if (!skillNames.includes(name))
+		fail(`skill ${name} not discovered (have: ${skillNames.join(", ") || "none"})`);
 }
 
-pi.initTheme("dark", false);
-const plainTheme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text };
+await omp.initTheme(false);
 const fakeTui = { requestRender: () => {}, terminal: { rows: 40, columns: 100 } };
+const plain = (lines) => lines.map((line) => stripTerminalSequences(line).trimEnd()).join("\n");
 
 function scriptedContext(script) {
-	if (!script) return {};
+	if (!script) return { hasUI: false, cwd: spec.cwd };
 	const replies = [...(script.replies ?? [])];
 	const next = () => {
 		if (replies.length === 0) throw new Error("the scripted UI ran out of replies");
@@ -64,7 +75,7 @@ function scriptedContext(script) {
 		input: async () => next(),
 		custom: (factory) =>
 			new Promise((resolve, reject) => {
-				Promise.resolve(factory(fakeTui, plainTheme, {}, resolve))
+				Promise.resolve(factory(fakeTui, omp.theme, {}, resolve))
 					.then((component) => {
 						for (const key of script.keys ?? []) component.handleInput(key);
 					})
@@ -113,17 +124,28 @@ for (const testCase of spec.cases) {
 	if (testCase.expectTerminate !== undefined && result.terminate !== testCase.expectTerminate) {
 		fail(`${label}: terminate was ${result.terminate}, expected ${testCase.expectTerminate}`);
 	}
-	if (testCase.expectRender && tool.renderResult) {
-		const component = tool.renderResult(result, { expanded: false, isPartial: false }, plainTheme, {
-			isError: false,
-			args: testCase.args,
-		});
-		const lines = component.render(testCase.expectRender.width ?? 100);
-		const rendered = lines.join("\n");
+	if (testCase.expectRender) {
+		if (!tool.renderResult) {
+			fail(`${label}: expected a TUI render but the tool has no renderResult`);
+			continue;
+		}
+		const component = tool.renderResult(
+			result,
+			{ expanded: false, isPartial: false },
+			omp.theme,
+			testCase.args,
+		);
+		const rendered = plain(component.render(testCase.expectRender.width ?? 100));
 		for (const needle of testCase.expectRender.contains ?? []) {
 			if (!rendered.includes(needle)) fail(`${label}: TUI render lacks ${JSON.stringify(needle)}`);
 		}
 	}
+}
+
+const pluginEngineDir = join(realpathSync(dirname(dirname(pluginDir))), "@oh-my-pi");
+for (const loaded of Object.keys(createRequire(import.meta.url).cache)) {
+	if (within(pluginEngineDir, loaded.split("?")[0] ?? loaded))
+		fail(`${spec.name} bound to a plugin-local omp copy instead of the host: ${loaded}`);
 }
 
 if (failures.length > 0) {
@@ -131,5 +153,5 @@ if (failures.length > 0) {
 	process.exit(1);
 }
 console.log(
-	`  ✓ ${spec.name}: ${spec.tools.length} tool(s), ${spec.skills.length} skill(s), ${spec.cases.length} case(s) — loaded from ${extension.path}`,
+	`  ✓ ${spec.name}: ${spec.tools.length} tool(s), ${spec.skills.length} skill(s), ${spec.cases.length} case(s) — discovered by omp at ${extension.resolvedPath}`,
 );

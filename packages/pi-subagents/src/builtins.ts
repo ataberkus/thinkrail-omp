@@ -13,16 +13,7 @@ export const BUILTIN_AGENTS: readonly AgentDefinition[] = [
 		description:
 			"Fast, read-only codebase recon: finds where things live and returns compressed, actionable context (paths, symbols, call sites).",
 		source: "builtin",
-		tools: [
-			"read",
-			"grep",
-			"find",
-			"ls",
-			"bash",
-			...SPEC_READ_TOOLS,
-			"web_search",
-			"fetch_content",
-		],
+		tools: ["read", "grep", "find", "glob", "bash", ...SPEC_READ_TOOLS, "web_search"],
 		extensions: true,
 		systemPrompt: `You are a scout: a fast, read-only reconnaissance agent.
 
@@ -41,7 +32,7 @@ Keep the report under ~40 lines. You cannot modify anything.`,
 		description:
 			"Read-only implementation planning: turns a goal into a concrete, ordered change plan with file-level steps.",
 		source: "builtin",
-		tools: ["read", "grep", "find", "ls", ...SPEC_READ_TOOLS],
+		tools: ["read", "grep", "find", "glob", ...SPEC_READ_TOOLS],
 		extensions: true,
 		systemPrompt: `You are a planner: a read-only agent that turns a goal into an implementation plan.
 
@@ -77,7 +68,7 @@ Final report format: what changed (files + one line each), how it was verified, 
 		description:
 			"Read-only code review of an exact diff or area. The task should name the review target and intended behavior; returns material, deduplicated findings with a verdict.",
 		source: "builtin",
-		tools: ["read", "grep", "find", "ls", "bash", ...SPEC_READ_TOOLS],
+		tools: ["read", "grep", "find", "glob", "bash", ...SPEC_READ_TOOLS],
 		extensions: true,
 		inheritProjectContext: true,
 		systemPrompt: `You are a reviewer: a read-only code-review agent. You may use bash for

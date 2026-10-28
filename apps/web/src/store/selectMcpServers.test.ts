@@ -59,7 +59,6 @@ function projection(
 	return {
 		servers,
 		configErrors: [],
-		handledElsewhere: null,
 		sessions: Object.fromEntries(sessions.map((held) => [held.snapshot.sessionId, held])),
 		...extra,
 	};
@@ -336,12 +335,7 @@ test("a pending repository override flags its user row for attention without hid
 	expect(row).toMatchObject({ state: "connected", approvalPending: true, attention: true });
 });
 
-test("handled elsewhere makes every row read-only, and attention rows sort first with disabled rows last", () => {
-	const elsewhere = deriveMcpServerRows(
-		projection([summary("docs")], [], { handledElsewhere: { by: "my-mcp" } }),
-		NOW,
-	);
-	expect(elsewhere[0]).toMatchObject({ state: "handled-elsewhere", attention: false });
+test("attention rows sort first with disabled rows last", () => {
 	const ordered = deriveMcpServerRows(
 		projection(
 			[

@@ -2,14 +2,15 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import {
-	hasTrustRequiringProjectResources,
-	ModelRuntime,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import type { ProjectResourceKind } from "@thinkrail/contracts";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	applyPiResourceTrust,
 	createSession,
@@ -24,27 +25,20 @@ import {
 	settleSessionsForShutdown,
 } from "./agentSessionManager";
 import { delegationServiceFor } from "./delegation";
+import { ModelRuntime } from "./modelRuntime";
 import { configurePiRuntime } from "./piRuntime";
-import { piTrustsProjectPath, projectTrustSummary } from "./projectTrust";
+import { projectTrustSummary } from "./projectTrust";
 import { admissionContextFor } from "./skillAdmission";
 
-const model = {
-	id: "trust",
-	name: "trust",
-	reasoning: false,
-	input: ["text"] as ("text" | "image")[],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 100_000,
-	maxTokens: 4096,
-};
 const faux = createFauxCore({
 	provider: "trust",
 	api: "trust",
-	models: [model],
+	models: [
+		{ id: "trust", reasoning: false, input: ["text"], contextWindow: 100_000, maxTokens: 4096 },
+	],
 	tokensPerSecond: 40,
 });
 const saved = {
-	agent: process.env.PI_CODING_AGENT_DIR,
 	data: process.env.THINKRAIL_DATA_DIR,
 	offline: process.env.PI_OFFLINE,
 };
@@ -52,24 +46,15 @@ const root = mkdtempSync(join(tmpdir(), "project-trust-"));
 const agentDir = join(root, "agent");
 const trustedWorkspaces = new Set<string>();
 let sequence = 0;
+let isolatedAgentDir: IsolatedAgentDir | undefined;
 
 beforeAll(async () => {
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	isolatedAgentDir = isolateAgentDir(agentDir);
 	process.env.THINKRAIL_DATA_DIR = join(root, "data");
 	process.env.PI_OFFLINE = "1";
 	mkdirSync(agentDir, { recursive: true });
-	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	runtime.registerProvider("trust", {
-		api: faux.api,
-		apiKey: "test",
-		baseUrl: "http://faux.local",
-		streamSimple: faux.streamSimple,
-		models: [{ ...model, api: faux.api }],
-	});
+	const runtime = await ModelRuntime.create({ inMemoryCredentials: true, modelsPath: null });
+	runtime.registerProvider("trust", faux.providerConfig());
 	configurePiRuntime(runtime);
 	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd));
 	setSkillAdmissionResolver((workspaceId) =>
@@ -85,8 +70,7 @@ afterAll(async () => {
 	configurePiRuntime(null);
 	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
 	setSkillAdmissionResolver(() => admissionContextFor(undefined));
-	if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = saved.agent;
+	isolatedAgentDir?.restore();
 	if (saved.data === undefined) delete process.env.THINKRAIL_DATA_DIR;
 	else process.env.THINKRAIL_DATA_DIR = saved.data;
 	if (saved.offline === undefined) delete process.env.PI_OFFLINE;
@@ -104,8 +88,11 @@ async function waitFor(read: () => boolean, ms = 8000): Promise<void> {
 
 function projectCwd(): string {
 	const cwd = mkdtempSync(join(root, "cwd-"));
-	mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-	writeFileSync(join(cwd, ".pi", "prompts", "native-kickoff.md"), "---\ndescription: n\n---\nGo\n");
+	mkdirSync(join(cwd, ".omp", "prompts"), { recursive: true });
+	writeFileSync(
+		join(cwd, ".omp", "prompts", "native-kickoff.md"),
+		"---\ndescription: n\n---\nGo\n",
+	);
 	return cwd;
 }
 
@@ -118,37 +105,7 @@ async function projectSession(): Promise<{ workspaceId: string; sessionId: strin
 const hasNativeTemplate = (sessionId: string): boolean =>
 	getSessionCommands(sessionId).some((command) => command.name === "native-kickoff");
 
-test("pi trusts a path by its nearest saved decision, else by defaultProjectTrust, and never through an unreadable store", () => {
-	const project = mkdtempSync(join(root, "decided-"));
-	const nested = join(project, "packages", "app");
-	const undecided = mkdtempSync(join(tmpdir(), "undecided-"));
-	const trusted = mkdtempSync(join(tmpdir(), "pi-trusted-"));
-	mkdirSync(nested, { recursive: true });
-	const settings = join(agentDir, "settings.json");
-	try {
-		writeFileSync(
-			join(agentDir, "trust.json"),
-			JSON.stringify({ [realpathSync(project)]: false, [realpathSync(trusted)]: true }),
-		);
-		expect(piTrustsProjectPath(nested)).toBe(false);
-		expect(piTrustsProjectPath(trusted)).toBe(true);
-		expect(piTrustsProjectPath(undecided)).toBe(false);
-
-		writeFileSync(settings, JSON.stringify({ defaultProjectTrust: "always" }));
-		expect(piTrustsProjectPath(undecided)).toBe(true);
-		expect(piTrustsProjectPath(nested)).toBe(false);
-
-		writeFileSync(join(agentDir, "trust.json"), "{ not json");
-		expect(piTrustsProjectPath(trusted)).toBe(false);
-	} finally {
-		rmSync(join(agentDir, "trust.json"), { force: true });
-		rmSync(settings, { force: true });
-		rmSync(undecided, { recursive: true, force: true });
-		rmSync(trusted, { recursive: true, force: true });
-	}
-});
-
-test("the trust summary names each kind of the project's own pi resources that pi gates, and counts project MCP entries", async () => {
+test("the trust summary names each kind of the project's own resources omp loads from it, and counts project MCP entries", async () => {
 	const project = (files: Record<string, string>): string => {
 		const cwd = mkdtempSync(join(root, "summary-"));
 		for (const [path, content] of Object.entries(files)) {
@@ -162,25 +119,37 @@ test("the trust summary names each kind of the project's own pi resources that p
 		piResources: [],
 		mcpServers: 0,
 	});
-	const cases: Array<[ProjectResourceKind, Record<string, string>]> = [
-		["extensions", { ".pi/extensions/x.ts": "export default () => {};\n" }],
-		["settings", { ".pi/settings.json": "{}\n" }],
-		["skills", { ".pi/skills/s/SKILL.md": "---\nname: s\ndescription: d\n---\n" }],
-		["skills", { ".agents/skills/s/SKILL.md": "---\nname: s\ndescription: d\n---\n" }],
-		["prompts", { ".pi/prompts/kickoff.md": "Go\n" }],
-		["themes", { ".pi/themes/t.json": "{}\n" }],
-		["systemPrompt", { ".pi/SYSTEM.md": "You are.\n" }],
-		["systemPrompt", { ".pi/APPEND_SYSTEM.md": "Also.\n" }],
+	const cases: Array<[ProjectResourceKind, string, Record<string, string>]> = [
+		["extensions", "extension-modules", { ".omp/extensions/x.ts": "export default () => {};\n" }],
+		["extensions", "hooks", { ".omp/hooks/pre/guard.ts": "export default () => {};\n" }],
+		["extensions", "tools", { ".omp/tools/probe/index.ts": "export default () => [];\n" }],
+		["settings", "settings", { ".omp/settings.json": "{}\n" }],
+		["settings", "settings", { ".omp/config.yml": "theme: dark\n" }],
+		["skills", "skills", { ".omp/skills/s/SKILL.md": "---\nname: s\ndescription: d\n---\n" }],
+		["skills", "skills", { ".agents/skills/s/SKILL.md": "---\nname: s\ndescription: d\n---\n" }],
+		["prompts", "prompts", { ".omp/prompts/kickoff.md": "Go\n" }],
+		["systemPrompt", "system-prompt", { ".omp/SYSTEM.md": "You are.\n" }],
+		["systemPrompt", "system-prompt", { ".omp/SYSTEM_TEMPLATE.md": "You are {{cwd}}.\n" }],
+		["systemPrompt", "rules", { ".omp/RULES.md": "Be brief.\n" }],
+		[
+			"systemPrompt",
+			"rules",
+			{ ".omp/rules/style.md": "---\nalwaysApply: true\n---\nBe brief.\n" },
+		],
 	];
-	for (const [kind, files] of cases) {
+	for (const [kind, capability, files] of cases) {
 		const cwd = project(files);
-		expect(hasTrustRequiringProjectResources(cwd)).toBe(true);
+		const loaded = await loadCapability(capability, { cwd, agentDir });
+		const fromProject = loaded.all.filter(
+			(item) => item._source.level === "project" && item._source.path.startsWith(realpathSync(cwd)),
+		);
+		expect({ files, loaded: fromProject.length > 0 }).toEqual({ files, loaded: true });
 		expect((await projectTrustSummary(cwd)).piResources).toEqual([kind]);
 	}
 	const definitions = project({
 		".agents/agents/repo-reviewer.md":
 			"---\nname: repo-reviewer\ndescription: Reviews\n---\n\nReview.\n",
-		".pi/extensions/x.ts": "export default () => {};\n",
+		".omp/extensions/x.ts": "export default () => {};\n",
 	});
 	expect((await projectTrustSummary(definitions)).piResources.sort()).toEqual([
 		"extensions",
@@ -189,7 +158,7 @@ test("the trust summary names each kind of the project's own pi resources that p
 	expect(
 		await projectTrustSummary(
 			project({
-				".pi/mcp.json": JSON.stringify({
+				".omp/mcp.json": JSON.stringify({
 					mcpServers: { docs: { url: "https://docs.example/mcp" }, linear: { enabled: false } },
 				}),
 			}),

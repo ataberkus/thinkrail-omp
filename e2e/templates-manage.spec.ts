@@ -221,7 +221,7 @@ test.describe("templates management", () => {
 		await revealWorkbenchTool(page, "files");
 		const promptsDir = page
 			.locator('[data-testid="file-node"][data-kind="dir"]')
-			.filter({ hasText: /^\.pi\/prompts$/ });
+			.filter({ hasText: /^\.omp\/prompts$/ });
 		await expect(promptsDir).toBeVisible();
 		const scopedNote = page
 			.locator('[data-testid="file-node"][data-kind="file"]')

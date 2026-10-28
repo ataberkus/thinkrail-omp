@@ -1,15 +1,15 @@
-import type {
-	ExtensionFactory,
-	InlineExtension,
-	LoadExtensionsResult,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import type { ExtensionSessionServices } from "@thinkrail/extension-api/server";
 import { type ServerExtensionEntry, serverExtensions } from "./registry";
 
 export type RegistryExtensionKind = "extensions" | "childExtensions";
 export type ExtensionDisabled = (name: string) => boolean;
 
+export type RegistryExtensionFactory = ExtensionFactory & { readonly registryName: string };
+
 const never: ExtensionDisabled = () => false;
+
+const toolOwners = new Map<string, string>();
 
 function factoriesOf(
 	entry: ServerExtensionEntry,
@@ -23,66 +23,42 @@ function factoriesOf(
 	return [...extension.extensions, ...perSession];
 }
 
+function recordingOwnership(pi: ExtensionAPI, owner: string): ExtensionAPI {
+	return new Proxy(pi, {
+		get(target, key) {
+			if (key === "registerTool") {
+				const register: ExtensionAPI["registerTool"] = (tool) => {
+					toolOwners.set(tool.name, owner);
+					target.registerTool(tool);
+				};
+				return register;
+			}
+			const value: unknown = Reflect.get(target, key, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
 export function registryInlineExtensions(
 	kind: RegistryExtensionKind,
 	isDisabled: ExtensionDisabled = never,
 	entries: readonly ServerExtensionEntry[] = serverExtensions,
 	session?: ExtensionSessionServices,
-): InlineExtension[] {
+	onLoaded?: (name: string) => void,
+): RegistryExtensionFactory[] {
 	return entries.flatMap((entry) => {
 		const { name } = entry.extension;
-		const factories = factoriesOf(entry, kind, session);
-		return factories.map((factory, index) => ({
-			name: factories.length === 1 ? name : `${name}#${index + 1}`,
-			factory: async (pi) => {
+		return factoriesOf(entry, kind, session).map((factory) => {
+			const wrapped: ExtensionFactory = async (pi) => {
 				if (isDisabled(name)) return;
-				await factory(pi);
-			},
-		}));
+				onLoaded?.(name);
+				await factory(recordingOwnership(pi, name));
+			};
+			return Object.assign(wrapped, { registryName: name });
+		});
 	});
 }
 
-export function registryExtensionName(
-	path: string,
-	entries: readonly ServerExtensionEntry[] = serverExtensions,
-): string | undefined {
-	const match = /^<inline:([^#>]+)(?:#\d+)?>$/.exec(path);
-	if (!match) return undefined;
-	return entries.find((entry) => entry.extension.name === match[1])?.extension.name;
-}
-
-export function omitDisabledRegistryExtensions(
-	result: LoadExtensionsResult,
-	isDisabled: ExtensionDisabled,
-	entries: readonly ServerExtensionEntry[] = serverExtensions,
-): LoadExtensionsResult {
-	const kept = result.extensions.filter((extension) => {
-		const name = registryExtensionName(extension.path, entries);
-		return name === undefined || !isDisabled(name);
-	});
-	return kept.length === result.extensions.length ? result : { ...result, extensions: kept };
-}
-
-export function preferRegistryTools(
-	result: LoadExtensionsResult,
-	entries: readonly ServerExtensionEntry[] = serverExtensions,
-): LoadExtensionsResult {
-	const isRegistry = (path: string) => registryExtensionName(path, entries) !== undefined;
-	const ordered = [...result.extensions];
-	for (const ours of result.extensions) {
-		if (!isRegistry(ours.path)) continue;
-		const at = ordered.indexOf(ours);
-		const rival = ordered.findIndex(
-			(other, index) =>
-				index < at &&
-				!isRegistry(other.path) &&
-				[...other.tools.keys()].some((name) => ours.tools.has(name)),
-		);
-		if (rival < 0) continue;
-		ordered.splice(at, 1);
-		ordered.splice(rival, 0, ours);
-	}
-	return ordered.every((extension, index) => extension === result.extensions[index])
-		? result
-		: { ...result, extensions: ordered };
+export function registryToolOwner(toolName: string): string | undefined {
+	return toolOwners.get(toolName);
 }

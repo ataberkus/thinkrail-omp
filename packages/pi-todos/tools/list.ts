@@ -1,38 +1,34 @@
-import { StringEnum } from "@earendil-works/pi-ai/compat";
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	type ExtensionAPI,
-	truncateHead,
-} from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, truncateHead, z } from "@oh-my-pi/pi-coding-agent";
 import { countItems, flatItems, TODO_STATUSES, type TodoPlan } from "../core/index.ts";
 import {
 	consistencyNudge,
 	errorResult,
 	formatPlan,
 	formatTodo,
+	MAX_OUTPUT_BYTES,
+	MAX_OUTPUT_LINES,
 	storeFor,
 	textResult,
 	withNudges,
 } from "./shared.ts";
 
-const MAX_PAGE_LINES = DEFAULT_MAX_LINES - 10;
+const MAX_PAGE_LINES = MAX_OUTPUT_LINES - 10;
 
-const parameters = Type.Object({
-	status: Type.Optional(
-		StringEnum(TODO_STATUSES, {
-			description:
-				"Filter to one status: pending | in_progress | done (flat across groups). Omit for the whole plan.",
-		}),
-	),
-	offset: Type.Optional(
-		Type.Integer({
-			minimum: 0,
-			description:
-				"Zero-based rendered-line offset (default: 0). Continue with the offset given in the result and the same status filter; restart after plan edits.",
-		}),
-	),
+const parameters = z.object({
+	status: z
+		.enum(TODO_STATUSES)
+		.optional()
+		.describe(
+			"Filter to one status: pending | in_progress | done (flat across groups). Omit for the whole plan.",
+		),
+	offset: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe(
+			"Zero-based rendered-line offset (default: 0). Continue with the offset given in the result and the same status filter; restart after plan edits.",
+		),
 });
 
 export function registerTodoList(pi: ExtensionAPI): void {
@@ -40,9 +36,8 @@ export function registerTodoList(pi: ExtensionAPI): void {
 		name: "todo_list",
 		label: "Todo List",
 		description:
-			"Read this chat's TODO plan — loose items plus named groups (optionally filtered by status). The plan is the source of truth and the user may edit it at any time, so re-read before choosing each next item, after user input, and before completion. A plan beyond Pi's 2,000-line / 50 KiB output limit continues at the offset given in the result; oversized text is saved to a temporary file.",
-		promptSnippet:
-			"todo_list — read this chat's TODO plan (source of truth; re-read to catch the user's edits).",
+			"Read this chat's TODO plan — loose items plus named groups (optionally filtered by status). The plan is the source of truth and the user may edit it at any time, so re-read before choosing each next item, after user input, and before completion. A plan beyond the 2,000-line / 50 KiB output limit continues at the offset given in the result; oversized text is saved to a temporary file.",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const offset = params.offset ?? 0;
@@ -75,10 +70,10 @@ export function registerTodoList(pi: ExtensionAPI): void {
 				});
 			const candidate = lines.slice(offset, offset + MAX_PAGE_LINES).join("\n");
 			const page = truncateHead(candidate, {
-				maxBytes: DEFAULT_MAX_BYTES - 2048,
+				maxBytes: MAX_OUTPUT_BYTES - 2048,
 				maxLines: MAX_PAGE_LINES,
 			});
-			const count = page.firstLineExceedsLimit ? 1 : page.outputLines;
+			const count = page.firstLineExceedsLimit ? 1 : (page.outputLines ?? page.totalLines);
 			const body = page.firstLineExceedsLimit ? (lines[offset] ?? "") : page.content;
 			const nextOffset = offset + count < lines.length ? offset + count : undefined;
 			const continuation =

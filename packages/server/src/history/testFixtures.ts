@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import type { AssistantMessage, StopReason, ToolResultMessage } from "@thinkrail/contracts";
 
 type FixtureAssistantMessage = {
@@ -42,24 +43,11 @@ export function writeFixtureSession(
 			type: "session",
 			version: 3,
 			id: sessionId,
+			...(opts.name !== undefined ? { title: opts.name, titleSource: "user" } : {}),
 			timestamp: new Date(opts.messages[0]?.timestamp ?? Date.now()).toISOString(),
 			cwd: opts.cwd,
 		}),
 	];
-
-	if (opts.name !== undefined) {
-		const id = entryId("info");
-		lines.push(
-			JSON.stringify({
-				type: "session_info",
-				id,
-				parentId,
-				timestamp: new Date().toISOString(),
-				name: opts.name,
-			}),
-		);
-		parentId = id;
-	}
 
 	opts.messages.forEach((m, i) => {
 		const id = entryId(`m${i}`);
@@ -103,8 +91,5 @@ export function writeFixtureSession(
 }
 
 export function defaultSessionDirFor(agentDir: string, cwd: string): string {
-	const resolvedCwd = resolve(cwd);
-	const resolvedAgentDir = resolve(agentDir);
-	const safePath = `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-	return join(resolvedAgentDir, "sessions", safePath);
+	return SessionManager.getDefaultSessionDir(cwd, agentDir);
 }

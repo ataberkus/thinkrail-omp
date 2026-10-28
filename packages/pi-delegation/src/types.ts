@@ -1,12 +1,20 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type {
 	ExtensionContext,
-	InlineExtension,
+	ExtensionFactory,
 	ModelRegistry,
-	ModelRuntime,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+
+export type DelegationThinkingLevel =
+	| "off"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max";
 
 export type RunStatus = "completed" | "error" | "aborted";
 
@@ -21,7 +29,7 @@ export interface ChildInfo {
 
 export interface SessionOptions {
 	model?: { provider: string; id: string };
-	thinkingLevel?: ThinkingLevel;
+	thinkingLevel?: DelegationThinkingLevel;
 	tools?: string[];
 	excludeTools?: string[];
 	systemPrompt?: string;
@@ -100,7 +108,7 @@ export interface DelegationRunDetails {
 	task: string;
 	status: RunLifecycleStatus;
 	model?: string;
-	thinkingLevel?: ThinkingLevel;
+	thinkingLevel?: DelegationThinkingLevel;
 	usage: {
 		input: number;
 		output: number;
@@ -185,21 +193,27 @@ export interface DelegationService {
 	disposeChildrenOf(parentSessionId: string): Promise<void>;
 }
 
-export type ParentContext = Pick<ExtensionContext, "cwd" | "model" | "thinkingLevel"> &
-	Partial<Pick<ExtensionContext, "isProjectTrusted">> & {
-		modelRuntime?: ModelRuntime;
-		modelRegistry?: ExtensionContext["modelRegistry"];
-	};
+export type ParentContext = Pick<ExtensionContext, "cwd" | "model"> & {
+	thinkingLevel: ThinkingLevel | undefined;
+	isProjectTrusted?: () => boolean;
+	modelRegistry?: ModelRegistry;
+};
 
 export interface DelegationBindings {
 	resolveParent?: (sessionId: string) => ParentContext | undefined;
 	delegationRoot?: string;
 	scope?: string;
-	modelRuntime?: ModelRuntime | (() => ModelRuntime | Promise<ModelRuntime>);
+	modelRegistry?: ModelRegistry | (() => ModelRegistry | Promise<ModelRegistry>);
 	maxConcurrentPerParent?: number;
-	childBaseExtensionFactories?: InlineExtension[];
-	childExtensionFactories?: InlineExtension[];
-	buildChildSettings?: (cwd: string, projectTrusted: boolean) => SettingsManager;
+	childBaseExtensionFactories?: ExtensionFactory[];
+	childExtensionFactories?: ExtensionFactory[];
+	buildChildSettings?: (cwd: string, projectTrusted: boolean) => Settings | Promise<Settings>;
+	childSystemPrompt?: (cwd: string) => ChildSystemPrompt | Promise<ChildSystemPrompt>;
+}
+
+export interface ChildSystemPrompt {
+	customSystemPrompt?: string;
+	systemPromptTemplate?: string;
 }
 
 export type HistoryCaptureSource =
@@ -222,19 +236,18 @@ export interface CapturedHistory {
 	readonly jsonl: string;
 }
 
-export type ResourceContextInput = {
+export interface ResourceContextInput {
 	cwd: string;
+	modelRegistry: ModelRegistry;
 	model?: SessionOptions["model"];
 	thinkingLevel?: SessionOptions["thinkingLevel"];
 	isProjectTrusted?: () => boolean;
-} & (
-	| { kind: "runtime"; modelRuntime: ModelRuntime }
-	| { kind: "registry"; modelRegistry: ModelRegistry }
-);
+}
 
 export interface ResourceDelegationOptions {
 	maxConcurrent?: number;
-	childExtensionFactories?: InlineExtension[];
+	childExtensionFactories?: ExtensionFactory[];
+	terminalTools?: string[];
 }
 
 export type ResourceSpawnRecord = Omit<SpawnRecord, "parentSessionId"> & {

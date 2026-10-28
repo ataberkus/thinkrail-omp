@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { Value } from "typebox/value";
 import {
 	ASK_ACK_TEXT,
 	ASK_CHAT_TEXT,
@@ -71,7 +70,7 @@ describe("validateQuestionnaire", () => {
 				},
 			],
 		};
-		expect(Value.Check(AskUserQuestionSchema, long)).toBe(true);
+		expect(AskUserQuestionSchema.safeParse(long).success).toBe(true);
 		expect(validateQuestionnaire(long).ok).toBe(true);
 	});
 
@@ -86,7 +85,7 @@ describe("validateQuestionnaire", () => {
 				],
 			})),
 		};
-		expect(Value.Check(AskUserQuestionSchema, many)).toBe(true);
+		expect(AskUserQuestionSchema.safeParse(many).success).toBe(true);
 		expect(validateQuestionnaire(many).ok).toBe(true);
 	});
 

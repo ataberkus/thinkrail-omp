@@ -42,6 +42,7 @@ export default defineServerExtension({
 			ask: askThroughHost(session),
 			announce: (toolCallId) => session.expectToolResponse(toolCallId),
 			guidance: THINKRAIL_GUIDANCE,
+			endRun: (toolCallId) => session.endRun(toolCallId),
 		}),
 	],
 	interactiveTools: { [ASK_USER_QUESTION_TOOL_NAME]: { describeResponse } },

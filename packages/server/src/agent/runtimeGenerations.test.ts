@@ -2,9 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import { defaultSessionDirFor, writeFixtureSession } from "../history/testFixtures";
 import {
 	createSession,
@@ -18,6 +22,7 @@ import {
 	usePiRuntime,
 } from "./agentSessionManager";
 import { refreshModelListings } from "./modelAvailability";
+import { ModelRuntime } from "./modelRuntime";
 import {
 	activatePiRuntimeGeneration,
 	configurePiRuntime,
@@ -53,7 +58,7 @@ const replacementFaux = createFauxCore({
 
 async function runtimeWithFaux(includeModel = true): Promise<ModelRuntime> {
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -86,16 +91,21 @@ async function runtimeWithReplacement(includeOriginal = false): Promise<ModelRun
 
 let agentDir: string;
 let cwd: string;
-let priorAgentDir: string | undefined;
+let isolatedAgentDir: IsolatedAgentDir;
 let priorOffline: string | undefined;
+const ambientAws = Object.fromEntries(
+	Object.keys(process.env)
+		.filter((key) => key.startsWith("AWS_"))
+		.map((key) => [key, process.env[key]]),
+);
 
 beforeEach(async () => {
-	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
 	priorOffline = process.env.PI_OFFLINE;
 	agentDir = mkdtempSync(join(tmpdir(), "thinkrail-generation-agent-"));
 	cwd = mkdtempSync(join(tmpdir(), "thinkrail-generation-cwd-"));
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	isolatedAgentDir = isolateAgentDir(agentDir);
 	process.env.PI_OFFLINE = "1";
+	for (const key of Object.keys(ambientAws)) delete process.env[key];
 	configurePiRuntime(await runtimeWithFaux());
 	setSessionManagerFactory(() => SessionManager.inMemory(cwd));
 });
@@ -105,10 +115,10 @@ afterEach(() => {
 	configurePiRuntimeFactory();
 	configurePiRuntime(null);
 	setSessionManagerFactory((sessionCwd) => SessionManager.create(sessionCwd));
-	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+	isolatedAgentDir.restore();
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
+	Object.assign(process.env, ambientAws);
 	rmSync(agentDir, { recursive: true, force: true });
 	rmSync(cwd, { recursive: true, force: true });
 });
@@ -200,11 +210,11 @@ describe("PI runtime generations", () => {
 		disposeAllSessions();
 		configurePiRuntime(await runtimeWithReplacement());
 		writeFileSync(
-			join(agentDir, "settings.json"),
-			JSON.stringify({ defaultProvider: "replacement-faux", defaultModel: "replacement-model" }),
+			join(agentDir, "config.yml"),
+			"modelRoles:\n  default: replacement-faux/replacement-model\n",
 		);
 
-		const reopened = await getSessionMessages(session.sessionId, "workspace-generation", cwd);
+		const reopened = await reopenAfterTeardown(session.sessionId, "workspace-generation", cwd);
 		expect(JSON.stringify(reopened.messages)).toContain("BEFORE_GENERATION_SWAP");
 		expect(reopened.summary.model).toMatchObject({
 			provider: "replacement-faux",
@@ -231,7 +241,7 @@ describe("PI runtime generations", () => {
 		const session = await liveSession();
 		disposeAllSessions();
 		configurePiRuntime(await runtimeWithReplacement());
-		const reopened = await getSessionMessages(session.sessionId, "workspace-generation", cwd);
+		const reopened = await reopenAfterTeardown(session.sessionId, "workspace-generation", cwd);
 		expect(reopened.summary.model?.provider).toBe("replacement-faux");
 		disposeAllSessions();
 		configurePiRuntime(await runtimeWithReplacement(true));
@@ -244,12 +254,6 @@ describe("PI runtime generations", () => {
 	});
 
 	test("a disk reattach replaces a persisted model the account no longer serves", async () => {
-		const listed = createFauxCore({
-			provider: "listed-faux",
-			api: "openai-responses",
-			models: [modelDef("dropped-model"), modelDef("kept-model")],
-			tokensPerSecond: 2_000,
-		});
 		const proxy = Bun.serve({
 			port: 0,
 			fetch: () => Response.json({ data: [{ id: "kept-model" }] }),
@@ -260,26 +264,42 @@ describe("PI runtime generations", () => {
 				api: "openai-responses",
 				baseUrl: `http://127.0.0.1:${proxy.port}/v1`,
 				apiKey: "faux",
-				streamSimple: listed.streamSimple,
 				models: ["dropped-model", "kept-model"].map((id) => ({
 					...modelDef(id),
 					api: "openai-responses",
 				})),
 			});
 			configurePiRuntime(runtime);
-			setSessionManagerFactory((sessionCwd) => SessionManager.create(sessionCwd));
-			listed.setResponses([fauxAssistantMessage("BEFORE_LISTING")]);
-			const session = await createSession({
-				cwd,
-				workspaceId: "workspace-generation",
-				model: toWireModel(listed.getModel()),
-			});
-			await promptSession(session.sessionId, "persist this turn");
-			disposeAllSessions();
+			const sessionId = `sess-${crypto.randomUUID()}`;
+			const dir = defaultSessionDirFor(agentDir, cwd);
+			mkdirSync(dir, { recursive: true });
+			const at = new Date(1_700_000_000_000).toISOString();
+			writeFileSync(
+				join(dir, `1700000000000_${sessionId}.jsonl`),
+				`${[
+					{ type: "session", version: 3, id: sessionId, timestamp: at, cwd },
+					{
+						type: "model_change",
+						id: "model",
+						parentId: null,
+						timestamp: at,
+						model: "listed-faux/dropped-model",
+					},
+					{
+						type: "message",
+						id: "user",
+						parentId: "model",
+						timestamp: at,
+						message: { role: "user", content: "persist this turn", timestamp: 1_700_000_000_000 },
+					},
+				]
+					.map((line) => JSON.stringify(line))
+					.join("\n")}\n`,
+			);
 
 			expect(await refreshModelListings(runtime, new Set(["listed-faux"]))).toBe(true);
 
-			const reopened = await reopenAfterTeardown(session.sessionId, "workspace-generation", cwd);
+			const reopened = await reopenAfterTeardown(sessionId, "workspace-generation", cwd);
 			expect(reopened.summary.model).toMatchObject({ provider: "listed-faux", id: "kept-model" });
 		} finally {
 			proxy.stop(true);
@@ -292,19 +312,18 @@ describe("PI runtime generations", () => {
 		disposeAllSessions();
 		configurePiRuntime(await runtimeWithFaux(false));
 
-		const reopened = await getSessionMessages(session.sessionId, "workspace-generation", cwd);
+		const reopened = await reopenAfterTeardown(session.sessionId, "workspace-generation", cwd);
 		expect(JSON.stringify(reopened.messages)).toContain("BEFORE_GENERATION_SWAP");
 		const info = (await SessionManager.list(cwd)).find((item) => item.id === session.sessionId);
 		if (!info) throw new Error("session was not persisted");
-		expect(SessionManager.open(info.path).buildSessionContext().model).toEqual({
-			provider: "generation-faux",
-			modelId: "generation-model",
+		expect((await SessionManager.open(info.path)).buildSessionContext().models).toEqual({
+			default: "generation-faux/generation-model",
 		});
 	});
 
 	test("a transcript saved under a provider pi renamed reattaches to the renamed provider", async () => {
 		const runtime = await ModelRuntime.create({
-			credentials: new InMemoryCredentialStore(),
+			inMemoryCredentials: true,
 			modelsPath: null,
 			allowModelNetwork: false,
 		});

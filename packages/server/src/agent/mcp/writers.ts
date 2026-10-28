@@ -11,8 +11,8 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import type { McpExposure } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
+import type { McpExposure } from "@thinkrail/contracts";
 import { isOverrideEntry, isRecord } from "./config";
 
 export class McpConfigPathUnsafeError extends Error {
@@ -119,7 +119,7 @@ export function updateMcpServerConfig(
 			else server.enabled = patch.enabled;
 		}
 		if (patch.exposure !== undefined) {
-			if (patch.exposure === "codemode" && !keepDefaults) delete server.exposure;
+			if (patch.exposure === "deferred" && !keepDefaults) delete server.exposure;
 			else server.exposure = patch.exposure;
 		}
 		return true;

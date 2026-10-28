@@ -1,6 +1,5 @@
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { type ModelRegistry, Settings } from "@oh-my-pi/pi-coding-agent";
+import { createFauxCore, createFauxModelRegistry } from "pi-faux";
 
 export const model = { provider: "dag-faux", id: "worker" };
 export const faux = createFauxCore({
@@ -9,13 +8,9 @@ export const faux = createFauxCore({
 	tokensPerSecond: 100_000,
 });
 
-export async function createTestRuntime(prompts?: string[]): Promise<ModelRuntime> {
-	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	runtime.registerProvider(model.provider, {
+export async function createTestRuntime(prompts?: string[]): Promise<ModelRegistry> {
+	const { modelRegistry } = await createFauxModelRegistry(Settings.isolated({}));
+	modelRegistry.registerProvider(model.provider, {
 		api: faux.api,
 		baseUrl: "http://faux.local",
 		apiKey: "synthetic",
@@ -35,5 +30,5 @@ export async function createTestRuntime(prompts?: string[]): Promise<ModelRuntim
 			},
 		],
 	});
-	return runtime;
+	return modelRegistry;
 }

@@ -1,10 +1,9 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { type Frontmatter, LINK_KINDS, type LinkKind, linkTargets } from "../core/index.ts";
 import { errorResult, getIndex, textResult } from "./shared.ts";
 
-const parameters = Type.Object({
-	id: Type.String({ description: "The spec id to look up." }),
+const parameters = z.object({
+	id: z.string().describe("The spec id to look up."),
 });
 
 interface ResolvedLink {
@@ -29,8 +28,7 @@ export function registerSpecGet(pi: ExtensionAPI): void {
 		label: "Spec Get",
 		description:
 			"Get one spec node by id: its frontmatter, path, and resolved links (forward + reverse edges across parent/depends-on/references/implements). Returns no prose body — read the file at the returned path with the read tool.",
-		promptSnippet:
-			"spec_get — look up one spec by id: its frontmatter, resolved links, and path (read the body with `read`).",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const graph = getIndex(ctx.cwd).graph();

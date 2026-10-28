@@ -1,78 +1,71 @@
 import { RiLinksLine as LinkIcon } from "@remixicon/react";
 import { resultText, strArg, type ToolRenderProps } from "@thinkrail/extension-api/web";
 import { useT } from "@thinkrail/locales/react";
-import { ToolFileLink } from "../ToolFileLink";
+import { Collapsible, countLines } from "../Collapsible";
+import { readRangeLabel, splitReadTarget } from "../readTarget";
+import { detailsOf, recordField, stringField } from "../toolDetails";
+import { httpUrl } from "./httpUrl";
 import { WebResultBody } from "./WebResultBody";
 
-function httpUrl(value: string): URL | null {
-	try {
-		const url = new URL(value);
-		return url.protocol === "http:" || url.protocol === "https:" ? url : null;
-	} catch {
-		return null;
-	}
-}
+const URL_READ_HEADER_END = "\n---\n\n";
 
-function firstUrl(args: Record<string, unknown>): string {
-	const single = strArg(args, "url");
-	if (single) return single;
-	const many = args.urls;
-	return Array.isArray(many) && typeof many[0] === "string" ? many[0] : "";
-}
-
-export function webFetchSummary({ args }: ToolRenderProps): string {
-	return firstUrl(args);
-}
-
-export function WebFetchCard({
-	toolCallId,
-	args,
-	result,
-	status,
-	workspaceRoot,
-	onOpenFile,
-}: ToolRenderProps) {
-	const t = useT();
-	const url = firstUrl(args);
-	const external = httpUrl(url);
-	const label = external
-		? external.hostname.replace(/^www\./, "")
-		: t("tools.webFetch.fallbackLabel");
+export function webReadContent(result: unknown): string {
+	const details = detailsOf(result);
+	const display = stringField(recordField(details, "displayContent"), "text");
+	if (display) return display;
 	const output = resultText(result);
+	if (details?.kind !== "url" || details.raw === true || !output.startsWith("URL: ")) return output;
+	const end = output.indexOf(URL_READ_HEADER_END);
+	return end < 0 ? output : output.slice(end + URL_READ_HEADER_END.length);
+}
+
+export function WebFetchCard({ toolCallId, args, result, status }: ToolRenderProps) {
+	const t = useT();
+	const target = splitReadTarget(strArg(args, "path"));
+	const details = detailsOf(result);
+	const href = httpUrl(stringField(details, "finalUrl") || target.path);
+	const label = href ? href.hostname.replace(/^www\./, "") : target.path;
+	const output = webReadContent(result);
+	const markdown = !target.selector && details?.raw !== true;
 
 	return (
-		<div data-testid="tool-fetch_content" className="flex flex-col gap-4">
+		<div data-testid="tool-read-url" className="flex flex-col gap-4">
 			<div className="flex items-center gap-4 tr-text-metadata">
 				<LinkIcon className="size-12 shrink-0 text-text-muted" />
-				{external ? (
+				{href ? (
 					<a
-						href={external.href}
+						href={href.href}
 						target="_blank"
 						rel="noreferrer"
-						className="truncate text-primary hover:underline"
-						title={url}
+						className="min-w-0 truncate text-primary hover:underline"
+						title={href.href}
 					>
 						{label}
 					</a>
-				) : url ? (
-					<ToolFileLink
-						path={url}
-						workspaceRoot={workspaceRoot}
-						onOpenFile={onOpenFile}
-						disabled={status === "running"}
-						className="text-primary"
-					/>
 				) : (
-					<span className="text-primary">{label}</span>
+					<span className="min-w-0 truncate text-primary" title={target.path}>
+						{label}
+					</span>
 				)}
+				{target.selector ? (
+					<span className="shrink-0 text-text-muted">{readRangeLabel(t, target.selector)}</span>
+				) : null}
 			</div>
-			<WebResultBody
-				id={`${toolCallId}:content`}
-				output={output}
-				status={status}
-				runningLabel={t("tools.webFetch.running")}
-				emptyLabel={t("tools.webFetch.empty")}
-			/>
+			{markdown || status !== "done" || !output ? (
+				<WebResultBody
+					id={`${toolCallId}:content`}
+					output={output}
+					status={status}
+					runningLabel={t("tools.webFetch.running")}
+					emptyLabel={t("tools.webFetch.empty")}
+				/>
+			) : (
+				<Collapsible id={`${toolCallId}:content`} lines={countLines(output)}>
+					<pre className="overflow-auto rounded-sm bg-container-header-bg p-8 tr-code-text text-text-default">
+						{output}
+					</pre>
+				</Collapsible>
+			)}
 		</div>
 	);
 }

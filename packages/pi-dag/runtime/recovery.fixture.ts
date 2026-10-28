@@ -1,12 +1,12 @@
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createDelegationService, type DelegationService } from "pi-delegation";
+import { fauxAssistantMessage, fauxToolCall, isolateAgentDir } from "pi-faux";
 import { createDagService } from "../index";
 import { createTestRuntime, faux, model } from "./provider.fixture";
 
 const [root, scope, mode] = process.argv.slice(2);
 if (!root || !scope || !mode) throw new Error("Missing recovery fixture arguments");
-process.env.PI_CODING_AGENT_DIR = join(root, "recovery-agent");
+isolateAgentDir(join(root, "recovery-agent"));
 process.env.PI_OFFLINE = "1";
 faux.setResponses([
 	fauxAssistantMessage(
@@ -48,7 +48,7 @@ const service = createDagService({ storageRoot: join(root, "dags"), scope, deleg
 const owner = service.bind({
 	caller: { kind: "owner", ownerId: "host" },
 	signal: new AbortController().signal,
-	execution: { kind: "runtime", modelRuntime: runtime, cwd: root, model },
+	execution: { modelRegistry: runtime, cwd: root, model },
 });
 const created = await owner.execute({
 	commandId: "create",

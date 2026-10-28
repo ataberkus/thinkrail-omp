@@ -43,6 +43,102 @@ const ASK_ANSWER = {
 	cancelled: false,
 	answers: [{ questionIndex: 0, question: "Which runtime?", kind: "option", answer: "Bun" }],
 };
+const AGENT_EXECUTABLES = ["pi", "omp"];
+const VISUALIZE_PROMPT = "Draw the broken flowchart.";
+const TOOL_PROMPT = "Call the extension tool.";
+const TOOL_NAME = "artifact_echo";
+const TOOL_TEXT = "from the artifact";
+const IMAGE_PROMPT = "Read the probe image.";
+const IMAGE_FILE = "probe.png";
+const IMAGE_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+const EXTERNAL_PROVIDER_FIXTURE = `import { AssistantMessageEventStream, createAssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+import { createAssistantMessageEventStream as createSubpathStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { CONFIG_DIR_NAME } from "@oh-my-pi/pi-coding-agent";
+if (!(createSubpathStream() instanceof AssistantMessageEventStream))
+  throw new Error("the pi-ai subpath import resolved to a second module instance");
+const api = "compiled-external-faux";
+const provider = "compiled-external";
+const model = {
+  id: "compiled-external-model",
+  name: \`Compiled external extension model (\${CONFIG_DIR_NAME})\`,
+  reasoning: false,
+  input: ["text", "image"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 100000,
+  maxTokens: 4096,
+  api,
+};
+const usage = () => ({
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+});
+let calls = 0;
+const toolCall = (name, args, id) => ({ type: "toolCall", id: id ?? \`\${name}-\${++calls}\`, name, arguments: args });
+const reply = (content, stopReason) => ({
+  role: "assistant", content, api, provider, model: model.id, usage: usage(), stopReason, timestamp: Date.now(),
+});
+const respond = (context) => {
+  const last = context.messages[context.messages.length - 1];
+  if (last && last.role === "toolResult") return reply([{ type: "text", text: "Tool call attempted." }], "stop");
+  const user = [...context.messages].reverse().find((message) => message.role === "user");
+  const prompt = user ? JSON.stringify(user.content) : "";
+  if (prompt.includes(${JSON.stringify(ASK_PROMPT)}))
+    return reply([toolCall("ask_user_question", ${JSON.stringify(ASK_QUESTION)}, ${JSON.stringify(ASK_TOOL_CALL_ID)})], "toolUse");
+  if (prompt.includes(${JSON.stringify(TOOL_PROMPT)}))
+    return reply([toolCall(${JSON.stringify(TOOL_NAME)}, { text: ${JSON.stringify(TOOL_TEXT)} })], "toolUse");
+  if (prompt.includes(${JSON.stringify(IMAGE_PROMPT)}))
+    return reply([toolCall("read", { path: ${JSON.stringify(IMAGE_FILE)} })], "toolUse");
+  return reply([toolCall("visualize", { type: "diagram", mermaid: ${JSON.stringify(MALFORMED_MERMAID)} })], "toolUse");
+};
+const streamSimple = (_model, context) => {
+  const stream = createAssistantMessageEventStream();
+  const message = respond(context);
+  queueMicrotask(() => {
+    stream.push({ type: "start", partial: { ...message, content: [] } });
+    message.content.forEach((block, contentIndex) => {
+      const partial = { ...message, content: message.content.slice(0, contentIndex + 1) };
+      if (block.type === "text") {
+        stream.push({ type: "text_start", contentIndex, partial });
+        stream.push({ type: "text_delta", contentIndex, delta: block.text, partial });
+        stream.push({ type: "text_end", contentIndex, content: block.text, partial });
+      } else {
+        stream.push({ type: "toolcall_start", contentIndex, partial });
+        stream.push({ type: "toolcall_delta", contentIndex, delta: JSON.stringify(block.arguments), partial });
+        stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial });
+      }
+    });
+    stream.push({ type: "done", reason: message.stopReason, message });
+  });
+  return stream;
+};
+export default function syntheticExternalExtension(pi) {
+  pi.registerProvider(provider, {
+    api,
+    baseUrl: "https://compiled-extension.invalid",
+    apiKey: "synthetic-smoke-key",
+    models: [model],
+    streamSimple,
+  });
+}
+`;
+
+const EXTERNAL_TOOL_FIXTURE = `import { z } from "@oh-my-pi/pi-coding-agent";
+const parameters = z.object({ text: z.string().describe("Text to echo back") });
+export default function syntheticToolExtension(pi) {
+  pi.registerTool({
+    name: ${JSON.stringify(TOOL_NAME)},
+    label: "Artifact echo",
+    description: "Echoes its text argument (artifact probe).",
+    parameters,
+    loadMode: "essential",
+    async execute(_toolCallId, params) {
+      return { content: [{ type: "text", text: \`echo: \${params.text}\` }], details: { echoed: params.text } };
+    },
+  });
+}
+`;
 
 const MCP_STDIO_FIXTURE = `import { createInterface } from "node:readline";
 const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
@@ -182,9 +278,9 @@ function assertExternalModel(models: unknown): asserts models is Record<string, 
 				(model as { provider?: string; id?: string; name?: string }).id ===
 					"compiled-external-model" &&
 				(model as { provider?: string; id?: string; name?: string }).name ===
-					"Compiled external extension model (.pi)",
+					"Compiled external extension model (.omp)",
 		),
-		"global external extension model (value-importing pi) is missing",
+		"global external extension model (value-importing omp) is missing",
 	);
 }
 
@@ -206,42 +302,100 @@ async function assertCentralConfigured(socket: WebSocket, label: string): Promis
 	throw new Error(`${label} Central state is ${JSON.stringify(state)}, expected configured`);
 }
 
-async function assertStrictVisualizeValidation(
+type TranscriptMessage = {
+	role: string;
+	toolName?: string;
+	toolCallId?: string;
+	isError?: boolean;
+	content?: unknown;
+	details?: unknown;
+};
+
+async function runScriptedToolTurn(
 	socket: WebSocket,
 	workspaceId: string,
 	sessionId: string,
-): Promise<void> {
+	prompt: string,
+	toolName: string,
+): Promise<TranscriptMessage> {
 	await within(
-		rpc(socket, "session.prompt", { sessionId, text: "Draw the broken flowchart." }),
+		rpc(socket, "session.prompt", { sessionId, text: prompt }),
 		10_000,
 		"session.prompt",
 	);
 	for (let attempt = 0; attempt < 240; attempt += 1) {
-		const states = (await within(
-			rpc(socket, "session.stateList", {}),
-			10_000,
-			"session.stateList",
-		)) as { sessionId: string; state: { execution: string; completion: unknown } }[];
-		const state = states.find((entry) => entry.sessionId === sessionId)?.state;
-		if (state?.execution === "idle" && state.completion !== null) break;
+		const state = await sessionState(socket, sessionId);
+		if (state.execution === "idle" && state.completion !== null) break;
 		await Bun.sleep(250);
 	}
 	const transcript = (await within(
 		rpc(socket, "session.getMessages", { sessionId, workspaceId }),
 		10_000,
 		"session.getMessages",
-	)) as { messages: { role: string; toolName?: string; isError?: boolean; content?: unknown }[] };
-	const result = transcript.messages.find(
-		(message) => message.role === "toolResult" && message.toolName === "visualize",
+	)) as { messages: TranscriptMessage[] };
+	const result = transcript.messages.findLast(
+		(message) => message.role === "toolResult" && message.toolName === toolName,
 	);
-	assert(result, "the scripted visualize tool call never executed in the artifact session");
+	assert(result, `the scripted ${toolName} tool call never executed in the artifact session`);
+	return result;
+}
+
+function contentBlocks(
+	message: TranscriptMessage,
+): { type?: string; text?: string; mimeType?: string }[] {
+	return Array.isArray(message.content) ? message.content : [];
+}
+
+async function assertStrictVisualizeValidation(
+	socket: WebSocket,
+	workspaceId: string,
+	sessionId: string,
+): Promise<void> {
+	const result = await runScriptedToolTurn(
+		socket,
+		workspaceId,
+		sessionId,
+		VISUALIZE_PROMPT,
+		"visualize",
+	);
 	assert(result.isError === true, "strict mermaid validation accepted a dangling flowchart edge");
-	const text = Array.isArray(result.content)
-		? result.content.map((block) => (block as { text?: string }).text ?? "").join("\n")
-		: "";
+	const text = contentBlocks(result)
+		.map((block) => block.text ?? "")
+		.join("\n");
 	assert(
 		/invalid Mermaid syntax in `mermaid`/.test(text) && /Parse error/.test(text),
 		`visualize rejected the diagram without the strict mermaid parse error: ${text}`,
+	);
+}
+
+async function assertExternalToolRoundTrip(
+	socket: WebSocket,
+	workspaceId: string,
+	sessionId: string,
+): Promise<void> {
+	const result = await runScriptedToolTurn(socket, workspaceId, sessionId, TOOL_PROMPT, TOOL_NAME);
+	assert(result.isError !== true, "the external extension's tool call persisted as an error");
+	const text = contentBlocks(result)
+		.map((block) => block.text ?? "")
+		.join("\n");
+	assert(
+		text === `echo: ${TOOL_TEXT}`,
+		`the external extension's tool answered ${JSON.stringify(text)}`,
+	);
+}
+
+async function assertImageRead(
+	socket: WebSocket,
+	workspaceId: string,
+	sessionId: string,
+): Promise<void> {
+	const result = await runScriptedToolTurn(socket, workspaceId, sessionId, IMAGE_PROMPT, "read");
+	assert(result.isError !== true, "reading the probe image persisted as an error");
+	assert(
+		contentBlocks(result).some(
+			(block) => block.type === "image" && block.mimeType?.startsWith("image/") === true,
+		),
+		`reading the probe image returned no image block: ${JSON.stringify(result.content)}`,
 	);
 }
 
@@ -294,9 +448,7 @@ async function assertAskUserQuestionRoundTrip(
 		rpc(socket, "session.getMessages", { sessionId, workspaceId }),
 		10_000,
 		"session.getMessages",
-	)) as {
-		messages: { role: string; toolCallId?: string; isError?: boolean; details?: unknown }[];
-	};
+	)) as { messages: TranscriptMessage[] };
 	const result = transcript.messages.find(
 		(message) => message.role === "toolResult" && message.toolCallId === ASK_TOOL_CALL_ID,
 	);
@@ -416,59 +568,24 @@ export async function runArtifactHostProbes(adapter: ArtifactHostAdapter): Promi
 	createCentralExecutable(fakeBinDir);
 	const centralArtifact = join(homeDir, ".pi", "agent", "extensions", "jetbrains-central.ts");
 	mkdirSync(dirname(centralArtifact), { recursive: true });
-	writeFileSync(
-		centralArtifact,
-		`import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { clampThinkingLevel } from "@earendil-works/pi-ai/models";
-const api = "compiled-external-faux";
-const model = {
-  id: "compiled-external-model",
-  name: \`Compiled external extension model (\${CONFIG_DIR_NAME})\`,
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 100000,
-  maxTokens: 4096,
-  api,
-};
-if (clampThinkingLevel(model, "high") !== "off") throw new Error("pi-ai/models alias failed");
-const faux = createFauxCore({ api, provider: "compiled-external", models: [model] });
-const respond = (context) => {
-  faux.appendResponses([respond]);
-  const last = context.messages[context.messages.length - 1];
-  if (last && last.role === "toolResult") return fauxAssistantMessage("Tool call attempted.");
-  if (last && last.role === "user" && JSON.stringify(last.content).includes(${JSON.stringify(ASK_PROMPT)}))
-    return fauxAssistantMessage(
-      [fauxToolCall("ask_user_question", ${JSON.stringify(ASK_QUESTION)}, { id: ${JSON.stringify(ASK_TOOL_CALL_ID)} })],
-      { stopReason: "toolUse" },
-    );
-  return fauxAssistantMessage(
-    [fauxToolCall("visualize", { type: "diagram", mermaid: ${JSON.stringify(MALFORMED_MERMAID)} })],
-    { stopReason: "toolUse" },
-  );
-};
-faux.setResponses([respond]);
-export default function syntheticExternalExtension(pi) {
-  pi.registerProvider("compiled-external", {
-    api,
-    baseUrl: "https://compiled-extension.invalid",
-    apiKey: "synthetic-smoke-key",
-    models: [model],
-    streamSimple: faux.streamSimple,
-  });
-}
-`,
-	);
+	writeFileSync(centralArtifact, EXTERNAL_PROVIDER_FIXTURE);
+	mkdirSync(join(agentDir, "extensions"), { recursive: true });
+	writeFileSync(join(agentDir, "extensions", "artifact-echo.ts"), EXTERNAL_TOOL_FIXTURE);
 	const inheritedPath = (process.env.PATH ?? "")
 		.split(delimiter)
-		.filter((directory) => directory && !Bun.which("pi", { PATH: directory }));
+		.filter(
+			(directory) =>
+				directory && AGENT_EXECUTABLES.every((name) => !Bun.which(name, { PATH: directory })),
+		);
 	const noPiPath = [fakeBinDir, ...inheritedPath].join(delimiter);
-	assert(!Bun.which("pi", { PATH: noPiPath }), "probe PATH unexpectedly contains pi");
+	for (const name of AGENT_EXECUTABLES) {
+		assert(!Bun.which(name, { PATH: noPiPath }), `probe PATH unexpectedly contains ${name}`);
+	}
 	assert(Bun.which("git", { PATH: noPiPath }), "probe PATH does not contain git");
 
 	const skillDir = join(projectDir, ".claude", "skills", "compiled-portable");
 	mkdirSync(skillDir, { recursive: true });
+	writeFileSync(join(projectDir, IMAGE_FILE), Buffer.from(IMAGE_PNG_BASE64, "base64"));
 	writeFileSync(
 		join(skillDir, "SKILL.md"),
 		"---\nname: compiled-portable\ndescription: Compiled portable smoke skill\n---\n\n# Smoke\n",
@@ -625,6 +742,8 @@ export default function syntheticExternalExtension(pi) {
 		);
 		await assertStrictVisualizeValidation(socket, workspace.id, created.sessionId);
 		await assertAskUserQuestionRoundTrip(socket, workspace.id, created.sessionId);
+		await assertExternalToolRoundTrip(socket, workspace.id, created.sessionId);
+		await assertImageRead(socket, workspace.id, created.sessionId);
 		await within(
 			rpc(socket, "session.dispose", { sessionId: created.sessionId }),
 			10_000,

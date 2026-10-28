@@ -1,12 +1,8 @@
 import { expect, test } from "bun:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { mcpServerLogLines } from "./log";
-
-const piDist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-const piLog = (await import(join(piDist, "extensions", "mcp", "log.js"))) as {
-	formatMcpLogMessage: (server: string, params: unknown, now?: Date) => string;
-};
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { appendMcpServerLog, formatMcpLogMessage, mcpServerLogLines } from "./log";
 
 const LOG = [
 	"2026-10-08T09:00:00.000Z [docs] info starting",
@@ -35,22 +31,34 @@ test("a server's log keeps its own entries and their continuation lines, never a
 	expect(mcpServerLogLines("", "docs")).toEqual([]);
 });
 
-test("the parser reads pi's own log format, multi-line messages included", () => {
+test("the parser reads the host's own log format, multi-line messages and rotation included", () => {
 	const at = new Date("2026-10-08T09:00:00.000Z");
 	const text = [
-		piLog.formatMcpLogMessage(
-			"docs",
-			{ level: "error", logger: "net", data: "down\nretrying" },
-			at,
-		),
-		piLog.formatMcpLogMessage("other", { data: { ok: true } }, at),
-		piLog.formatMcpLogMessage("docs", "plain", at),
+		formatMcpLogMessage("docs", { level: "error", logger: "net", data: "down\nretrying" }, at),
+		formatMcpLogMessage("other", { data: { ok: true } }, at),
+		formatMcpLogMessage("docs", "plain", at),
+		formatMcpLogMessage("docs.v2: eu", "dotted", at),
 	].join("");
 	expect(mcpServerLogLines(text, "docs")).toEqual([
 		"2026-10-08T09:00:00.000Z [docs] error net: down",
 		"    retrying",
 		"2026-10-08T09:00:00.000Z [docs] info plain",
 	]);
+	expect(mcpServerLogLines(text, "docs.v2: eu")).toEqual([
+		"2026-10-08T09:00:00.000Z [docs.v2: eu] info dotted",
+	]);
+	const dir = mkdtempSync(join(tmpdir(), "mcp-log-"));
+	try {
+		const path = join(dir, "mcp.log");
+		writeFileSync(path, "x".repeat(5 * 1024 * 1024 + 1));
+		appendMcpServerLog("docs", { level: "warning", data: "rotated" }, path);
+		expect(readFileSync(`${path}.1`, "utf8")).toHaveLength(5 * 1024 * 1024 + 1);
+		expect(mcpServerLogLines(readFileSync(path, "utf8"), "docs")).toEqual([
+			expect.stringMatching(/\[docs\] warning rotated$/),
+		]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("only the latest lines are kept", () => {

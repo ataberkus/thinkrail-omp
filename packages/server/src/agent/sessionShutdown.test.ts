@@ -2,9 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { createFauxCore, type IsolatedAgentDir, isolateAgentDir } from "pi-faux";
 import {
 	createSession,
 	disposeAllSessions,
@@ -13,6 +12,7 @@ import {
 	setSessionManagerFactory,
 	settleSessionsForShutdown,
 } from "./agentSessionManager";
+import { ModelRuntime } from "./modelRuntime";
 import { configurePiRuntime } from "./piRuntime";
 
 const model = {
@@ -26,7 +26,6 @@ const model = {
 };
 const faux = createFauxCore({ provider: "shutdown", api: "shutdown", models: [model] });
 const saved = {
-	agent: process.env.PI_CODING_AGENT_DIR,
 	data: process.env.THINKRAIL_DATA_DIR,
 	offline: process.env.PI_OFFLINE,
 };
@@ -34,15 +33,16 @@ const root = mkdtempSync(join(tmpdir(), "session-shutdown-"));
 const agentDir = join(root, "agent");
 const marker = join(root, "shutdown-events.jsonl");
 let sequence = 0;
+let isolated: IsolatedAgentDir | undefined;
 
 beforeAll(async () => {
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	isolated = isolateAgentDir(agentDir);
 	process.env.THINKRAIL_DATA_DIR = join(root, "data");
 	process.env.PI_OFFLINE = "1";
 	mkdirSync(join(agentDir, "extensions"), { recursive: true });
-	// The handler's delay is what lets the test tell "awaited" from "fired and forgotten"; using the
-	// extension API after the delay tells "still live" from "invalidated by dispose()". The slow load
-	// holds every session in its attach window long enough for a workspace closure to land inside it.
+	// The handler's delay is what lets the test tell "awaited" from "fired and forgotten"; reading the
+	// transcript after the delay tells "still live" from "released by dispose()". The slow load holds
+	// every session in its attach window long enough for a workspace closure to land inside it.
 	writeFileSync(
 		join(agentDir, "extensions", "shutdown-probe.ts"),
 		[
@@ -51,23 +51,18 @@ beforeAll(async () => {
 			`const hang = ${JSON.stringify(join(root, "HANG"))};`,
 			"export default async function probe(pi) {",
 			"  await new Promise((resolve) => setTimeout(resolve, 150));",
-			'  pi.on("session_shutdown", async (event) => {',
+			'  pi.on("session_shutdown", async (_event, ctx) => {',
 			"    if (existsSync(hang)) await new Promise(() => {});",
 			"    await new Promise((resolve) => setTimeout(resolve, 50));",
-			'    let ctx = "live";',
-			"    try {",
-			'      pi.getFlag("probe");',
-			"    } catch {",
-			'      ctx = "stale";',
-			"    }",
-			'    appendFileSync(marker, JSON.stringify({ reason: event.reason, ctx }) + "\\n");',
+			'    const state = ctx.sessionManager.getEntries().length > 0 ? "live" : "stale";',
+			'    appendFileSync(marker, JSON.stringify({ ctx: state }) + "\\n");',
 			"  });",
 			"}",
 			"",
 		].join("\n"),
 	);
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -87,8 +82,7 @@ afterAll(async () => {
 	disposeAllSessions();
 	configurePiRuntime(null);
 	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
-	if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = saved.agent;
+	isolated?.restore();
 	if (saved.data === undefined) delete process.env.THINKRAIL_DATA_DIR;
 	else process.env.THINKRAIL_DATA_DIR = saved.data;
 	if (saved.offline === undefined) delete process.env.PI_OFFLINE;
@@ -96,7 +90,7 @@ afterAll(async () => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-type ShutdownEvent = { reason: string; ctx: "live" | "stale" };
+type ShutdownEvent = { ctx: "live" | "stale" };
 
 function shutdownEvents(): ShutdownEvent[] {
 	try {
@@ -132,7 +126,7 @@ test("removing a session emits session_shutdown to extensions and awaits their h
 	const before = shutdownEvents().length;
 	const p = await parent();
 	await removeSession(p.sessionId);
-	expect(shutdownEvents().slice(before)).toEqual([{ reason: "quit", ctx: "live" }]);
+	expect(shutdownEvents().slice(before)).toEqual([{ ctx: "live" }]);
 });
 
 test("an immediate host stop disposes the pi session only after its shutdown handlers settle", async () => {
@@ -140,10 +134,7 @@ test("an immediate host stop disposes the pi session only after its shutdown han
 	await parent();
 	await parent();
 	disposeAllSessions();
-	expect(await eventuallyShutdownEvents(before, 2)).toEqual([
-		{ reason: "quit", ctx: "live" },
-		{ reason: "quit", ctx: "live" },
-	]);
+	expect(await eventuallyShutdownEvents(before, 2)).toEqual([{ ctx: "live" }, { ctx: "live" }]);
 });
 
 test("a session abandoned while attaching emits session_shutdown before its pi session is disposed", async () => {
@@ -159,7 +150,7 @@ test("a session abandoned while attaching emits session_shutdown before its pi s
 	const closing = removeWorkspaceSessions(workspaceId);
 	await expect(creating).rejects.toThrow(/Workspace is unavailable|Unknown session/);
 	await closing;
-	expect(await eventuallyShutdownEvents(before, 1)).toEqual([{ reason: "quit", ctx: "live" }]);
+	expect(await eventuallyShutdownEvents(before, 1)).toEqual([{ ctx: "live" }]);
 });
 
 test("a shutdown handler that never settles is bounded by the shutdown budget", async () => {

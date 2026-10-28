@@ -113,8 +113,9 @@ test("a test runner's own process is left alone — it reports faults itself", a
 	writeFileSync(
 		script,
 		`import { installCrashLog } from ${JSON.stringify(join(import.meta.dir, "crashLog.ts"))};\n` +
+			`const before = process.listenerCount("uncaughtException");\n` +
 			`installCrashLog("9.9.9-test");\n` +
-			`process.stderr.write(String(process.listenerCount("uncaughtException")));\n`,
+			`process.stderr.write(String(process.listenerCount("uncaughtException") - before));\n`,
 	);
 	const proc = Bun.spawn([process.execPath, script], {
 		env: { ...process.env, NODE_ENV: "test", THINKRAIL_DATA_DIR: dir },

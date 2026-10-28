@@ -1,14 +1,24 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { resolve } from "node:path";
+import { TERMINAL_TOOL_RESULT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	type AgentSession,
 	createAgentSession,
-	DefaultResourceLoader,
+	discoverAuthStorage,
+	discoverContextFiles,
+	type ExtensionFactory,
 	getAgentDir,
-	type InlineExtension,
-	ModelRuntime,
+	loadSkills,
+	ModelRegistry,
 	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
+import {
+	type ContextFile,
+	contextFileCapability,
+} from "@oh-my-pi/pi-coding-agent/capability/context-file";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { captureBranch, captureSession, forkCaptured } from "./history";
 import { scanReplayTools } from "./replayTools";
 import { assertSlots, Semaphore } from "./semaphore";
@@ -20,6 +30,7 @@ import {
 	locateResourceTranscript,
 	resourceSessionDir,
 } from "./storage";
+import { fromEngineThinking, toEngineThinking } from "./thinking";
 import {
 	type ChildHandle,
 	type CreateChildSpec,
@@ -62,7 +73,8 @@ interface ResourceState {
 	readonly id: string;
 	context?: Promise<PreparedContext>;
 	semaphore?: Semaphore;
-	readonly factories: InlineExtension[];
+	readonly factories: ExtensionFactory[];
+	readonly terminalTools: ReadonlySet<string>;
 	readonly children: Map<string, ChildEntry>;
 	readonly pending: Set<Promise<unknown>>;
 	readonly opening: Set<string>;
@@ -72,11 +84,10 @@ interface ResourceState {
 
 interface PreparedContext {
 	cwd: string;
-	runtime: ModelRuntime;
+	registry: ModelRegistry;
 	model?: SessionOptions["model"];
 	thinkingLevel?: SessionOptions["thinkingLevel"];
 	isProjectTrusted?: () => boolean;
-	unsupportedProviders: Set<string>;
 }
 
 interface ChildEntry {
@@ -93,23 +104,7 @@ interface ChildEntry {
 	disposed: boolean;
 }
 
-function repairResourceTranscript(manager: SessionManager): void {
-	const initial = scanReplayTools(manager.buildSessionContext().messages);
-	for (const call of initial.danglingTail) {
-		manager.appendMessage({
-			role: "toolResult",
-			toolCallId: call.toolCallId,
-			toolName: call.toolName,
-			content: [
-				{
-					type: "text",
-					text: "Operation aborted (the resource owner restarted before this tool call completed)",
-				},
-			],
-			isError: true,
-			timestamp: Date.now(),
-		});
-	}
+function assertReplayable(manager: SessionManager): void {
 	const replay = scanReplayTools(manager.buildSessionContext().messages);
 	if (replay.issues.length)
 		throw new DelegationError("invalid-child-transcript", replay.issues.join("; "));
@@ -132,6 +127,44 @@ function abortActiveRun(entry: ChildEntry, reason?: string): Promise<void> {
 	if (!entry.session.isStreaming) return activeRun.sessionAbort ?? Promise.resolve();
 	activeRun.sessionAbort ??= entry.session.abort();
 	return activeRun.sessionAbort;
+}
+
+function keepParentRegistrations(): void {}
+
+function childRegistry(registry: ModelRegistry): ModelRegistry {
+	const bound = new Map<PropertyKey, unknown>();
+	return new Proxy(registry, {
+		get(target, property) {
+			if (property === "syncExtensionSources" || property === "clearSourceRegistrations")
+				return keepParentRegistrations;
+			const value: unknown = Reflect.get(target, property, target);
+			if (typeof value !== "function") return value;
+			let method = bound.get(property);
+			if (method === undefined) {
+				method = value.bind(target);
+				bound.set(property, method);
+			}
+			return method;
+		},
+	});
+}
+
+async function childSkills(
+	names: readonly string[],
+	cwd: string,
+	projectTrusted: boolean,
+): Promise<Awaited<ReturnType<typeof loadSkills>>["skills"]> {
+	if (names.length === 0) return [];
+	const { skills } = await loadSkills({ cwd });
+	return skills.filter(
+		(skill) => names.includes(skill.name) && (projectTrusted || skill._source?.level !== "project"),
+	);
+}
+
+async function userContextFiles(cwd: string): Promise<Array<{ path: string; content: string }>> {
+	const { items } = await loadCapability<ContextFile>(contextFileCapability.id, { cwd });
+	const user = new Set(items.filter((item) => item.level === "user").map((item) => item.path));
+	return (await discoverContextFiles(cwd)).filter((file) => user.has(file.path));
 }
 
 function snapshotSessionOptions(options: SessionOptions): SessionOptions {
@@ -249,14 +282,9 @@ interface RunBaseline {
 }
 
 function baselineOf(session: AgentSession): RunBaseline {
-	const stats = session.getSessionStats();
-	return {
-		input: stats.tokens.input,
-		output: stats.tokens.output,
-		cacheRead: stats.tokens.cacheRead,
-		cacheWrite: stats.tokens.cacheWrite,
-		cost: stats.cost,
-	};
+	const { input, output, cacheRead, cacheWrite, cost } =
+		session.sessionManager.getUsageStatistics();
+	return { input, output, cacheRead, cacheWrite, cost };
 }
 
 function textOf(message: AssistantMessage | undefined): string | undefined {
@@ -282,27 +310,7 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 	const parentLifetimes = new Map<string, object>();
 	const pendingParentPreparations = new Map<object, Set<Promise<void>>>();
 
-	const fallbackRuntimes = new Map<
-		string,
-		{ runtime: Promise<ModelRuntime>; mirroredProviderIds: Set<string> }
-	>();
-
-	function entryBySession(sessionId: string): ChildEntry | undefined {
-		const owned = children.get(sessionId);
-		if (owned) return owned;
-		for (const resource of resources.values()) {
-			const child = resource.children.get(sessionId);
-			if (child) return child;
-		}
-		return undefined;
-	}
-
-	const dropCancelledPrompt: InlineExtension = (pi) => {
-		pi.on("input", (_event, ctx) => {
-			const entry = entryBySession(ctx.sessionManager.getSessionId());
-			return entry?.activeRun?.controller.signal.aborted ? { action: "handled" } : undefined;
-		});
-	};
+	let fallbackRegistry: Promise<ModelRegistry> | undefined;
 
 	function parentLifetimeFor(parentSessionId: string): object {
 		let lifetime = parentLifetimes.get(parentSessionId);
@@ -348,46 +356,17 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 		};
 	}
 
-	function synchronizeRegisteredProviders(
-		runtime: ModelRuntime,
-		mirroredProviderIds: Set<string>,
-		parent: ParentContext,
-	): void {
-		const registry = parent.modelRegistry;
-		if (!registry) return;
-		const registeredIds = new Set(registry.getRegisteredProviderIds());
-		for (const providerId of mirroredProviderIds) runtime.unregisterProvider(providerId);
-		mirroredProviderIds.clear();
-		for (const providerId of registeredIds) {
-			const nativeProvider = registry.getRegisteredNativeProvider(providerId);
-			if (nativeProvider) {
-				runtime.registerNativeProvider(nativeProvider);
-				mirroredProviderIds.add(providerId);
-				continue;
-			}
-			const providerConfig = registry.getRegisteredProviderConfig(providerId);
-			if (providerConfig) {
-				runtime.registerProvider(providerId, providerConfig);
-				mirroredProviderIds.add(providerId);
-			}
-		}
-	}
-
-	async function getFallbackRuntime(
-		parentSessionId: string,
-		parent: ParentContext,
-	): Promise<ModelRuntime> {
-		const bound = bindings.modelRuntime;
+	async function registryFor(parent: ParentContext): Promise<ModelRegistry> {
+		if (parent.modelRegistry) return parent.modelRegistry;
+		const bound = bindings.modelRegistry;
 		if (typeof bound === "function") return bound();
 		if (bound) return bound;
-		let fallback = fallbackRuntimes.get(parentSessionId);
-		if (!fallback) {
-			fallback = { runtime: ModelRuntime.create(), mirroredProviderIds: new Set() };
-			fallbackRuntimes.set(parentSessionId, fallback);
-		}
-		const runtime = await fallback.runtime;
-		synchronizeRegisteredProviders(runtime, fallback.mirroredProviderIds, parent);
-		return runtime;
+		fallbackRegistry ??= discoverAuthStorage(getAgentDir()).then((authStorage) => {
+			const registry = new ModelRegistry(authStorage);
+			registry.refreshInBackground();
+			return registry;
+		});
+		return fallbackRegistry;
 	}
 
 	function semaphoreFor(parentSessionId: string): Semaphore {
@@ -443,8 +422,8 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 		baseline: RunBaseline,
 	): DelegationRunDetails {
 		const { session, record } = entry;
-		const stats = session.getSessionStats();
-		const { contextUsage } = stats;
+		const stats = session.sessionManager.getUsageStatistics();
+		const thinkingLevel = fromEngineThinking(session.thinkingLevel ?? "off");
 		return {
 			childSessionId: record.sessionId,
 			...(record.info.roleName !== undefined ? { roleName: record.info.roleName } : {}),
@@ -452,15 +431,15 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 			task,
 			status,
 			...(session.model ? { model: `${session.model.provider}/${session.model.id}` } : {}),
-			thinkingLevel: session.thinkingLevel,
+			...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
 			usage: {
-				input: stats.tokens.input - baseline.input,
-				output: stats.tokens.output - baseline.output,
-				cacheRead: stats.tokens.cacheRead - baseline.cacheRead,
-				cacheWrite: stats.tokens.cacheWrite - baseline.cacheWrite,
+				input: stats.input - baseline.input,
+				output: stats.output - baseline.output,
+				cacheRead: stats.cacheRead - baseline.cacheRead,
+				cacheWrite: stats.cacheWrite - baseline.cacheWrite,
 				cost: stats.cost - baseline.cost,
 				turns,
-				contextTokens: contextUsage?.tokens ?? 0,
+				contextTokens: session.getContextUsage()?.tokens ?? 0,
 			},
 			durationMs: Date.now() - startedAt,
 			...(activity !== undefined ? { activity } : {}),
@@ -544,11 +523,21 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 
 		let thrownMessage: string | undefined;
 		try {
-			if (!abortRequested)
-				await session.prompt(
+			let text: string | undefined = task;
+			const runner = session.extensionRunner;
+			if (!abortRequested && runner?.hasHandlers("input")) {
+				const input = await runner.emitInput(
 					task,
-					entry.resource ? { expandPromptTemplates: false, source: "extension" } : undefined,
+					undefined,
+					entry.resource ? "extension" : "interactive",
 				);
+				text = input.handled ? undefined : (input.text ?? task);
+			}
+			if (activeRun?.controller.signal.aborted) abortRequested = true;
+			if (!abortRequested && text !== undefined) {
+				await session.sessionManager.ensureOnDisk();
+				await session.prompt(text, entry.resource ? { expandPromptTemplates: false } : undefined);
+			}
 		} catch (error) {
 			thrownMessage = error instanceof Error ? error.message : String(error);
 		} finally {
@@ -696,10 +685,8 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 			entry.snapshot = { ...entry.snapshot, finalText };
 		}
 		try {
-			if (entry.resource)
-				await entry.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			await entry.session.dispose();
 		} finally {
-			entry.session.dispose();
 			if ("parentSessionId" in entry.record) {
 				children.delete(entry.record.sessionId);
 				byParent.get(entry.record.parentSessionId)?.delete(entry.record.sessionId);
@@ -774,89 +761,118 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 		options: SessionOptions,
 		cwd: string,
 		projectTrusted: boolean,
-		runtime: ModelRuntime,
+		registry: ModelRegistry,
 		model: AgentSession["model"],
 		thinkingLevel: SessionOptions["thinkingLevel"],
-		factories: InlineExtension[],
+		factories: ExtensionFactory[],
 		manager: SessionManager,
+		roleName: string | undefined,
+		terminalTools: ReadonlySet<string> = new Set(),
 	): Promise<AgentSession> {
-		const settingsManager =
-			bindings.buildChildSettings?.(cwd, projectTrusted) ??
-			SettingsManager.create(cwd, undefined, { projectTrusted });
-		const skills = options.skills ?? [];
-		const systemPrompt = options.systemPrompt;
-		const childFactories = [
-			...(bindings.childBaseExtensionFactories ?? []),
-			...(options.extensions === true ? factories : []),
-			dropCancelledPrompt,
-		];
-		const resourceLoader = new DefaultResourceLoader({
-			cwd,
-			agentDir: getAgentDir(),
-			settingsManager,
-			noExtensions: true,
-			extensionFactories: childFactories,
-			noPromptTemplates: true,
-			noThemes: true,
-			...(options.contextFiles === true ? {} : { noContextFiles: true }),
-			...(systemPrompt !== undefined ? { systemPromptOverride: () => systemPrompt } : {}),
-			skillsOverride: (current) => ({
-				skills: current.skills.filter((skill) => skills.includes(skill.name)),
-				diagnostics: current.diagnostics,
-			}),
-		});
-		await resourceLoader.reload();
-
+		const settings = bindings.buildChildSettings
+			? await bindings.buildChildSettings(cwd, projectTrusted)
+			: projectTrusted
+				? await Settings.loadReadOnly({ cwd, agentDir: getAgentDir() })
+				: Settings.isolated();
+		const untrustedPrompt =
+			options.systemPrompt === undefined && !projectTrusted && bindings.childSystemPrompt
+				? await bindings.childSystemPrompt(cwd)
+				: {};
+		const loadContext = options.contextFiles === true;
+		const contextFiles =
+			loadContext && !projectTrusted ? { contextFiles: await userContextFiles(cwd) } : {};
+		const sessionId = manager.getSessionId();
+		let assembled: AgentSession | undefined;
+		const endsInvocation: ExtensionFactory = (pi) => {
+			pi.on("tool_result", (event) => {
+				if (!event.isError && terminalTools.has(event.toolName))
+					assembled?.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+				return undefined;
+			});
+		};
 		const { session } = await createAgentSession({
 			cwd,
-			modelRuntime: runtime,
+			agentDir: getAgentDir(),
+			settings,
+			modelRegistry: childRegistry(registry),
 			sessionManager: manager,
-			settingsManager,
-			resourceLoader,
 			...(model ? { model } : {}),
-			...(thinkingLevel !== undefined
-				? { thinkingLevel }
-				: manager.getEntries().length > 0
-					? {
-							thinkingLevel:
-								(model
-									? settingsManager.getModelThinkingLevel(model.provider, model.id)
-									: undefined) ??
-								settingsManager.getDefaultThinkingLevel() ??
-								"medium",
-						}
-					: {}),
-			...(options.tools !== undefined ? { tools: options.tools } : {}),
-			...(options.excludeTools !== undefined ? { excludeTools: options.excludeTools } : {}),
+			...(thinkingLevel !== undefined ? { thinkingLevel: toEngineThinking(thinkingLevel) } : {}),
+			...(options.systemPrompt !== undefined
+				? { customSystemPrompt: options.systemPrompt }
+				: untrustedPrompt),
+			...(options.tools !== undefined
+				? { toolNames: options.tools.filter((name) => !options.excludeTools?.includes(name)) }
+				: {}),
+			extensions: [
+				...(bindings.childBaseExtensionFactories ?? []),
+				...(options.extensions === true ? factories : []),
+				...(terminalTools.size > 0 ? [endsInvocation] : []),
+			],
+			disableExtensionDiscovery: true,
+			preloadedCustomToolPaths: [],
+			skills: await childSkills(options.skills ?? [], cwd, projectTrusted),
+			rules: [],
+			...contextFiles,
+			...(loadContext && projectTrusted ? {} : { noContextFiles: true }),
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+			hasUI: false,
+			bindProcessState: false,
+			cacheWarming: false,
+			taskDepth: 1,
+			parentTaskPrefix: sessionId,
+			agentId: sessionId,
+			agentDisplayName: roleName ?? "delegation",
 		});
+		assembled = session;
 		try {
 			const effectiveModel = session.model;
 			const savedContext = manager.buildSessionContext();
 			if (
 				effectiveModel &&
-				(savedContext.model?.provider !== effectiveModel.provider ||
-					savedContext.model?.modelId !== effectiveModel.id)
+				savedContext.models.default !== `${effectiveModel.provider}/${effectiveModel.id}`
 			)
-				manager.appendModelChange(effectiveModel.provider, effectiveModel.id);
-			if (savedContext.thinkingLevel !== session.thinkingLevel)
+				manager.appendModelChange(`${effectiveModel.provider}/${effectiveModel.id}`);
+			if (savedContext.thinkingLevel !== (session.thinkingLevel ?? "off"))
 				manager.appendThinkingLevelChange(session.thinkingLevel);
-			if (childFactories.length > 0) await session.bindExtensions({ mode: "print" });
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: () => {},
+			});
+			await applyToolPolicy(session, options);
 			return session;
 		} catch (error) {
-			try {
-				await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-			} finally {
-				session.dispose();
-			}
+			await session.dispose();
 			throw error;
 		}
 	}
 
-	function newManager(
+	async function applyToolPolicy(session: AgentSession, options: SessionOptions): Promise<void> {
+		if (options.tools === undefined && options.excludeTools === undefined) return;
+		await session.runToolRegistryMutation(async () => {});
+		const allowed = options.tools === undefined ? undefined : new Set(options.tools);
+		const excluded = new Set(options.excludeTools ?? []);
+		const extensionTools = new Set(
+			(session.extensionRunner?.getAllRegisteredTools() ?? []).map((tool) => tool.definition.name),
+		);
+		const enabled = session.getEnabledToolNames();
+		const next = enabled.filter(
+			(name) =>
+				!excluded.has(name) &&
+				(allowed === undefined || allowed.has(name) || !extensionTools.has(name)),
+		);
+		if (next.length !== enabled.length) await session.setActiveToolsByName(next);
+	}
+
+	async function newManager(
 		spec: Omit<CreateChildSpec, "parent">,
 		cwd: string,
 		dir: string,
-	): SessionManager {
+	): Promise<SessionManager> {
 		return spec.origin?.kind === "fork-captured"
 			? forkCaptured(spec.origin.history, cwd, dir)
 			: SessionManager.create(cwd, dir);
@@ -900,39 +916,36 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 				"unknown-parent",
 				`Parent session ${parentSessionId} is not live — children derive their defaults from a live parent`,
 			);
-		const runtime = parent.modelRuntime ?? (await getFallbackRuntime(parentSessionId, parent));
+		const registry = await registryFor(parent);
 		const model = options.model
-			? runtime.getModel(options.model.provider, options.model.id)
+			? registry.find(options.model.provider, options.model.id)
 			: parent.model;
 		if (options.model && !model)
 			throw new Error(
 				`Unknown model ${options.model.provider}/${options.model.id} — resolve against available models before createChild`,
 			);
-		const manager = newManager(
+		const manager = await newManager(
 			spec,
 			parent.cwd,
 			delegationSessionDir(delegationRoot, scope, parentSessionId),
 		);
+		const projectTrusted = trustOf(parent);
 		const session = await assemble(
 			options,
 			parent.cwd,
-			trustOf(parent),
-			runtime,
+			projectTrusted,
+			registry,
 			model,
-			options.thinkingLevel ?? parent.thinkingLevel,
+			options.thinkingLevel ?? fromEngineThinking(parent.thinkingLevel),
 			bindings.childExtensionFactories ?? [],
 			manager,
+			spec.info.roleName,
 		);
 		const current = bindings.resolveParent?.(parentSessionId);
 		const parentClosed = parentLifetimes.get(parentSessionId) !== parentLifetime || !current;
-		const trustChanged =
-			current !== undefined && session.settingsManager.isProjectTrusted() !== trustOf(current);
+		const trustChanged = current !== undefined && projectTrusted !== trustOf(current);
 		if (parentClosed || trustChanged) {
-			try {
-				await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-			} finally {
-				session.dispose();
-			}
+			await session.dispose();
 			throw new DelegationError(
 				"unknown-parent",
 				parentClosed
@@ -971,12 +984,7 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 		if (!reference || typeof reference.provider !== "string" || typeof reference.id !== "string") {
 			throw new DelegationError("model-unavailable", "An effective resource model is required");
 		}
-		if (context.unsupportedProviders.has(reference.provider))
-			throw new DelegationError(
-				"unsupported-auth",
-				`Provider ${reference.provider} requires the original runtime for runtime-only authentication`,
-			);
-		const model = context.runtime.getModel(reference.provider, reference.id);
+		const model = context.registry.find(reference.provider, reference.id);
 		if (!model)
 			throw new DelegationError(
 				"model-unavailable",
@@ -986,40 +994,15 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 	}
 
 	async function prepareContext(input: ResourceContextInput): Promise<PreparedContext> {
-		const defaults = {
+		if (typeof input.cwd !== "string" || !input.cwd)
+			throw new DelegationError("invalid-combination", "Resource cwd is required");
+		return {
 			cwd: input.cwd,
+			registry: input.modelRegistry,
 			...(input.model ? { model: { ...input.model } } : {}),
 			...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel } : {}),
 			...(input.isProjectTrusted ? { isProjectTrusted: input.isProjectTrusted } : {}),
 		};
-		if (typeof defaults.cwd !== "string" || !defaults.cwd)
-			throw new DelegationError("invalid-combination", "Resource cwd is required");
-		const unsupportedProviders = new Set<string>();
-		if (input.kind === "runtime")
-			return { ...defaults, runtime: input.modelRuntime, unsupportedProviders };
-		const registry = input.modelRegistry;
-		const registrations = registry.getRegisteredProviderIds().map((id) => ({
-			id,
-			native: registry.getRegisteredNativeProvider(id),
-			config: registry.getRegisteredProviderConfig(id),
-		}));
-		const providerIds = new Set(registry.getAll().map((model) => model.provider));
-		const configuredProviders = new Set<string>();
-		for (const providerId of providerIds) {
-			const auth = registry.getProviderAuthStatus(providerId);
-			if (auth.source === "runtime") unsupportedProviders.add(providerId);
-			if (auth.source === "stored") configuredProviders.add(providerId);
-		}
-		const runtime = await ModelRuntime.create({ allowModelNetwork: false });
-		for (const registration of registrations) {
-			if (registration.native) runtime.registerNativeProvider(registration.native);
-			else if (registration.config) runtime.registerProvider(registration.id, registration.config);
-		}
-		for (const providerId of configuredProviders) {
-			if (!runtime.getProviderAuthStatus(providerId).configured)
-				unsupportedProviders.add(providerId);
-		}
-		return { ...defaults, runtime, unsupportedProviders };
 	}
 
 	function preparedContext(resource: ResourceState): Promise<PreparedContext> {
@@ -1129,24 +1112,27 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 		let manager: SessionManager;
 		if (birth) {
 			const located = locateResourceTranscript(delegationRoot, scope, resource.id, birth.sessionId);
-			manager = SessionManager.open(located.file, dir);
+			manager = await SessionManager.open(located.file, dir);
+			if (manager.getCwd() !== resolve(context.cwd)) manager.setCwdWithoutRelocation(context.cwd);
 			if (manager.getSessionId() !== birth.sessionId) {
 				throw new DelegationError(
 					"invalid-child-transcript",
 					"Transcript identity changed while reopening",
 				);
 			}
-			repairResourceTranscript(manager);
-		} else manager = newManager(spec, context.cwd, dir);
+			assertReplayable(manager);
+		} else manager = await newManager(spec, context.cwd, dir);
 		const session = await assemble(
 			options,
 			context.cwd,
 			trustOf(context),
-			context.runtime,
+			context.registry,
 			model,
 			options.thinkingLevel ?? context.thinkingLevel,
 			[...(bindings.childExtensionFactories ?? []), ...resource.factories],
 			manager,
+			spec.info.roleName,
+			resource.terminalTools,
 		);
 		const record: ResourceSpawnRecord = Object.freeze(
 			birth
@@ -1155,7 +1141,7 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 		);
 		const semaphore = resource.semaphore;
 		if (!semaphore) {
-			session.dispose();
+			await session.dispose();
 			throw new DelegationError("disposed", "Resource pacing was released");
 		}
 		const entry: ChildEntry = {
@@ -1216,6 +1202,7 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 			context: prepareContext(input),
 			semaphore,
 			factories: [...(options.childExtensionFactories ?? [])],
+			terminalTools: new Set(options.terminalTools ?? []),
 			children: new Map(),
 			pending: new Set(),
 			opening: new Set(),
@@ -1334,7 +1321,6 @@ export function createDelegationService(bindings: DelegationBindings): Delegatio
 			const lineage = byParent.get(parentSessionId);
 			byParent.delete(parentSessionId);
 			semaphores.delete(parentSessionId);
-			fallbackRuntimes.delete(parentSessionId);
 			const entries = [...(lineage ?? [])].flatMap((id) => {
 				const entry = children.get(id);
 				return entry ? [entry] : [];

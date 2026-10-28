@@ -18,12 +18,13 @@ ThinkRail/UI/server packages, pi private fields, credential copying and independ
 ## Adapter
 
 The injected service is always host-owned and never closed here. Five controller tools use domain
-schemas and map directly to execute or the four named reads. Caller command ids and versions are
+schemas, registered as JSON Schema through the domain's `toolParameters` (omp tool parameters are
+JSON/zod, not TypeBox) with `loadMode: "essential"`, re-checked with TypeBox `Check`, and map directly to execute or the four named reads. Caller command ids and versions are
 unchanged. Results retain the entire DagResult in details and JSON text; admitted DTOs already
 capture bulk bodies, so no presentation cap may hide topology or gate identities. The public
 `tool_result` override marks structured failures without a per-call stash.
 
-Each session_start rotates one lifetime and one notice-only binding. Commands bind the actual
+Each session_start and session_switch rotates one lifetime and one notice-only binding. Commands bind the actual
 session id, combine invocation cancellation with lifetime revocation, and revoke their short binding
 in finally. Execution projection is synchronous and current, never retained as a callback by the
 service; undefined is passed through so backend receipt replay precedes context requirements.
@@ -37,8 +38,8 @@ recheck the captured lifetime before projecting context and an at-entry cut of t
 No tool accepts an actor or elevates to human. Operator results are passive custom messages.
 
 Notice sinks check captured identity, current lifetime and isIdle before submitting a custom
-`dag-notice` message with triggerTurn:false. agent_settled wakes readiness listeners; agent_end does
-not. Revocation removes listeners and all retained context closures. Backend bind restores notices
+`dag-notice` message with triggerTurn:false. A terminal agent_end (willContinue unset) wakes
+readiness listeners; a continuing one does not. Revocation removes listeners and all retained context closures. Backend bind restores notices
 by read-only scans; attaching does not claim execution ownership. Runtime attachment identity maps a
 controller session and a human's explicit matching conversation id to one conversation key while
 keeping their caller objects—and therefore command authority—distinct. Humans without a conversation
@@ -55,9 +56,10 @@ are synchronous, so shutdown cannot miss an in-flight owner acquisition. Once sh
 acquisition fails until all closes finish and the registry is removed. Close failures retain the
 blocked registry and propagate; incompatible registry versions/shapes fail loudly.
 
-New/resume/fork revoke conversation bindings only. Quit/reload await every retained owner's close,
-including undisplayed scopes, before clearing the registry. Replacement code acquires fresh services
-and sees paused durable resources. The registry retains no pi/context closures. Delegation owns
+session_switch (new/resume/fork) rebinds the conversation only. session_shutdown revokes it and,
+when `ctx.agent.kind` is `main`, awaits every retained owner's close, including undisplayed scopes,
+before clearing the registry; subagent sessions never close process owners. Code loaded afterwards
+acquires fresh services and sees paused durable resources. The registry retains no pi/context closures. Delegation owns
 provider replay and resource execution; borrowed provider callbacks remain the supplying host's
 lifetime contract, not a blanket adapter restriction.
 
@@ -67,5 +69,5 @@ Public-adapter tests use real pi sessions and isolated local faux models/credent
 service-client doubles isolate forwarding, provenance, confirmation and notice delivery from backend
 policy. Real-service cases pin invocation history, complete reads and standalone lifetime. Tests cover direct mapping, identity/history
 cuts, replay without replacement execution context, structured errors, passive idle notices, switch
-survival, process-registry module replacement and all-scope quiescent reload/quit. Reads must not invoke
+survival, process-registry module replacement and all-scope quiescent shutdown. Reads must not invoke
 providers. No paid/network providers, host bundling or duplicate backend policy tests.

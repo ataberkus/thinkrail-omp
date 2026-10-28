@@ -1,6 +1,15 @@
 export {
+	type McpConnectionTest,
+	type McpSignInPresentation,
+	signInMcpServer,
+	signOutMcpServer,
+	testMcpConnection,
+} from "./auth";
+export {
 	fingerprintMcpEntry,
 	globalMcpConfigPath,
+	type HostMcpServerConfig,
+	type HostMcpServerEntry,
 	isOverrideEntry,
 	type LoadedMcpFiles,
 	loadHostMcpConfig,
@@ -12,11 +21,13 @@ export {
 	mcpPolicyOf,
 	mcpToolLabel,
 	normalizeExposureForHost,
+	ompServerConfig,
 	projectMcpConfigPath,
+	toolExposureOf,
 	validateMcpServerConfig,
 } from "./config";
-export { createMcpEngine } from "./engine";
-export { readMcpServerLog } from "./log";
+export { McpEngineLoad } from "./engine";
+export { appendMcpServerLog, formatMcpLogMessage, readMcpServerLog } from "./log";
 export {
 	effectiveMcpServerConfig,
 	mcpEntryFingerprint,
@@ -28,6 +39,7 @@ export { maskMcpEndpoint, redactMcpText } from "./redact";
 export {
 	isMcpResultTool,
 	MCP_SUMMARY_BYTES,
+	mcpCallResultOf,
 	summarizeMcpResult,
 } from "./results";
 export {
@@ -41,10 +53,11 @@ export {
 export { acquireMcpSignInLock } from "./signInLock";
 export {
 	deriveMcpServerStatuses,
-	MCP_ATTENTION_PREFIX,
+	formatMcpRuntime,
+	type McpRuntimeStatus,
+	McpRuntimeTracker,
 	type ParsedMcpStatus,
-	parseMcpAttentionNotice,
-	parseMcpStatusText,
+	reportMcpRuntime,
 } from "./status";
 export { summarizeMcpConfigErrors, summarizeMcpServers } from "./summaries";
 export {

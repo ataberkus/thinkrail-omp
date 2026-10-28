@@ -1,3 +1,4 @@
+import { validateServerName } from "@oh-my-pi/pi-coding-agent/mcp";
 import type {
 	LoginFrame,
 	McpExposure,
@@ -18,7 +19,6 @@ import {
 	liveSessionIdsOf,
 	type McpProbeAction,
 	mcpEntryFingerprint,
-	mcpOwnershipGuard,
 	mcpPolicyOf,
 	readMcpServerLog,
 	readMcpToolOutput,
@@ -42,7 +42,6 @@ import { getWorkspace, listAllWorkspaceRecords, listWorkspaceRecords } from "../
 
 const log = logger("host");
 const LIST_WAIT_MS = 1500;
-const SERVER_NAME = /^[A-Za-z0-9_-]+$/;
 
 function target(workspaceId: string): { workspace: Workspace; project: Project } {
 	const workspace = getWorkspace(workspaceId);
@@ -50,9 +49,6 @@ function target(workspaceId: string): { workspace: Workspace; project: Project }
 	if (!project) throw new Error(`Unknown project: ${workspace.projectId}`);
 	return { workspace, project };
 }
-
-const handledElsewhere = (): CodedError =>
-	new CodedError("MCP_HANDLED_ELSEWHERE", "MCP is not managed by ThinkRail here.");
 
 function assertRenderedEntry(
 	name: string,
@@ -82,26 +78,7 @@ async function admitManaged<T>(
 	workspaceId: string,
 	admit: (found: Target) => T | Promise<T>,
 ): Promise<T> {
-	const before = target(workspaceId);
-	const ownedElsewhere = await mcpOwnershipGuard({
-		workspaceId: before.workspace.id,
-		cwd: before.workspace.worktreePath,
-		projectTrusted: before.project.piResourceTrust === "granted",
-	});
-	const current = target(workspaceId);
-	if (
-		current.project.id !== before.project.id ||
-		current.workspace.worktreePath !== before.workspace.worktreePath ||
-		(current.project.piResourceTrust === "granted") !==
-			(before.project.piResourceTrust === "granted")
-	) {
-		throw new CodedError(
-			"MCP_CONFIG_INVALID",
-			"The workspace or project trust changed — retry with its current settings.",
-		);
-	}
-	if (ownedElsewhere() !== undefined) throw handledElsewhere();
-	return admit(current);
+	return admit(target(workspaceId));
 }
 
 function mutateManaged(
@@ -115,9 +92,11 @@ function mutateManaged(
 }
 
 function serverName(name: unknown): string {
-	if (typeof name !== "string" || !SERVER_NAME.test(name)) {
-		throw new CodedError("MCP_CONFIG_INVALID", "MCP server names use letters, digits, - and _");
+	if (typeof name !== "string") {
+		throw new CodedError("MCP_CONFIG_INVALID", "MCP server names are text");
 	}
+	const problem = validateServerName(name);
+	if (problem !== undefined) throw new CodedError("MCP_CONFIG_INVALID", problem);
 	return name;
 }
 
@@ -357,7 +336,7 @@ async function probe(
 		if (!effective) {
 			throw new CodedError("MCP_CONFIG_INVALID", `No admitted MCP server named "${name}".`);
 		}
-		if (action === "test" && !("url" in effective)) {
+		if (action === "test" && effective.type !== "http" && effective.type !== "sse") {
 			throw new CodedError(
 				"MCP_CONFIG_INVALID",
 				"Test connection applies to HTTP servers; a stdio server is verified when a chat starts it.",

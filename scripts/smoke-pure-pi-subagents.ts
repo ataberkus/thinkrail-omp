@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const repoRoot = join(import.meta.dir, "..");
-const piBin = join(repoRoot, "node_modules", ".bin", "pi");
+const ompBin = join(repoRoot, "node_modules", ".bin", "omp");
 const extensionEntry = join(repoRoot, "packages", "pi-subagents", "index.ts");
 
 function fail(message: string): never {
@@ -15,9 +15,9 @@ function fail(message: string): never {
 const agentDir = mkdtempSync(join(tmpdir(), "thinkrail-smoke-pi-agent-"));
 const workDir = mkdtempSync(join(tmpdir(), "thinkrail-smoke-cwd-"));
 try {
-	const userAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+	const userAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".omp", "agent");
 	let copied = 0;
-	for (const file of ["auth.json", "models.json"]) {
+	for (const file of ["agent.db", "models.yml", "models.json"]) {
 		const src = join(userAgentDir, file);
 		if (existsSync(src)) {
 			copyFileSync(src, join(agentDir, file));
@@ -26,29 +26,31 @@ try {
 	}
 	if (copied === 0) {
 		fail(
-			`no auth found under ${userAgentDir} — authenticate pi first (this smoke drives a real provider)`,
+			`no auth found under ${userAgentDir} — authenticate omp first (this smoke drives a real provider)`,
 		);
 	}
-	const [provider, ...idParts] = (
-		process.env.THINKRAIL_E2E_MODEL ?? "anthropic/claude-opus-4-8"
-	).split("/");
-	writeFileSync(
-		join(agentDir, "settings.json"),
-		`${JSON.stringify(
-			{ defaultProvider: provider, defaultModel: idParts.join("/"), defaultThinkingLevel: "low" },
-			null,
-			2,
-		)}\n`,
-	);
+	const model = process.env.THINKRAIL_E2E_MODEL ?? "anthropic/claude-opus-4-8";
 
 	const prompt =
 		'Use the Agent tool with subagent_type "scout" and task "Reply with exactly the single word pong. Do not use any tools." After it returns, reply with the single word done.';
-	console.log(`smoke-pure-pi-subagents: running vanilla pi (${provider}/${idParts.join("/")}) …`);
+	console.log(`smoke-pure-pi-subagents: running vanilla omp (${model}) …`);
 	let stdout = "";
 	try {
 		stdout = execFileSync(
-			piBin,
-			["-p", "--mode", "json", "--no-session", "-e", extensionEntry, prompt],
+			ompBin,
+			[
+				"-p",
+				"--mode",
+				"json",
+				"--no-session",
+				"--model",
+				model,
+				"--thinking",
+				"low",
+				"-e",
+				extensionEntry,
+				prompt,
+			],
 			{
 				cwd: workDir,
 				env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
@@ -60,7 +62,7 @@ try {
 	} catch (error) {
 		const e = error as { stdout?: string; stderr?: string; message?: string };
 		fail(
-			`pi exited abnormally: ${e.message}\n--- stdout tail ---\n${(e.stdout ?? "").slice(-2000)}\n--- stderr tail ---\n${(e.stderr ?? "").slice(-2000)}`,
+			`omp exited abnormally: ${e.message}\n--- stdout tail ---\n${(e.stdout ?? "").slice(-2000)}\n--- stderr tail ---\n${(e.stderr ?? "").slice(-2000)}`,
 		);
 	}
 
@@ -79,7 +81,7 @@ try {
 		| undefined;
 	if (!agentEnd) {
 		fail(
-			`no Agent tool_execution_end in pi's event stream — did the extension load?\n--- stdout tail ---\n${stdout.slice(-2000)}`,
+			`no Agent tool_execution_end in omp's event stream — did the extension load?\n--- stdout tail ---\n${stdout.slice(-2000)}`,
 		);
 	}
 	if (agentEnd.isError) {
@@ -99,7 +101,7 @@ try {
 	}
 
 	console.log(
-		`smoke-pure-pi-subagents: OK — Agent tool completed under vanilla pi; ${transcripts.length} child transcript(s) in ${delegationRoot}`,
+		`smoke-pure-pi-subagents: OK — Agent tool completed under vanilla omp; ${transcripts.length} child transcript(s) in ${delegationRoot}`,
 	);
 } finally {
 	rmSync(agentDir, { recursive: true, force: true });

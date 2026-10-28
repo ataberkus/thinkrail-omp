@@ -7,7 +7,6 @@ import {
 	mcpChatFailureText,
 	mcpConfiguredExposureText,
 	mcpEntryUpdate,
-	mcpHandledElsewhereText,
 	mcpRenderedTarget,
 	mcpRowView,
 	mcpSaveFeedback,
@@ -133,7 +132,6 @@ test("each non-green state has one reason line, at most one action and one secon
 		secondary: "test-connection",
 	});
 	expect(view({ state: "replaced" }).label).toBe("Replaced by project");
-	expect(view({ state: "handled-elsewhere" }).action).toBeUndefined();
 });
 
 test("name-only primary and secondary probes require effective row authority", () => {
@@ -211,7 +209,7 @@ test("enablement and exposure route by scope: user servers send only the changed
 	expect(
 		mcpSettingWrite("ws", project, { enabled: true }, { command: "x", enabled: false }).params,
 	).toMatchObject({ entry: { command: "x" } });
-	expect(() => mcpSettingWrite("ws", project, { enabled: true }, null)).toThrow(".pi/mcp.json");
+	expect(() => mcpSettingWrite("ws", project, { enabled: true }, null)).toThrow(".omp/mcp.json");
 });
 
 test("an update or removal at either scope carries the fingerprint its row was rendered with, never a folded override's", () => {
@@ -265,17 +263,6 @@ test("save feedback never claims open chats already applied a change they are st
 	const open = "Saved — applies to open chats as they reload; a busy chat waits until it is idle.";
 	expect(mcpSaveFeedback(result([["connected"], ["connected"]]))).toBe(open);
 	expect(mcpSaveFeedback(result([["connected"], ["pending-reload"]]))).toBe(open);
-});
-
-test("the handled-elsewhere notice names the owning extension, or the pi setting to remove", () => {
-	expect(
-		mcpHandledElsewhereText(currentTranslator(), "/home/me/.pi/agent/extensions/my-mcp.ts"),
-	).toBe(
-		"MCP is handled by /home/me/.pi/agent/extensions/my-mcp.ts in this workspace; ThinkRail's MCP management is read-only.",
-	);
-	expect(mcpHandledElsewhereText(currentTranslator(), "pi settings (-builtin:mcp)")).toBe(
-		"MCP is turned off in pi settings (-builtin:mcp); remove that entry to manage servers here.",
-	);
 });
 
 test("a per-chat action reports its one chat's error as is, and names the chat when it targeted several", () => {

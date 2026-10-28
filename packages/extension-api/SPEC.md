@@ -71,6 +71,9 @@ The host retains registration, lifecycle and ordering; `define*` helpers preserv
     extension or a same-name tool from another package never becomes a host-tracked interaction.
   - `awaitToolResponse(toolCallId, signal)` resolves a `ToolResponse`: `{kind: "response", value}`,
     `{kind: "deferred"}` or `{kind: "abandoned"}`.
+  - `endRun(toolCallId)` ends the run after that call's result, before the next model request, the way
+    omp's own `yield` does; queued messages stay for the next run. omp gives extensions no such hook,
+    so the host supplies it.
 - The root is browser-safe and exposes only the web contract; it never re-exports the server half.
 - Workspace dependencies are `contracts` and, type-only, `@thinkrail/locales/react`'s `Translator`.
   React and pi are type-only contract dependencies; there are no React components, registry, DOM access,

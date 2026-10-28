@@ -1,4 +1,4 @@
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 
 export const LIMITS = {
 	nodes: 128,
@@ -319,3 +319,7 @@ export type AttemptRef = Static<typeof AttemptRefSchema>;
 export type ActivationRef = Static<typeof ActivationRefSchema>;
 export type DagSubmission = Static<typeof SubmissionSchema>;
 export type PageRequest = Static<typeof PageSchema>;
+
+export function toolParameters(schema: TSchema): Record<string, unknown> {
+	return JSON.parse(JSON.stringify(schema));
+}

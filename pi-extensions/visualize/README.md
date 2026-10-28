@@ -1,12 +1,12 @@
 # @thinkrail/pi-visualize
 
-A [pi](https://pi.dev) extension that gives the agent a `visualize` tool for **diagrams** (Mermaid),
+An [oh-my-pi](https://omp.sh) (`omp`) extension that gives the agent a `visualize` tool for **diagrams** (Mermaid),
 **option comparisons**, and **file previews** (e.g. HTML mockups, optionally as before/after), so it
 reaches for a picture instead of ASCII art or a markdown table when it explains architecture, flows,
 trade-offs, or a UI change.
 
 ```bash
-pi install npm:@thinkrail/pi-visualize
+omp plugin install @thinkrail/pi-visualize
 ```
 
 ## What you get
@@ -19,15 +19,15 @@ pi install npm:@thinkrail/pi-visualize
   way whenever it proposes a UI change. A host renders the file's current content, so a mockup the agent keeps
   editing updates every place it was shown.
 - **Terminal rendering.** Flowcharts, state, sequence, class and ER diagrams, pies, mindmaps,
-  timelines and git graphs are drawn as Unicode box-drawing right in the pi TUI, in your pi theme's
-  colours (via [`lovely-mermaid`](https://github.com/xl0/lovely-mermaid), the same engine family pi uses
+  timelines and git graphs are drawn as Unicode box-drawing right in the omp TUI, in your omp theme's
+  colours (via [`lovely-mermaid`](https://github.com/xl0/lovely-mermaid), the same engine family omp uses
   for Mermaid in chat messages). When a diagram is wider than your terminal, could only be drawn in
   part, or is a family the renderer does not know (gantt, xychart, …), the tool shows the Mermaid
   source in a code fence instead — it never wraps a diagram. Expand the tool result to see the source
   under the drawing. Comparisons render as markdown. A file preview prints the path(s) — open them in a
   browser; hosts with a file renderer (ThinkRail) render the file inline.
 - **Readable everywhere.** The tool's text result is markdown — a ```mermaid fence or a sectioned
-  comparison — so it also reads fine in `pi -p`, JSON/RPC mode, or any host without a renderer.
+  comparison — so it also reads fine in `omp -p`, JSON/RPC mode, or any host without a renderer.
 
 ## Validation — what the tool checks
 
@@ -68,8 +68,8 @@ Without `checkFile` paths are not checked (the package stays `node:`-free).
 
 ## Requirements
 
-pi ≥ the version listed under `devDependencies` in this package's `package.json` (the pi SDK packages
-are peer dependencies supplied by your pi install). Works under Node (vanilla pi) and Bun.
+omp ≥ the version listed under `devDependencies` in this package's `package.json` (the omp SDK packages
+are peer dependencies supplied by your omp install).
 
 ## License
 

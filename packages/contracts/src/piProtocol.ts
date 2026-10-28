@@ -1,4 +1,4 @@
-export type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+export type { AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 export type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -12,11 +12,14 @@ export type {
 	ToolResultMessage,
 	Usage,
 	UserMessage,
-} from "@earendil-works/pi-ai";
+} from "@oh-my-pi/pi-ai";
 
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Message, Model, StopReason, TextContent } from "@earendil-works/pi-ai";
+import type { AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, Message, Model, StopReason, TextContent } from "@oh-my-pi/pi-ai";
 import type { ProviderAuthKind } from "./domain";
+
+/** The wire's thinking vocabulary: every effort a model can run at, plus `off`. */
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const NON_EXECUTABLE_TOOL_CALL_STOP_REASONS: ReadonlySet<string> = new Set([
 	"error",
@@ -28,10 +31,9 @@ export function assistantToolCallsAreExecutable(stopReason: string | undefined):
 	return stopReason === undefined || !NON_EXECUTABLE_TOOL_CALL_STOP_REASONS.has(stopReason);
 }
 
-export type WireModel = Pick<
-	Model<string>,
-	"id" | "name" | "provider" | "contextWindow" | "reasoning"
-> & {
+export type WireModel = Pick<Model<string>, "id" | "name" | "provider" | "reasoning"> & {
+	/** Context window in tokens; 0 when the catalog does not know it. */
+	contextWindow: number;
 	thinkingLevels: ThinkingLevel[];
 	/** Per-million-token list prices; absent from hosts older than the picker-metadata protocol. */
 	cost?: { input: number; output: number };

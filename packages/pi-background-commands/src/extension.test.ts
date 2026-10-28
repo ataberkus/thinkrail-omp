@@ -1,23 +1,30 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { join } from "node:path";
 import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
-import {
+	type AgentSession,
+	type AgentSessionEvent,
 	createAgentSession,
-	createBashToolDefinition,
-	DefaultResourceLoader,
+	type ExtensionAPI,
 	type ExtensionContext,
 	type ExtensionFactory,
-	ModelRuntime,
+	type ExtensionRunner,
 	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+	Settings,
+	type TurnEndEvent,
+	z,
+} from "@oh-my-pi/pi-coding-agent";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+	registerFaux,
+} from "pi-faux";
 import backgroundCommandsExtension, {
 	BACKGROUND_COMMAND_COMPLETION_MESSAGE,
 	type BackgroundCommandContext,
@@ -27,14 +34,10 @@ import backgroundCommandsExtension, {
 import { controlledOperations, waitFor } from "./test-support";
 
 const cwd = mkdtempSync(join(tmpdir(), "pi-background-"));
+const agentDir = join(cwd, "agent");
 
-function environmentPathKey(env: NodeJS.ProcessEnv): string {
-	return Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-}
-
-let priorAgentDir: string | undefined;
+let agentDirIsolation: IsolatedAgentDir | undefined;
 let priorOffline: string | undefined;
-let runtime: ModelRuntime;
 const faux = createFauxCore({
 	provider: "background-test",
 	api: "background-test",
@@ -52,306 +55,261 @@ const faux = createFauxCore({
 	tokensPerSecond: 4000,
 });
 
-beforeAll(async () => {
-	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = cwd;
+beforeAll(() => {
+	agentDirIsolation = isolateAgentDir(agentDir);
 	priorOffline = process.env.PI_OFFLINE;
 	process.env.PI_OFFLINE = "1";
-	runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	runtime.registerProvider("background-test", {
-		api: faux.api,
-		baseUrl: "http://faux.local",
-		apiKey: "faux",
-		streamSimple: faux.streamSimple,
-		models: [
-			{
-				id: "background-test",
-				name: "background-test",
-				reasoning: true,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 100000,
-				maxTokens: 4096,
-			},
-		],
-	});
 });
 
 afterAll(() => {
-	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+	agentDirIsolation?.restore();
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
 	rmSync(cwd, { recursive: true, force: true });
 });
 
+type ThinkingSelection = NonNullable<Parameters<AgentSession["setThinkingLevel"]>[0]>;
+
+function isThinking(value: string): value is ThinkingSelection {
+	return ["off", "minimal", "low", "medium", "high", "xhigh"].includes(value);
+}
+
+function thinking(value: string): ThinkingSelection {
+	if (!isThinking(value)) throw new Error(`Unknown thinking level ${value}`);
+	return value;
+}
+
 async function makeSession(
 	factory: ExtensionFactory = backgroundCommandsExtension,
 	sessionManager = SessionManager.inMemory(cwd),
 	extraFactories: ExtensionFactory[] = [],
+	overrides: Record<string, unknown> = {},
 ) {
-	const settingsManager = SettingsManager.inMemory({
-		compaction: { enabled: false },
-		retry: { enabled: false },
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		...overrides,
 	});
-	const loader = new DefaultResourceLoader({
-		cwd,
-		agentDir: cwd,
-		settingsManager,
-		extensionFactories: [factory, ...extraFactories],
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await loader.reload();
-	const model = runtime.getModel("background-test", "background-test");
-	if (!model) throw new Error("Missing model");
+	const { authStorage, modelRegistry } = await createFauxModelRegistry(settings);
+	const model = registerFaux(modelRegistry, faux);
 	const { session } = await createAgentSession({
 		cwd,
-		modelRuntime: runtime,
+		agentDir,
+		settings,
+		authStorage,
+		modelRegistry,
 		model,
-		settingsManager,
 		sessionManager,
-		resourceLoader: loader,
+		extensions: [factory, ...extraFactories],
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
 	});
-	await session.bindExtensions({
-		mode: "print",
-		onError: (error) => {
-			throw new Error(error.error);
-		},
+	await initializeExtensions(session, {
+		reportSendError: () => {},
+		reportRuntimeError: () => {},
 	});
 	return session;
+}
+
+function runner(session: AgentSession): ExtensionRunner {
+	const extensionRunner = session.extensionRunner;
+	if (!extensionRunner) throw new Error("Missing extension runner");
+	return extensionRunner;
+}
+
+function completionMessages(session: AgentSession) {
+	return session.messages.filter(
+		(m) => m.role === "custom" && m.customType === BACKGROUND_COMMAND_COMPLETION_MESSAGE,
+	);
+}
+
+function toolTurn(...calls: ReturnType<typeof fauxToolCall>[]) {
+	return fauxAssistantMessage(calls, { stopReason: "toolUse" });
+}
+
+function startCommand(command: string) {
+	return toolTurn(fauxToolCall("background_command", { action: "start", command }));
 }
 
 test("vanilla Pi calls the real command tool, acknowledges immediately, and receives a natural follow-up", async () => {
 	const session = await makeSession();
 	try {
+		expect(session.getActiveToolNames()).toContain("background_command");
 		faux.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall("background_command", {
-					action: "start",
-					command: "sleep 0.1; printf REAL_RESULT",
-				}),
-			),
+			startCommand("sleep 0.1; printf REAL_RESULT"),
 			fauxAssistantMessage("ACKNOWLEDGED"),
 			fauxAssistantMessage("SAW_COMPLETION"),
 		]);
 		await session.prompt("Start a managed command.");
 		await waitFor(() => JSON.stringify(session.messages).includes("SAW_COMPLETION"));
-		const custom = session.messages.find(
-			(message) =>
-				message.role === "custom" && message.customType === BACKGROUND_COMMAND_COMPLETION_MESSAGE,
-		);
+		const custom = completionMessages(session)[0];
 		expect(custom).toMatchObject({ role: "custom", display: true });
 		expect(JSON.stringify(custom)).toContain("REAL_RESULT");
 		expect(session.getActiveToolNames()).toContain("bash");
-		expect(session.getToolDefinition("bash")?.description).not.toContain("background");
+		expect(session.getToolByName("bash")?.description).not.toContain("background_command");
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		session.dispose();
+		await session.dispose();
 	}
 });
 
-test("injected jobs survive resource reload; a completion in the gap replays once into the new binding", async () => {
+test("injected jobs survive a session reopen; a completion in the gap replays once into the new binding", async () => {
 	const executor = controlledOperations();
-	const sm = SessionManager.inMemory(cwd);
-	const service = createBackgroundCommands(
-		{ sessionId: sm.getSessionId(), getContext: () => ({ cwd }) },
-		executor,
-	);
-	const session = await makeSession(createBackgroundCommandsExtension({ service }), sm);
+	const sessionDir = join(cwd, "sessions");
+	mkdirSync(sessionDir, { recursive: true });
+	const sm = SessionManager.create(cwd, sessionDir);
+	const sessionId = sm.getSessionId();
+	const service = createBackgroundCommands({ sessionId, getContext: () => ({ cwd }) }, executor);
+	const first = await makeSession(createBackgroundCommandsExtension({ service }), sm);
+	let second: AgentSession | undefined;
+	let third: AgentSession | undefined;
 	try {
 		faux.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall("background_command", { action: "start", command: "gated" }),
-			),
+			startCommand("gated"),
 			fauxAssistantMessage("ACK"),
 			fauxAssistantMessage("REPLAYED"),
 		]);
-		await session.prompt("Start.");
-		await session.reload({
-			beforeSessionStart: async () => {
-				expect(executor.call().options.signal?.aborted).toBe(false);
-				executor.call().resolve({ exitCode: 0 });
-				await waitFor(() => service.list()[0]?.status === "completed");
-				expect(JSON.stringify(session.messages)).not.toContain(
-					BACKGROUND_COMMAND_COMPLETION_MESSAGE,
-				);
-			},
-		});
-		await waitFor(() => JSON.stringify(session.messages).includes("REPLAYED"));
-		await session.reload();
-		expect(
-			session.messages.filter(
-				(m) => m.role === "custom" && m.customType === BACKGROUND_COMMAND_COMPLETION_MESSAGE,
-			),
-		).toHaveLength(1);
+		await first.prompt("Start.");
+		const sessionFile = first.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Missing session file");
+		await first.dispose();
+		expect(executor.call().options.signal.aborted).toBe(false);
+		executor.call().resolve({ exitCode: 0 });
+		await waitFor(() => service.list()[0]?.status === "completed");
+		second = await makeSession(
+			createBackgroundCommandsExtension({ service }),
+			await SessionManager.open(sessionFile, sessionDir),
+		);
+		expect(second.sessionId).toBe(sessionId);
+		const reopened = second;
+		await waitFor(() => JSON.stringify(reopened.messages).includes("REPLAYED"));
+		await reopened.waitForIdle();
+		await reopened.dispose();
+		third = await makeSession(
+			createBackgroundCommandsExtension({ service }),
+			await SessionManager.open(sessionFile, sessionDir),
+		);
+		await macrotask();
+		expect(completionMessages(third)).toHaveLength(1);
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await third?.dispose();
 		await service.dispose();
-		session.dispose();
 	}
 });
 
-test("current shell env matches Pi bash including managed-bin PATH, stale marker removal and live model settings", async () => {
+function envDigest(text: string): string {
+	return text.trim().split("\n").at(-1)?.trim() ?? "";
+}
+
+test("the launch environment matches the engine bash tool plus current session and model markers", async () => {
 	let context: ExtensionContext | undefined;
-	const session = await makeSession(backgroundCommandsExtension, SessionManager.inMemory(cwd), [
+	const executor = controlledOperations();
+	const sm = SessionManager.inMemory(cwd);
+	let launchContext: BackgroundCommandContext = { cwd };
+	const injected = createBackgroundCommands(
+		{ sessionId: sm.getSessionId(), getContext: () => launchContext },
+		executor,
+	);
+	const real = createBackgroundCommands({
+		sessionId: sm.getSessionId(),
+		getContext: () => launchContext,
+	});
+	const session = await makeSession(createBackgroundCommandsExtension({ service: real }), sm, [
 		(pi) => {
 			pi.on("session_start", (_event, ctx) => {
 				context = ctx;
 			});
 		},
 	]);
-	const stale = [
-		"PI_SESSION_ID",
-		"PI_SESSION_FILE",
-		"PI_PROVIDER",
-		"PI_MODEL",
-		"PI_REASONING_LEVEL",
-	];
-	const saved = stale.map((key) => [key, process.env[key]] as const);
-	const processPathKey = environmentPathKey(process.env);
-	const previousPath = process.env[processPathKey];
-	const executor = controlledOperations();
-	let launchContext: BackgroundCommandContext = { cwd };
-	const service = createBackgroundCommands(
-		{ sessionId: session.sessionId, getContext: () => launchContext },
-		executor,
-	);
 	try {
 		if (!context) throw new Error("Missing context");
-		for (const key of stale) process.env[key] = "stale-other-session";
-		process.env[processPathKey] = `/unrelated${delimiter}${previousPath ?? ""}`;
-		session.setThinkingLevel("high");
-		let nativeEnv: NodeJS.ProcessEnv | undefined;
-		const bash = createBashToolDefinition(cwd, {
-			operations: {
-				exec: async (_command, _cwd, options) => {
-					nativeEnv = options.env;
-					return { exitCode: 0 };
-				},
-			},
-		});
-		await bash.execute(
-			"parity",
-			{ command: "ignored" },
-			undefined,
-			undefined,
-			session.extensionRunner.createToolContext("parity", undefined),
-		);
+		session.setThinkingLevel(thinking("high"));
+		const digest =
+			"env | grep -v -e '^PI_PROVIDER=' -e '^PI_MODEL=' -e '^PI_REASONING_LEVEL=' -e '^_=' | sort | cksum";
+		faux.setResponses([
+			toolTurn(fauxToolCall("bash", { command: digest })),
+			fauxAssistantMessage("NATIVE_DONE"),
+		]);
+		await session.prompt("Run the native digest.");
+		const nativeResult = session.messages.filter((m) => m.role === "toolResult").at(-1);
+		if (nativeResult?.role !== "toolResult") throw new Error("Missing native result");
+		const nativeText = nativeResult.content
+			.flatMap((c) => (c.type === "text" ? [c.text] : []))
+			.join("");
+		const nativeDigest = envDigest(nativeText.split("\n\n")[0] ?? "");
+		expect(nativeDigest).toMatch(/^\d+ \d+$/);
+		const sessionFile = context.sessionManager.getSessionFile();
 		launchContext = {
 			cwd,
 			model: context.model,
-			thinkingLevel: context.thinkingLevel,
-			sessionFile: context.sessionManager.getSessionFile(),
+			thinkingLevel: session.thinkingLevel,
+			sessionFile,
 		};
-		service.start({ command: "first" });
-		expect(executor.call().options.env).toEqual(nativeEnv);
-		const firstEnv = executor.call().options.env;
-		expect(firstEnv?.[environmentPathKey(firstEnv)]?.split(delimiter)[0]).toBe(join(cwd, "bin"));
-		expect(executor.call().options.env?.PI_REASONING_LEVEL).toBe("high");
-		expect(executor.call().options.env?.PI_SESSION_FILE).toBeUndefined();
-		executor.call().resolve({ exitCode: 0 });
-		process.env[processPathKey] = `${join(cwd, "bin")}${delimiter}${previousPath ?? ""}`;
-		session.setThinkingLevel("low");
-		await bash.execute(
-			"parity2",
-			{ command: "ignored" },
-			undefined,
-			undefined,
-			session.extensionRunner.createToolContext("parity2", undefined),
-		);
-		launchContext = { cwd, model: context.model, thinkingLevel: context.thinkingLevel };
-		service.start({ command: "second" });
-		expect(executor.call(1).options.env).toEqual(nativeEnv);
-		expect(executor.call(1).options.env?.PI_REASONING_LEVEL).toBe("low");
-		executor.call(1).resolve({ exitCode: 0 });
-		launchContext = { cwd, exposeSessionEnvironment: false };
-		const privateBash = createBashToolDefinition(cwd, {
-			exposeSessionEnvironment: false,
-			operations: {
-				exec: async (_command, _cwd, options) => {
-					nativeEnv = options.env;
-					return { exitCode: 0 };
-				},
-			},
+		const handle = real.start({ command: digest });
+		const markers = real.start({
+			command:
+				'printf \'%s|%s|%s|%s\' "$PI_SESSION_ID" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"',
 		});
-		await privateBash.execute(
-			"private",
-			{ command: "ignored" },
-			undefined,
-			undefined,
-			session.extensionRunner.createToolContext("private", undefined),
+		await waitFor(
+			() => handle.snapshot.finishedAt !== undefined && markers.snapshot.finishedAt !== undefined,
 		);
-		service.start({ command: "private" });
-		expect(executor.call(2).options.env).toEqual(nativeEnv);
-		executor.call(2).resolve({ exitCode: 0 });
+		expect(envDigest(handle.output?.text ?? "")).toBe(nativeDigest);
+		expect(markers.output?.text).toBe(`${session.sessionId}|background-test|background-test|high`);
+		launchContext = { cwd };
+		injected.start({ command: "unmodelled" });
+		expect(executor.call().options.env).toEqual({
+			PI_SESSION_ID: session.sessionId,
+			PI_SESSION_FILE: "",
+			PI_PROVIDER: "",
+			PI_MODEL: "",
+			PI_REASONING_LEVEL: "",
+		});
+		launchContext = {
+			cwd,
+			model: context.model,
+			thinkingLevel: session.thinkingLevel,
+			exposeSessionEnvironment: false,
+		};
+		injected.start({ command: "private" });
+		expect(Object.values(executor.call(1).options.env).every((value) => value === "")).toBe(true);
+		for (const call of executor.calls) call.resolve({ exitCode: 0 });
 	} finally {
-		for (const [key, value] of saved) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-		if (previousPath === undefined) delete process.env[processPathKey];
-		else process.env[processPathKey] = previousPath;
-		await service.dispose();
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		session.dispose();
+		await injected.dispose();
+		await session.dispose();
+		await real.dispose();
 	}
 });
 
-test("standalone launches read current trusted shell settings, never an untrusted project prefix", async () => {
-	const projectDir = join(cwd, ".pi");
-	const globalSettingsPath = join(cwd, "settings.json");
-	const projectSettingsPath = join(projectDir, "settings.json");
-	mkdirSync(projectDir, { recursive: true });
-	writeFileSync(
-		globalSettingsPath,
-		JSON.stringify({ shellCommandPrefix: "export BG_SCOPE=global" }),
-	);
-	writeFileSync(
-		projectSettingsPath,
-		JSON.stringify({ shellCommandPrefix: "export BG_SCOPE=project" }),
-	);
-	const session = await makeSession();
+test("standalone launches read current session values at each launch and never a legacy settings prefix", async () => {
+	const session = await makeSession(backgroundCommandsExtension, SessionManager.inMemory(cwd), [], {
+		shellCommandPrefix: "export BG_SCOPE=legacy",
+	});
 	try {
 		const invoke = async (expected: string) => {
 			faux.setResponses([
-				fauxAssistantMessage(
-					fauxToolCall("background_command", {
-						action: "start",
-						command:
-							'sleep 0.05; printf \'%s:%s:%s\' "$BG_SCOPE" "$PI_SESSION_ID" "$PI_REASONING_LEVEL"',
-					}),
+				startCommand(
+					'sleep 0.05; printf \'[%s]:%s:%s\' "$BG_SCOPE" "$PI_SESSION_ID" "$PI_REASONING_LEVEL"',
 				),
 				fauxAssistantMessage("ACK"),
 				fauxAssistantMessage(`CHECKED_${expected}`),
 			]);
 			await session.prompt("Start using the current shell context.");
 			await waitFor(() => JSON.stringify(session.messages).includes(`CHECKED_${expected}`));
-			const last = session.messages.filter((m) => m.role === "custom").at(-1);
-			expect(JSON.stringify(last)).toContain(`${expected}:${session.sessionId}:low`);
+			const last = completionMessages(session).at(-1);
+			expect(JSON.stringify(last)).toContain(`[]:${session.sessionId}:${expected}`);
+			await session.waitForIdle();
 		};
-		session.setThinkingLevel("low");
-		session.settingsManager.setProjectTrusted(false);
-		await invoke("global");
-		session.settingsManager.setProjectTrusted(true);
-		await invoke("project");
-		writeFileSync(
-			projectSettingsPath,
-			JSON.stringify({ shellCommandPrefix: "export BG_SCOPE=edited" }),
-		);
-		await invoke("edited");
+		session.setThinkingLevel(thinking("low"));
+		await invoke("low");
+		session.setThinkingLevel(thinking("high"));
+		await invoke("high");
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		session.dispose();
-		rmSync(projectDir, { recursive: true, force: true });
-		rmSync(globalSettingsPath, { force: true });
+		await session.dispose();
 	}
 });
 
@@ -365,7 +323,7 @@ test("tool and user stop display cancellation without waking an idle parent; out
 	const session = await makeSession(createBackgroundCommandsExtension({ service }), sm);
 	try {
 		faux.setResponses([
-			fauxAssistantMessage(
+			toolTurn(
 				fauxToolCall("background_command", {
 					action: "start",
 					command: "stop me",
@@ -379,9 +337,9 @@ test("tool and user stop display cancellation without waking an idle parent; out
 		if (!id) throw new Error("Missing command");
 		executor.call().options.onData(Buffer.from("recent logs"));
 		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "list" })),
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "output", id })),
-			fauxAssistantMessage(fauxToolCall("background_command", { action: "stop", id })),
+			toolTurn(fauxToolCall("background_command", { action: "list" })),
+			toolTurn(fauxToolCall("background_command", { action: "output", id })),
+			toolTurn(fauxToolCall("background_command", { action: "stop", id })),
 			fauxAssistantMessage("STOP_REQUEST_ACK"),
 		]);
 		await session.prompt("Inspect and stop.");
@@ -390,6 +348,7 @@ test("tool and user stop display cancellation without waking an idle parent; out
 		const calls = faux.state.callCount;
 		executor.call().reject(new Error("aborted"));
 		await waitFor(() => service.find(id)?.snapshot.status === "stopped");
+		await waitFor(() => completionMessages(session).length === 1);
 		await Bun.sleep(30);
 		expect(faux.state.callCount).toBe(calls);
 		expect(JSON.stringify(session.messages)).toContain("Cancelled background command");
@@ -397,16 +356,13 @@ test("tool and user stop display cancellation without waking an idle parent; out
 		second.stop();
 		executor.call(1).resolve({ exitCode: null });
 		await waitFor(() => second.snapshot.status === "stopped");
+		await waitFor(() => completionMessages(session).length === 2);
+		await Bun.sleep(30);
 		expect(faux.state.callCount).toBe(calls);
-		expect(
-			session.messages.filter(
-				(m) => m.role === "custom" && m.customType === BACKGROUND_COMMAND_COMPLETION_MESSAGE,
-			),
-		).toHaveLength(2);
+		expect(completionMessages(session)).toHaveLength(2);
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await session.dispose();
 		await service.dispose({ timeoutMs: 10 });
-		session.dispose();
 	}
 });
 
@@ -420,9 +376,7 @@ test("a detached command survives the parent-turn signal and reports after paren
 	const session = await makeSession(createBackgroundCommandsExtension({ service }), sm);
 	try {
 		faux.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall("background_command", { action: "start", command: "survive" }),
-			),
+			startCommand("survive"),
 			async () => {
 				await Bun.sleep(150);
 				return fauxAssistantMessage("SLOW_ACK");
@@ -435,13 +389,12 @@ test("a detached command survives the parent-turn signal and reports after paren
 		await waitFor(() => faux.state.callCount >= callsBefore + 2);
 		await session.abort();
 		await prompted;
-		expect(executor.call().options.signal?.aborted).toBe(false);
+		expect(executor.call().options.signal.aborted).toBe(false);
 		executor.call().resolve({ exitCode: 0 });
 		await waitFor(() => JSON.stringify(session.messages).includes("AFTER_ABORT_COMPLETION"));
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await session.dispose();
 		await service.dispose({ timeoutMs: 10 });
-		session.dispose();
 	}
 });
 
@@ -449,21 +402,19 @@ test("standalone shutdown kills owned process trees silently", async () => {
 	const session = await makeSession();
 	const heartbeat = join(cwd, "descendant-heartbeat");
 	const beats = () => (existsSync(heartbeat) ? statSync(heartbeat).size : 0);
+	let disposed = false;
 	try {
 		faux.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall("background_command", {
-					action: "start",
-					command: `sh -c '(while :; do printf . >> "${heartbeat}"; sleep 0.1; done) & wait'`,
-				}),
-			),
+			startCommand(`sh -c '(while :; do printf . >> "${heartbeat}"; sleep 0.1; done) & wait'`),
 			fauxAssistantMessage("ACK"),
 			fauxAssistantMessage("MUST_NOT_WAKE"),
 		]);
 		await session.prompt("Start until shutdown.");
 		await waitFor(() => beats() > 0, 5000);
 		const calls = faux.state.callCount;
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		const messages = session.messages;
+		await session.dispose();
+		disposed = true;
 		const deadline = Date.now() + 10_000;
 		let seen = beats();
 		let quietSince = Date.now();
@@ -476,10 +427,10 @@ test("standalone shutdown kills owned process trees silently", async () => {
 			}
 		}
 		expect(faux.state.callCount).toBe(calls);
+		expect(JSON.stringify(messages)).not.toContain(BACKGROUND_COMMAND_COMPLETION_MESSAGE);
 		expect(JSON.stringify(session.messages)).not.toContain(BACKGROUND_COMMAND_COMPLETION_MESSAGE);
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		session.dispose();
+		if (!disposed) await session.dispose();
 	}
 }, 20_000);
 
@@ -501,26 +452,26 @@ test("deletion tombstones defer bounded completion messages until rollback, with
 		executor.call().options.onData(Buffer.from("🦊".repeat(20000)));
 		executor.call().resolve({ exitCode: 0 });
 		await waitFor(() => command.snapshot.status === "completed");
+		await macrotask();
 		expect(session.messages.filter((m) => m.role === "custom")).toHaveLength(0);
 		faux.setResponses([fauxAssistantMessage("AFTER_ROLLBACK")]);
 		canDeliver = true;
 		service.flushCompletions();
 		await waitFor(() => JSON.stringify(session.messages).includes("AFTER_ROLLBACK"));
-		const message = session.messages.find(
-			(m) => m.role === "custom" && m.customType === BACKGROUND_COMMAND_COMPLETION_MESSAGE,
-		);
+		const message = completionMessages(session)[0];
 		if (message?.role !== "custom" || typeof message.content !== "string")
 			throw new Error("Missing completion");
 		expect(Buffer.byteLength(message.content)).toBeLessThan(5000);
 		expect(message.content).toContain("truncated");
 		expect(message.content).not.toContain("�");
 		expect(JSON.stringify(message)).not.toContain("x".repeat(64000));
+		await session.waitForIdle();
 		service.flushCompletions();
+		await macrotask();
 		expect(session.messages.filter((m) => m.role === "custom")).toHaveLength(1);
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await session.dispose();
 		await service.dispose({ timeoutMs: 10 });
-		session.dispose();
 	}
 });
 
@@ -551,7 +502,7 @@ test("tool actions reject cross-action inputs and unknown or foreign identities"
 			{ action: "stop", pid: 123 },
 		]) {
 			faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("background_command", input)),
+				toolTurn(fauxToolCall("background_command", input)),
 				fauxAssistantMessage("HANDLED"),
 			]);
 			await session.prompt("Try an invalid call.");
@@ -561,13 +512,12 @@ test("tool actions reject cross-action inputs and unknown or foreign identities"
 			expect(executor.calls).toHaveLength(1);
 		}
 		expect(foreign.snapshot.status).toBe("running");
-		expect(executor.call().options.signal?.aborted).toBe(false);
+		expect(executor.call().options.signal.aborted).toBe(false);
 	} finally {
 		executor.call().resolve({ exitCode: 0 });
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await session.dispose();
 		await service.dispose();
 		await other.dispose();
-		session.dispose();
 	}
 });
 
@@ -575,22 +525,24 @@ function macrotask(): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-type Session = Awaited<ReturnType<typeof makeSession>>;
-
-function commandDeliveries(session: Session) {
+function commandDeliveries(session: AgentSession) {
 	return session.sessionManager
 		.getEntries()
 		.flatMap((entry) =>
-			entry.type === "custom_message" && entry.customType === BACKGROUND_COMMAND_COMPLETION_MESSAGE
-				? [(entry.details as { delivery?: string }).delivery]
+			entry.type === "custom_message" &&
+			entry.customType === BACKGROUND_COMMAND_COMPLETION_MESSAGE &&
+			typeof entry.details === "object" &&
+			entry.details !== null &&
+			"delivery" in entry.details
+				? [entry.details.delivery]
 				: [],
 		);
 }
 
-function countSettles(session: Session) {
+function countSettles(session: AgentSession) {
 	const counter = { settles: 0 };
-	session.subscribe((event) => {
-		if (event.type === "agent_settled") counter.settles++;
+	session.subscribe((event: AgentSessionEvent) => {
+		if (event.type === "agent_end" && event.isTerminal) counter.settles++;
 	});
 	return counter;
 }
@@ -610,39 +562,28 @@ async function injected(canDeliverCompletion?: () => boolean) {
 		sm,
 	);
 	const finish = async (index: number, text: string, exitCode = 0) => {
-		executor.call(index).options.onData?.(Buffer.from(text));
+		executor.call(index).options.onData(Buffer.from(text));
 		executor.call(index).resolve({ exitCode });
 		await waitFor(() => service.list()[index]?.finishedAt !== undefined);
 		await macrotask();
 	};
 	const close = async () => {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await session.dispose();
 		await service.dispose();
-		session.dispose();
 	};
 	return { executor, service, session, finish, close };
 }
 
-async function waitForListed(session: Session, status: string): Promise<void> {
-	const tool = session.getToolDefinition("background_command");
+async function waitForListed(session: AgentSession, status: string): Promise<void> {
+	const tool = session.getToolByName("background_command");
 	if (!tool) throw new Error("Missing background_command");
 	const deadline = Date.now() + 10_000;
 	for (;;) {
-		const listed = await tool.execute(
-			"probe",
-			{ action: "list" },
-			undefined,
-			undefined,
-			session.extensionRunner.createToolContext("probe", undefined),
-		);
+		const listed = await tool.execute("probe", { action: "list" });
 		if (JSON.stringify(listed.content).includes(`: ${status}`)) return;
 		if (Date.now() > deadline) throw new Error(`No command reached ${status}`);
 		await Bun.sleep(20);
 	}
-}
-
-function startCommand(command: string) {
-	return fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }));
 }
 
 test("a command finishing during a tool turn reaches the next request of the same run", async () => {
@@ -654,7 +595,7 @@ test("a command finishing during a tool turn reaches the next request of the sam
 			startCommand("work"),
 			async () => {
 				await finish(0, "CMD_DONE");
-				return fauxAssistantMessage(fauxToolCall("background_command", { action: "list" }));
+				return toolTurn(fauxToolCall("background_command", { action: "list" }));
 			},
 			(context) => {
 				sawReport = JSON.stringify(context.messages).includes("CMD_DONE");
@@ -662,6 +603,7 @@ test("a command finishing during a tool turn reaches the next request of the sam
 			},
 		]);
 		await session.prompt("Start and keep working.");
+		await session.waitForIdle();
 		await macrotask();
 		expect(sawReport).toBe(true);
 		expect(counter.settles).toBe(1);
@@ -672,6 +614,78 @@ test("a command finishing during a tool turn reaches the next request of the sam
 	}
 });
 
+test("a command deliverable only once a tool returns joins the request right after its batch", async () => {
+	const executor = controlledOperations();
+	const sm = SessionManager.inMemory(cwd);
+	const service = createBackgroundCommands(
+		{ sessionId: sm.getSessionId(), getContext: () => ({ cwd }) },
+		executor,
+	);
+	let open = false;
+	const stepStarted = Promise.withResolvers<void>();
+	const startTurnHandled = Promise.withResolvers<void>();
+	const startTurn = (event: TurnEndEvent) =>
+		event.toolResults.some((result) => result.toolName === "background_command");
+	const slowTurnEnds: ExtensionFactory = (pi) => {
+		pi.on("turn_end", async (event) => {
+			if (startTurn(event)) await stepStarted.promise;
+			else await Bun.sleep(50);
+		});
+	};
+	const gatedStep: ExtensionFactory = (pi) => {
+		pi.on("turn_end", (event) => {
+			if (startTurn(event)) startTurnHandled.resolve();
+		});
+		pi.registerTool({
+			name: "gated_step",
+			label: "Gated step",
+			description: "Finishes the background command, then opens the delivery gate",
+			parameters: z.object({}),
+			loadMode: "essential",
+			async execute() {
+				stepStarted.resolve();
+				await startTurnHandled.promise;
+				executor.call(0).options.onData(Buffer.from("BATCH_DONE"));
+				executor.call(0).resolve({ exitCode: 0 });
+				await waitFor(() => service.list()[0]?.finishedAt !== undefined);
+				await macrotask();
+				open = true;
+				return { content: [{ type: "text", text: "GATED_RESULT" }], details: {} };
+			},
+		});
+	};
+	const session = await makeSession(slowTurnEnds, sm, [
+		createBackgroundCommandsExtension({ service, canDeliverCompletion: () => open }),
+		gatedStep,
+	]);
+	let sawReport = false;
+	try {
+		faux.setResponses([
+			startCommand("work"),
+			toolTurn(fauxToolCall("gated_step", {})),
+			(context) => {
+				sawReport = JSON.stringify(context.messages).includes("BATCH_DONE");
+				return fauxAssistantMessage("DONE");
+			},
+			fauxAssistantMessage("LATE_ASIDE"),
+		]);
+		const before = faux.state.callCount;
+		await session.prompt("Start, then take the gated step.");
+		await session.waitForIdle();
+		await macrotask();
+		expect(sawReport).toBe(true);
+		expect(faux.state.callCount - before).toBe(3);
+		expect(commandDeliveries(session)).toEqual(["run"]);
+		const tail = session.messages.slice(-3);
+		expect(tail.map((m) => m.role)).toEqual(["toolResult", "custom", "assistant"]);
+		expect(JSON.stringify(tail[0])).toContain("GATED_RESULT");
+		expect(JSON.stringify(session.messages)).not.toContain("LATE_ASIDE");
+	} finally {
+		await session.dispose();
+		await service.dispose();
+	}
+});
+
 test("a finished command whose output the model read is never reported again", async () => {
 	const { service, session, finish, close } = await injected();
 	try {
@@ -679,7 +693,7 @@ test("a finished command whose output the model read is never reported again", a
 			startCommand("work"),
 			async () => {
 				await finish(0, "CMD_OUTPUT", 3);
-				return fauxAssistantMessage(
+				return toolTurn(
 					fauxToolCall("background_command", { action: "output", id: service.list()[0]?.id ?? "" }),
 				);
 			},
@@ -688,6 +702,7 @@ test("a finished command whose output the model read is never reported again", a
 		]);
 		const before = faux.state.callCount;
 		await session.prompt("Start, then read the output.");
+		await session.waitForIdle();
 		await macrotask();
 		expect(commandDeliveries(session)).toEqual([]);
 		expect(faux.state.callCount - before).toBe(3);
@@ -728,10 +743,10 @@ test("commands released to an idle parent together wake exactly one run", async 
 	let reports = 0;
 	try {
 		faux.setResponses([
-			fauxAssistantMessage([
+			toolTurn(
 				fauxToolCall("background_command", { action: "start", command: "one" }),
 				fauxToolCall("background_command", { action: "start", command: "two" }),
-			]),
+			),
 			fauxAssistantMessage("STARTED"),
 			(context) => {
 				const text = JSON.stringify(context.messages);
@@ -801,10 +816,10 @@ test("several commands held when the user stops the parent are all shown without
 	});
 	try {
 		faux.setResponses([
-			fauxAssistantMessage([
+			toolTurn(
 				fauxToolCall("background_command", { action: "start", command: "one" }),
 				fauxToolCall("background_command", { action: "start", command: "two" }),
-			]),
+			),
 			async (_context, options) => {
 				await finish(0, "FIRST_HELD");
 				await finish(1, "SECOND_HELD");
@@ -844,28 +859,29 @@ test("a rejected waking send keeps the wake for the retry instead of losing it",
 		service,
 		canDeliverCompletion: () => allowed,
 	});
-	const session = await makeSession(
-		(pi) =>
-			extension({
-				...pi,
-				sendMessage: (message, options) => {
-					if (options?.triggerTurn && rejectWake) {
-						rejectWake = false;
-						throw new Error("runtime unavailable");
-					}
-					pi.sendMessage(message, options);
-				},
+	const session = await makeSession((pi) => {
+		const sendMessage: ExtensionAPI["sendMessage"] = (message, options) => {
+			if (options?.triggerTurn && rejectWake) {
+				rejectWake = false;
+				throw new Error("runtime unavailable");
+			}
+			pi.sendMessage(message, options);
+		};
+		return extension(
+			new Proxy(pi, {
+				get: (target, key, receiver) =>
+					key === "sendMessage" ? sendMessage : Reflect.get(target, key, receiver),
 			}),
-		sm,
-	);
+		);
+	}, sm);
 	const counter = countSettles(session);
 	let sawNatural = false;
 	try {
 		faux.setResponses([
-			fauxAssistantMessage([
+			toolTurn(
 				fauxToolCall("background_command", { action: "start", command: "natural" }),
 				fauxToolCall("background_command", { action: "start", command: "stopped" }),
-			]),
+			),
 			fauxAssistantMessage("STARTED"),
 			(context) => {
 				sawNatural = JSON.stringify(context.messages).includes("NATURAL_RESULT");
@@ -873,13 +889,16 @@ test("a rejected waking send keeps the wake for the retry instead of losing it",
 			},
 		]);
 		await session.prompt("Start two.");
-		executor.call(0).options.onData?.(Buffer.from("NATURAL_RESULT"));
+		await macrotask();
+		executor.call(0).options.onData(Buffer.from("NATURAL_RESULT"));
 		executor.call(0).resolve({ exitCode: 0 });
-		service.list()[1] && service.find(service.list()[1]?.id ?? "")?.stop();
+		service.find(service.list()[1]?.id ?? "")?.stop();
 		executor.call(1).resolve({ exitCode: null });
 		await waitFor(() => service.list().every((snapshot) => snapshot.finishedAt !== undefined));
 		allowed = true;
 		service.flushCompletions();
+		await waitFor(() => commandDeliveries(session).length === 1);
+		await macrotask();
 		expect(commandDeliveries(session)).toHaveLength(1);
 		expect(counter.settles).toBe(1);
 		service.flushCompletions();
@@ -887,9 +906,8 @@ test("a rejected waking send keeps the wake for the retry instead of losing it",
 		expect(sawNatural).toBe(true);
 		expect(commandDeliveries(session)).toHaveLength(2);
 	} finally {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await session.dispose();
 		await service.dispose();
-		session.dispose();
 	}
 });
 
@@ -921,15 +939,16 @@ test("one factory serving two sessions keeps each session's Stop to itself", asy
 		await macrotask();
 		faux.setResponses([fauxAssistantMessage("SECOND_ANSWER")]);
 		await second.prompt("An unrelated question in another chat.");
+		await second.waitForIdle();
 		const calls = faux.state.callCount;
 		faux.setResponses([fauxAssistantMessage("FIRST_WOKE")]);
 		allowed = true;
-		await first.extensionRunner.emit({
-			type: "session_compact_failed",
-			reason: "manual",
+		await runner(first).emit({
+			type: "auto_compaction_end",
+			action: "context-full",
+			result: undefined,
 			aborted: true,
 			willRetry: false,
-			fromExtension: false,
 		});
 		await waitFor(() => commandDeliveries(first).length === 1);
 		await macrotask();
@@ -937,9 +956,7 @@ test("one factory serving two sessions keeps each session's Stop to itself", asy
 		expect(faux.state.callCount).toBe(calls);
 		expect(JSON.stringify(first.messages)).not.toContain("FIRST_WOKE");
 	} finally {
-		await first.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		await second.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		first.dispose();
-		second.dispose();
+		await first.dispose();
+		await second.dispose();
 	}
 }, 20_000);

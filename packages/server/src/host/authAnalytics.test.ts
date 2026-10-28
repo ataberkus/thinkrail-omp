@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai";
+import { ModelRuntime } from "../agent";
 import {
 	type AuthMetadataContext,
 	loginAuthMethod,
@@ -8,7 +9,8 @@ import {
 } from "./authAnalytics";
 
 type AuthStatus = ReturnType<AuthMetadataContext["runtime"]["getProviderAuthStatus"]>;
-const providers = new Map(builtinProviders().map((provider) => [provider.id, provider]));
+const builtinRuntime = await ModelRuntime.create({ inMemoryCredentials: true, modelsPath: null });
+const providers = new Map(builtinRuntime.getProviders().map((provider) => [provider.id, provider]));
 
 function context(
 	status: AuthStatus = { configured: true, source: "stored" },
@@ -132,17 +134,17 @@ test("login describes the completed flow, not an unrelated overriding credential
 	expect(loginAuthMethod("anthropic", "oauth", undefined)).toBe("unknown");
 });
 
-test("builtin key paths do not silently include anonymous or keyless auth", async () => {
+test("builtin key paths do not silently include anonymous or keyless auth", () => {
+	let classified = 0;
 	for (const [id, provider] of providers) {
 		if (observedAuthMethod(id, context()) !== "api_key") continue;
-		const auth = provider.auth.apiKey;
-		if (!auth) throw new Error("classified key path has no key auth");
-		const resolved = await auth.resolve({
-			ctx: { env: async () => undefined, fileExists: async () => false },
-			signal: AbortSignal.timeout(1000),
-		});
-		expect(resolved).toBeUndefined();
+		classified++;
+		if (!provider.auth.apiKey) throw new Error("classified key path has no key auth");
+		const definition = getProviderDefinition(id);
+		expect(definition?.allowsMissingApiKey ?? false).toBe(false);
+		expect(definition?.nativeAuthApis ?? []).toEqual([]);
 	}
+	expect(classified).toBeGreaterThan(0);
 });
 
 test("failed metadata reads never break telemetry callers or expose their messages", () => {

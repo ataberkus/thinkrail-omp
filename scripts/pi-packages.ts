@@ -12,8 +12,7 @@ export interface PiPackage {
 
 export const repoRoot = resolve(import.meta.dir, "..");
 
-export function publishablePiPackages(): PiPackage[] {
-	const base = join(repoRoot, "pi-extensions");
+export function publishablePiPackages(base = join(repoRoot, "pi-extensions")): PiPackage[] {
 	if (!existsSync(base)) return [];
 	const packages: PiPackage[] = [];
 	for (const entry of readdirSync(base, { withFileTypes: true })) {
@@ -25,6 +24,7 @@ export function publishablePiPackages(): PiPackage[] {
 			version: string;
 			private?: boolean;
 			dependencies?: Record<string, string>;
+			omp?: { extensions?: string[] };
 			pi?: { extensions?: string[] };
 		};
 		if (manifest.private === true) continue;
@@ -33,7 +33,7 @@ export function publishablePiPackages(): PiPackage[] {
 			name: manifest.name,
 			version: manifest.version,
 			dependencies: manifest.dependencies ?? {},
-			piExtensions: manifest.pi?.extensions ?? [],
+			piExtensions: (manifest.omp || manifest.pi)?.extensions ?? [],
 		});
 	}
 	return packages;

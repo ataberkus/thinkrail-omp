@@ -17,11 +17,11 @@
 		"@thinkrail/locales": "workspace:*"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
 		"react": "catalog:"
 	},
 	"peerDependenciesMeta": {
-		"@earendil-works/pi-coding-agent": {
+		"@oh-my-pi/pi-coding-agent": {
 			"optional": true
 		},
 		"react": {
@@ -29,7 +29,7 @@
 		}
 	},
 	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
 		"@types/bun": "catalog:",
 		"@types/react": "catalog:",
 		"typescript": "catalog:"

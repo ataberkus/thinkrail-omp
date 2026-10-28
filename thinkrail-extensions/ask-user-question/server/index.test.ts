@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ExtensionSessionServices, ToolResponse } from "@thinkrail/extension-api/server";
 import {
 	ASK_ACK_TEXT,
@@ -13,7 +13,7 @@ import askUserQuestion from "./index";
 interface CapturedTool {
 	name: string;
 	description: string;
-	promptGuidelines?: string[];
+	loadMode?: string;
 	execute: (
 		id: string,
 		params: unknown,
@@ -36,23 +36,29 @@ const args = {
 	],
 };
 
-type MessageEndHandler = (event: { message: unknown }) => unknown;
+type Handler = (event: Record<string, unknown>) => unknown;
 
 function compose(
 	respond: (toolCallId: string, signal: AbortSignal | undefined) => Promise<ToolResponse>,
 	expectToolResponse: (toolCallId: string) => void = () => {},
+	endRun: (toolCallId: string) => void = () => {},
 ) {
-	const session: ExtensionSessionServices = { expectToolResponse, awaitToolResponse: respond };
+	const session: ExtensionSessionServices = {
+		expectToolResponse,
+		awaitToolResponse: respond,
+		endRun,
+	};
 	const factories = askUserQuestion.sessionExtensions?.(session) ?? [];
 	let tool: CapturedTool | undefined;
-	const handlers = new Map<string, MessageEndHandler>();
+	const handlers = new Map<string, Handler>();
 	const pi = {
 		registerTool: (definition: CapturedTool) => {
 			tool = definition;
 		},
-		on: (event: string, handler: MessageEndHandler) => {
+		on: (event: string, handler: Handler) => {
 			handlers.set(event, handler);
 		},
+		getActiveTools: () => [ASK_USER_QUESTION_TOOL_NAME],
 	} as unknown as ExtensionAPI;
 	for (const factory of factories) factory(pi);
 	if (!tool) throw new Error("the session factories registered no tool");
@@ -66,12 +72,18 @@ describe("the ask-user-question server half", () => {
 	test("is a session-only extension that registers the tool with ThinkRail's wording", () => {
 		expect(askUserQuestion.name).toBe("ask-user-question");
 		expect(askUserQuestion.extensions).toEqual([]);
-		const { tool, factories } = compose(async () => ({ kind: "deferred" }));
+		const { tool, factories, handlers } = compose(async () => ({ kind: "deferred" }));
 		expect(factories).toHaveLength(1);
 		expect(tool.name).toBe(ASK_USER_QUESTION_TOOL_NAME);
 		expect(tool.description).toContain("render inline in the chat as an interactive card");
 		expect(tool.description).toContain("then the card is superseded");
-		expect(tool.promptGuidelines?.length).toBe(4);
+		expect(tool.loadMode).toBe("essential");
+		expect(handlers.get("before_agent_start")?.({ systemPrompt: [] })).toEqual({
+			systemPrompt: [expect.stringMatching(/^Guidelines for ask_user_question:(\n- [^\n]+){4}$/)],
+		});
+		expect(JSON.stringify(handlers.get("before_agent_start")?.({ systemPrompt: [] }))).toContain(
+			"shown inline under the option",
+		);
 	});
 
 	test("declares its tool interactive under the package's own name and describes late responses", () => {
@@ -106,7 +118,7 @@ describe("the ask-user-question server half", () => {
 			async () => ({ kind: "deferred" }),
 			(toolCallId) => expected.push(toolCallId),
 		);
-		handlers.get("message_end")?.({
+		handlers.get("assistant_message")?.({
 			message: {
 				role: "assistant",
 				stopReason: "toolUse",

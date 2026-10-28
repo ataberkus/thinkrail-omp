@@ -2,20 +2,21 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import {
-	type ExtensionToolContext,
-	ModelRuntime,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import type { ReviewFailedPayload, Workspace } from "@thinkrail/contracts";
 import { isPlanReviewResult } from "@thinkrail/contracts";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import { TodoStore } from "pi-todos/core";
 import {
 	configurePiRuntime,
 	createSession,
 	disposeAllSessions,
+	ModelRuntime,
 	setSessionManagerFactory,
 	setSessionPublisher,
 	toWireModel,
@@ -68,16 +69,15 @@ const faux = createFauxCore({
 	tokensPerSecond: 2000,
 });
 
-let priorAgentDir: string | undefined;
+let isolatedAgentDir: IsolatedAgentDir | undefined;
 let priorOffline: string | undefined;
 
 beforeAll(async () => {
-	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "trpi-planreview-agentdir-"));
+	isolatedAgentDir = isolateAgentDir(mkdtempSync(join(tmpdir(), "trpi-planreview-agentdir-")));
 	priorOffline = process.env.PI_OFFLINE;
 	process.env.PI_OFFLINE = "1";
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -95,8 +95,7 @@ beforeAll(async () => {
 
 afterAll(() => {
 	disposeAllSessions();
-	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+	isolatedAgentDir?.restore();
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
 });
@@ -295,7 +294,7 @@ test.each([
 			installRequestReviewSeam(verdictRunner(requestChanges));
 			const ctx = {
 				sessionManager: { getSessionId: () => sessionId },
-			} as unknown as ExtensionToolContext;
+			} as unknown as ExtensionContext;
 			reviewed = createRequestReviewTool().execute("tc", { itemId: id }, undefined, undefined, ctx);
 		} else {
 			startPlanReview(WS, sessionId, id, verdictRunner(requestChanges));
@@ -493,7 +492,7 @@ test("a tool request_review queues behind a button review of another step on the
 	installRequestReviewSeam(serialRunner);
 	const ctx = {
 		sessionManager: { getSessionId: () => sessionId },
-	} as unknown as ExtensionToolContext;
+	} as unknown as ExtensionContext;
 
 	// Button review on `first` and the worker's request_review tool on `second`, kicked off together:
 	// without the shared plan chain both hidden children would stream at once.
@@ -673,7 +672,7 @@ test("the tool path awaits artifact reconciliation before it snapshots the chang
 	const id = committedItem(sessionId);
 	const ctx = {
 		sessionManager: { getSessionId: () => sessionId },
-	} as unknown as ExtensionToolContext;
+	} as unknown as ExtensionContext;
 
 	// The reviewing snapshot must be taken only after the reconciliation barrier settles — request_review
 	// fires right after todo_update, so a snapshot before the barrier can miss the just-committed change set.
@@ -710,7 +709,7 @@ test("the tool path marks findings sent to the worker so resolve_comment can clo
 	const id = committedItem(sessionId);
 	const ctx = {
 		sessionManager: { getSessionId: () => sessionId },
-	} as unknown as ExtensionToolContext;
+	} as unknown as ExtensionContext;
 	const out = await createRequestReviewTool().execute(
 		"tc",
 		{ itemId: id } as never,
@@ -740,7 +739,7 @@ test("the tool path deletes the just-filed drafts when the mark-sent transaction
 	const ref = { workspaceId: WS, sessionId, id };
 	const ctx = {
 		sessionManager: { getSessionId: () => sessionId },
-	} as unknown as ExtensionToolContext;
+	} as unknown as ExtensionContext;
 
 	// Filing succeeds but the mark-sent step throws (a concurrent clear / non-draft collision). The
 	// compensation must remove the just-filed drafts so no open finding is stranded whose canonical id
@@ -780,7 +779,7 @@ test("the tool path deletes the first filed draft when a later finding fails to 
 	const ref = { workspaceId: WS, sessionId, id };
 	const ctx = {
 		sessionManager: { getSessionId: () => sessionId },
-	} as unknown as ExtensionToolContext;
+	} as unknown as ExtensionContext;
 
 	// The first finding persists; the second addComment throws (a mid-loop store fault). fileFindings
 	// must compensate its own partial success so the first draft is deleted, leaving no stranded open
@@ -905,7 +904,7 @@ test("the tool path rolls back and deletes the findings when the cycle record fa
 	const ref = { workspaceId: WS, sessionId, id };
 	const ctx = {
 		sessionManager: { getSessionId: () => sessionId },
-	} as unknown as ExtensionToolContext;
+	} as unknown as ExtensionContext;
 
 	// Findings file and mark `sent`, then the todo-review sidecar write throws. The transaction must roll
 	// the sent findings back to draft and delete them so the cancelled review leaves nothing open whose
@@ -987,7 +986,7 @@ test("a request_review that fails before the review starts releases its claim, s
 	const id = new TodoStore(worktree, sessionId).add({ title: "not yet committed" }).id;
 	const ctx = {
 		sessionManager: { getSessionId: () => sessionId },
-	} as unknown as ExtensionToolContext;
+	} as unknown as ExtensionContext;
 	const run = () =>
 		createRequestReviewTool().execute("tc", { itemId: id } as never, undefined, undefined, ctx);
 
@@ -1100,7 +1099,7 @@ test("agent-delivered findings emit review_comment_sent on the button, tool and 
 		const tool = committedItem(sessionId, "tool");
 		const ctx = {
 			sessionManager: { getSessionId: () => sessionId },
-		} as unknown as ExtensionToolContext;
+		} as unknown as ExtensionContext;
 		await createRequestReviewTool().execute(
 			"tc",
 			{ itemId: tool } as never,

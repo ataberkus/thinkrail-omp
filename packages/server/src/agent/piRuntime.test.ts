@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, expect, jest, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ModelsRefreshOptions, ModelsRefreshResult } from "@earendil-works/pi-ai";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { buildResourceLoader } from "./extensions";
+import { discoverAuthStorage, Settings } from "@oh-my-pi/pi-coding-agent";
+import { isolateAgentDir } from "pi-faux";
+import { buildSessionResources } from "./extensions";
+import type { ModelsRefreshOptions, ModelsRefreshResult } from "./modelRuntime";
 import {
 	type CatalogRefreshRuntime,
 	configurePiRuntime,
@@ -28,138 +29,94 @@ afterEach(() => {
 
 async function isolatedRuntime() {
 	const agentDir = mkdtempSync(join(tmpdir(), "trpi-runtime-"));
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	const isolated = isolateAgentDir(agentDir);
 	configurePiRuntime(null);
 	try {
 		return { runtime: await getPiRuntime(), agentDir };
 	} finally {
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		isolated.restore();
 	}
 }
+
+const trustedAdmission = () => ({
+	trusted: true,
+	piResourceTrusted: true,
+	acknowledged: [],
+	disabled: [],
+	disabledGroups: [],
+	overrides: {},
+});
 
 function cleanup(agentDir: string): void {
 	configurePiRuntime(null);
 	rmSync(agentDir, { recursive: true, force: true });
 }
 
-test("a session loader excludes an opaque generation artifact but preserves other discovered extensions", async () => {
+test("session resources exclude an opaque generation artifact but keep other discovered extensions", async () => {
 	const root = mkdtempSync(join(tmpdir(), "trpi-session-extension-filter-"));
 	const agentDir = join(root, "agent");
 	const extensionsDir = join(agentDir, "extensions");
 	const centralPath = join(extensionsDir, "jetbrains-central.ts");
 	const siblingPath = join(extensionsDir, "sibling.ts");
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const counters = globalThis as typeof globalThis & {
-		__thinkrailExcludedExtensionLoads?: number;
-		__thinkrailSiblingExtensionLoads?: number;
-	};
 	mkdirSync(extensionsDir, { recursive: true });
-	writeFileSync(
-		centralPath,
-		"export default function excluded() { globalThis.__thinkrailExcludedExtensionLoads = (globalThis.__thinkrailExcludedExtensionLoads ?? 0) + 1; }\n",
-	);
-	writeFileSync(
-		siblingPath,
-		"export default function sibling() { globalThis.__thinkrailSiblingExtensionLoads = (globalThis.__thinkrailSiblingExtensionLoads ?? 0) + 1; }\n",
-	);
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	writeFileSync(centralPath, "export default function excluded() {}\n");
+	writeFileSync(siblingPath, "export default function sibling() {}\n");
+	const isolated = isolateAgentDir(agentDir);
 	try {
-		await buildResourceLoader(
-			root,
-			SettingsManager.create(root, agentDir, { projectTrusted: true }),
-			() => ({
-				trusted: true,
-				piResourceTrusted: true,
-				acknowledged: [],
-				disabled: [],
-				disabledGroups: [],
-				overrides: {},
-			}),
-			[centralPath],
-		);
-		expect(counters.__thinkrailExcludedExtensionLoads).toBeUndefined();
-		expect(counters.__thinkrailSiblingExtensionLoads).toBe(1);
+		const resources = await buildSessionResources({
+			cwd: root,
+			settings: Settings.isolated(),
+			projectTrusted: true,
+			getAdmission: trustedAdmission,
+			excludedExtensionPaths: [centralPath],
+		});
+		expect(resources.preloadedExtensionPaths).toContain(siblingPath);
+		expect(resources.preloadedExtensionPaths).not.toContain(centralPath);
+		expect(resources.disableExtensionDiscovery).toBe(true);
 	} finally {
-		delete counters.__thinkrailExcludedExtensionLoads;
-		delete counters.__thinkrailSiblingExtensionLoads;
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		isolated.restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("an excluding session loader re-resolves its extension set on every reload and honours -builtin:* settings", async () => {
+test("an excluding session build re-resolves its extension set every time and honours disabledExtensions settings", async () => {
 	const root = mkdtempSync(join(tmpdir(), "trpi-session-extension-reload-"));
 	const agentDir = join(root, "agent");
 	const extensionsDir = join(agentDir, "extensions");
 	const centralPath = join(extensionsDir, "jetbrains-central.ts");
+	const probePath = join(extensionsDir, "probe.ts");
 	const latePath = join(extensionsDir, "late.ts");
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const counters = globalThis as typeof globalThis & {
-		__thinkrailExcludedExtensionLoads?: number;
-		__thinkrailLateExtensionLoads?: number;
-	};
 	mkdirSync(extensionsDir, { recursive: true });
-	writeFileSync(
-		centralPath,
-		"export default function excluded() { globalThis.__thinkrailExcludedExtensionLoads = (globalThis.__thinkrailExcludedExtensionLoads ?? 0) + 1; }\n",
-	);
-	writeFileSync(
-		join(agentDir, "settings.json"),
-		JSON.stringify({ extensions: ["-builtin:probe"] }),
-	);
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	let probeLoads = 0;
+	writeFileSync(centralPath, "export default function excluded() {}\n");
+	writeFileSync(probePath, "export default function probe() {}\n");
+	const isolated = isolateAgentDir(agentDir);
+	const build = (disabledExtensions: string[]) =>
+		buildSessionResources({
+			cwd: root,
+			settings: Settings.isolated({ disabledExtensions }),
+			projectTrusted: true,
+			getAdmission: trustedAdmission,
+			excludedExtensionPaths: [centralPath],
+		});
 	try {
-		const loader = await buildResourceLoader(
-			root,
-			SettingsManager.create(root, agentDir, { projectTrusted: true }),
-			() => ({
-				trusted: true,
-				piResourceTrusted: true,
-				acknowledged: [],
-				disabled: [],
-				disabledGroups: [],
-				overrides: {},
-			}),
-			[centralPath],
-			[
-				{
-					name: "probe",
-					builtin: true,
-					factory: () => {
-						probeLoads += 1;
-					},
-				},
-			],
-		);
-		expect(probeLoads).toBe(0);
-		expect(counters.__thinkrailLateExtensionLoads).toBeUndefined();
+		const first = await build(["extension-module:probe"]);
+		expect(first.preloadedExtensionPaths).not.toContain(probePath);
+		expect(first.preloadedExtensionPaths).not.toContain(latePath);
 
-		writeFileSync(
-			latePath,
-			"export default function late() { globalThis.__thinkrailLateExtensionLoads = (globalThis.__thinkrailLateExtensionLoads ?? 0) + 1; }\n",
-		);
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [] }));
-		await loader.reload();
-		expect(counters.__thinkrailLateExtensionLoads).toBe(1);
-		expect(probeLoads).toBe(1);
-		expect(counters.__thinkrailExcludedExtensionLoads).toBeUndefined();
+		writeFileSync(latePath, "export default function late() {}\n");
+		const second = await build([]);
+		expect(second.preloadedExtensionPaths).toContain(latePath);
+		expect(second.preloadedExtensionPaths).toContain(probePath);
+		expect(second.preloadedExtensionPaths).not.toContain(centralPath);
 	} finally {
-		delete counters.__thinkrailExcludedExtensionLoads;
-		delete counters.__thinkrailLateExtensionLoads;
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		isolated.restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
 test("the process-local initializer applies to every fresh runtime generation", async () => {
 	const agentDir = mkdtempSync(join(tmpdir(), "trpi-generation-initializer-"));
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	const isolated = isolateAgentDir(agentDir);
 	configurePiRuntime(null);
 	let calls = 0;
 	configurePiRuntimeGenerationInitializer((runtime) => {
@@ -185,8 +142,7 @@ test("the process-local initializer applies to every fresh runtime generation", 
 	} finally {
 		configurePiRuntime(null);
 		configurePiRuntimeGenerationInitializer();
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		isolated.restore();
 		rmSync(agentDir, { recursive: true, force: true });
 	}
 });
@@ -195,9 +151,8 @@ test("candidate generation reloads an opaque extension replaced at the same path
 	const root = mkdtempSync(join(tmpdir(), "trpi-extension-generation-"));
 	const agentDir = join(root, "agent");
 	const extensionPath = join(root, "opaque-extension.ts");
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
 	mkdirSync(agentDir, { recursive: true });
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	const isolated = isolateAgentDir(agentDir);
 	try {
 		writeFileSync(
 			extensionPath,
@@ -218,16 +173,14 @@ test("candidate generation reloads an opaque extension replaced at the same path
 		});
 	} finally {
 		configurePiRuntime(null);
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		isolated.restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
 test("opaque registrations that replace existing providers stay visible to provider status and are attributed to Central", async () => {
 	const root = mkdtempSync(join(tmpdir(), "trpi-opaque-provider-ownership-"));
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = root;
+	const isolated = isolateAgentDir(root);
 	configurePiRuntime(null);
 	configurePiRuntimeGenerationInitializer((runtime) => {
 		runtime.registerProvider("pre-registered", { name: "Host provider", apiKey: "fixture-key" });
@@ -264,8 +217,7 @@ test("opaque registrations that replace existing providers stay visible to provi
 	} finally {
 		configurePiRuntime(null);
 		configurePiRuntimeGenerationInitializer();
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		isolated.restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -282,13 +234,19 @@ test("refresh() on the shared runtime never opts into the network (provider.stat
 			fetched.push(String(input instanceof Request ? input.url : input));
 			return Promise.reject(new Error("unit tests never touch the network"));
 		}) as typeof fetch;
+		const registryRefresh = spyOn(runtime.modelRegistry, "refresh");
 		try {
-			await runtime.refresh();
+			await runtime.refresh({ force: true });
 			expect(fetched).toEqual([]);
+			expect(registryRefresh.mock.calls.map(([strategy]) => strategy)).toEqual(["offline"]);
 
 			await runtime.refresh({ allowNetwork: true, force: true });
-			expect(fetched.length).toBeGreaterThan(0);
+			expect(registryRefresh.mock.calls.map(([strategy]) => strategy)).toEqual([
+				"offline",
+				"online",
+			]);
 		} finally {
+			registryRefresh.mockRestore();
 			globalThis.fetch = originalFetch;
 		}
 	} finally {
@@ -301,6 +259,85 @@ test("a user-set PI_OFFLINE survives runtime creation untouched", async () => {
 	const { agentDir } = await isolatedRuntime();
 	try {
 		expect(process.env.PI_OFFLINE).toBe("yes");
+	} finally {
+		cleanup(agentDir);
+	}
+});
+
+test("an offline refresh rebuilds omp's catalog only when models.yml or stored credentials changed", async () => {
+	const { runtime, agentDir } = await isolatedRuntime();
+	const registryRefresh = spyOn(runtime.modelRegistry, "refresh");
+	const external = await discoverAuthStorage(agentDir);
+	try {
+		await runtime.refresh();
+		await runtime.refresh();
+		expect(registryRefresh).not.toHaveBeenCalled();
+
+		writeFileSync(join(agentDir, "models.yml"), "providers: {}\n");
+		await runtime.refresh();
+		await runtime.refresh();
+		expect(registryRefresh.mock.calls.map(([strategy]) => strategy)).toEqual(["offline"]);
+
+		await external.credentials.set("external-login-probe", {
+			type: "api_key",
+			key: "external-key",
+		});
+		expect(runtime.getProviderAuthStatus("external-login-probe").configured).toBe(false);
+		await runtime.refresh();
+		expect(runtime.getProviderAuthStatus("external-login-probe")).toEqual({
+			configured: true,
+			source: "stored",
+		});
+		expect(registryRefresh.mock.calls.map(([strategy]) => strategy)).toEqual([
+			"offline",
+			"offline",
+		]);
+	} finally {
+		external.close();
+		registryRefresh.mockRestore();
+		cleanup(agentDir);
+	}
+});
+
+test("a provider registered with an explicit model list keeps exactly that list after omp rebuilds its catalog", async () => {
+	const { runtime, agentDir } = await isolatedRuntime();
+	try {
+		runtime.registerProvider("openai", {
+			api: "openai-responses",
+			baseUrl: "https://registered.invalid",
+			apiKey: "registered-key",
+			models: [
+				{
+					id: "registered-model",
+					name: "Registered",
+					api: "openai-responses",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 100_000,
+					maxTokens: 4096,
+				},
+			],
+		});
+		writeFileSync(join(agentDir, "models.yml"), "providers: {}\n");
+		await runtime.refresh();
+
+		const merged = runtime.modelRegistry.getProviderModels("openai");
+		const builtIn = merged.find((model) => model.id !== "registered-model");
+		expect(builtIn).toBeDefined();
+		expect(runtime.getModels("openai").map((model) => model.id)).toEqual(["registered-model"]);
+		expect(
+			runtime
+				.getAvailableSnapshot()
+				.filter((model) => model.provider === "openai")
+				.map((model) => model.id),
+		).toEqual(["registered-model"]);
+		if (builtIn) expect(runtime.getModel("openai", builtIn.id)).toBeUndefined();
+
+		runtime.unregisterProvider("openai");
+		expect(runtime.getModels("openai").length).toBe(
+			runtime.modelRegistry.getProviderModels("openai").length,
+		);
 	} finally {
 		cleanup(agentDir);
 	}
@@ -417,7 +454,7 @@ test("a caller's await is bounded even when pi's pass never settles", async () =
 test("per-provider failures in a completed refresh are tolerated (result is only logged)", async () => {
 	const { runtime, calls, resolve } = fakeRuntime();
 	refreshCatalogsDetached(runtime);
-	resolve({ aborted: false, errors: new Map([["someprovider", new Error("boom")]]) });
+	resolve({ aborted: false, errors: new Map([["someprovider", "boom"]]) });
 	await settled();
 
 	refreshCatalogsDetached(runtime);
@@ -462,25 +499,6 @@ test("PI_OFFLINE disables the refresh entirely", () => {
 	expect(calls.length).toBe(0);
 });
 
-test("login options supply pi's per-installation device id from the global settings", async () => {
-	const agentDir = mkdtempSync(join(tmpdir(), "trpi-device-id-"));
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	try {
-		const first = piLoginOptions.getDeviceId?.();
-		expect(first).toMatch(/^[0-9a-f-]{36}$/);
-		const persisted = () => {
-			try {
-				return JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).deviceId;
-			} catch {
-				return undefined;
-			}
-		};
-		for (let i = 0; i < 100 && persisted() === undefined; i++) await Bun.sleep(10);
-		expect(persisted()).toBe(first);
-	} finally {
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
-		rmSync(agentDir, { recursive: true, force: true });
-	}
+test("login options carry no host device id: omp providers derive and persist their own", () => {
+	expect(Object.keys(piLoginOptions)).toEqual([]);
 });

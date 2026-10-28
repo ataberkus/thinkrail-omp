@@ -198,7 +198,7 @@ reload.
 ## Boundary
 
 - **Allowed deps:** Node built-ins only (`node:fs`, `node:path`, `node:crypto`).
-- **Forbidden:** any `@earendil-works/*` **and any `@thinkrail/*`** import — this is the pi-free,
+- **Forbidden:** any `@oh-my-pi/*` **and any `@thinkrail/*`** import — this is the pi-free,
   thinkrail-free layer the host can value-import without pulling pi into its bundle, and that stays
   installable under vanilla `pi`. Consequence: `STORE_DIR` (`.thinkrail/context/todos`) carries a **local
   mirror** of `@thinkrail/shared`'s `WORKSPACE_CONTEXT_DIR` rather than importing it — the shared constant

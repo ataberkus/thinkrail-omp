@@ -17,16 +17,17 @@
 		"pi-delegation": "workspace:*"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-agent-core": "*",
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
+		"@oh-my-pi/pi-agent-core": "*",
+		"@oh-my-pi/pi-ai": "*",
+		"@oh-my-pi/pi-coding-agent": "*",
 		"typebox": "*"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-agent-core": "catalog:",
-		"@earendil-works/pi-ai": "catalog:",
-		"@earendil-works/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-agent-core": "catalog:",
+		"@oh-my-pi/pi-ai": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
 		"@types/bun": "catalog:",
+		"pi-faux": "workspace:*",
 		"typebox": "catalog:",
 		"typescript": "catalog:"
 	},

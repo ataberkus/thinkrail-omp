@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
 import { isAbsolute } from "node:path";
-import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import {
 	defineServerExtension,
 	type ExtensionSessionServices,
@@ -52,6 +52,7 @@ describe("defineServerExtension", () => {
 		const session: ExtensionSessionServices = {
 			expectToolResponse: () => {},
 			awaitToolResponse: async () => ({ kind: "deferred" }),
+			endRun: () => {},
 		};
 		expect(extension.sessionExtensions?.(session)).toEqual([sessionFactory]);
 		expect(sessionFactory).not.toHaveBeenCalled();

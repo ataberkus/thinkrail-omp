@@ -11,7 +11,7 @@
 	},
 	"scripts": {
 		"dev": "bun run --watch src/index.ts",
-		"build": "bun build src/index.ts --outdir dist --target bun",
+		"build": "bun run scripts/build-bundle.ts",
 		"build:binary": "bun run scripts/build-binary.ts",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test"

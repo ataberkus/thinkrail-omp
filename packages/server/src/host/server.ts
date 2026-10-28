@@ -29,7 +29,6 @@ import {
 	isProjectSkillPath,
 	liveSessionIdsOf,
 	mcpPolicyOf,
-	piTrustsProjectPath,
 	reconcileMcpSessions,
 	refreshAgentReviewTool,
 	refreshExtensionTools,
@@ -86,7 +85,6 @@ import {
 	listRecentProjects,
 	openProject,
 	refreshRecentProjectFolders,
-	setPiTrustSeed,
 	setProjectPublisher,
 } from "../projects";
 import { reanchorWorkspace, resolveCommentFromAgent, setReviewPublisher } from "../reviews";
@@ -223,7 +221,6 @@ function sameHostUpdateRelease(
 export async function createServer(options: CreateServerOptions = {}): Promise<RunningServer> {
 	await initializeJbcentralRuntime();
 	getConfig();
-	setPiTrustSeed(piTrustsProjectPath);
 	const {
 		port = 24242,
 		host = "localhost",
@@ -660,7 +657,7 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 		reanchorWorkspace(payload.workspaceId);
 		if (
 			payload.truncated ||
-			payload.paths.some((path) => path === ".pi" || path.startsWith(".pi/"))
+			payload.paths.some((path) => path === ".omp" || path.startsWith(".omp/"))
 		) {
 			void reconcileMcpSessions(liveSessionIdsOf(payload.workspaceId));
 		}
@@ -736,7 +733,7 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 		) {
 			startAttributionClaim();
 		}
-		if (appliedUpdate.subagentsEnabled !== undefined) refreshSubagentTools();
+		if (appliedUpdate.subagentsEnabled !== undefined) void refreshSubagentTools();
 		if (appliedUpdate.subagentMaxConcurrent !== undefined) refreshSubagentConcurrency();
 		if (appliedUpdate.agentReviewEnabled !== undefined) refreshAgentReviewTool();
 		if (appliedUpdate.disabledExtensions !== undefined) refreshExtensionTools();

@@ -26,14 +26,15 @@ describe("server extension registry", () => {
 
 	it("flattens parent and child factories into named inline extensions", () => {
 		const names = (session?: Parameters<typeof registryInlineExtensions>[3]) =>
-			registryInlineExtensions("extensions", undefined, serverExtensions, session).map((inline) =>
-				typeof inline === "function" ? "fn" : inline.name,
+			registryInlineExtensions("extensions", undefined, serverExtensions, session).map(
+				(inline) => inline.registryName,
 			);
 		expect(names()).toEqual(["visualize"]);
 		expect(
 			names({
 				expectToolResponse: () => {},
 				awaitToolResponse: () => Promise.resolve({ kind: "deferred" as const }),
+				endRun: () => {},
 			}),
 		).toEqual(["visualize", "ask-user-question"]);
 		expect(registryInlineExtensions("childExtensions")).toEqual([]);

@@ -203,7 +203,7 @@ test("a project's committed skills are gated behind trust, then autocomplete", a
 test("a project whose only gated resources are subagent definitions still asks for trust and names what it loads", async ({
 	page,
 }) => {
-	const definitions = join(E2E_FIXTURE_REPO, ".pi", "agents");
+	const definitions = join(E2E_FIXTURE_REPO, ".omp", "agents");
 	mkdirSync(definitions, { recursive: true });
 	writeFileSync(
 		join(definitions, "e2e-definer.md"),
@@ -220,15 +220,15 @@ test("a project whose only gated resources are subagent definitions still asks f
 		await dialog.getByTestId("ws-trust-project").click();
 		await expect(notice).toBeHidden();
 	} finally {
-		rmSync(join(E2E_FIXTURE_REPO, ".pi"), { recursive: true, force: true });
+		rmSync(join(E2E_FIXTURE_REPO, ".omp"), { recursive: true, force: true });
 	}
 });
 
 test("the start prompt shares template completion and slot behavior without live-only commands", async ({
 	page,
 }) => {
-	const templateFile = join(E2E_FIXTURE_REPO, ".pi", "prompts", "workspace-kickoff.md");
-	mkdirSync(join(E2E_FIXTURE_REPO, ".pi", "prompts"), { recursive: true });
+	const templateFile = join(E2E_FIXTURE_REPO, ".omp", "prompts", "workspace-kickoff.md");
+	mkdirSync(join(E2E_FIXTURE_REPO, ".omp", "prompts"), { recursive: true });
 	writeFileSync(
 		templateFile,
 		`---

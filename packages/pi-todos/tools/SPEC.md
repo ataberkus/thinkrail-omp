@@ -12,10 +12,10 @@ tags: [pi-extension, todos]
 
 The seven `pi` custom tools that expose the backlog to the agent — `todo_list`, `todo_add`,
 `todo_update`, `todo_promote`, `todo_remove`, `todo_write`, `todo_plan_summary`. Each is a **thin
-wrapper** over `core/`: a TypeBox `parameters` schema, an `execute` that calls one `TodoStore` method
+wrapper** over `core/`: an omp `z` `parameters` schema, an `execute` that calls one `TodoStore` method
 against `ctx.cwd`, and a `textResult`/`errorResult` return.
 The finite-vocabulary `status` param derives its enum from the `core/` tuple via
-`StringEnum`, so the schema and the model move together (pinned by `tools.test.ts`).
+`z.enum`, so the schema and the model move together (pinned by `tools.test.ts`).
 
 **This layer is where the agent-facing constraints live** (core stays permissive — both the user lane
 and the host wire use loose items, and the agent can author loose too):
@@ -78,8 +78,8 @@ The `index.ts` barrel: `registerTodoTools(pi)`, the sole entry point, called by 
 
 ## Boundary
 
-- **Allowed deps:** `@earendil-works/pi-coding-agent` (types and public truncation helpers),
-  `@earendil-works/pi-ai/compat` (`StringEnum`), `typebox`, and `../core` (through its barrel).
+- **Allowed deps:** `@oh-my-pi/pi-coding-agent` (types, the `z` schema builder and public truncation
+  helpers) and `../core` (through its barrel).
   Node built-ins may create response-only private OS temporary files; project TODO persistence
   still belongs exclusively to `TodoStore`.
 - **Forbidden:** reaching into `core/` internals (import via the barrel), any `@thinkrail/*` package,
@@ -87,13 +87,14 @@ The `index.ts` barrel: `registerTodoTools(pi)`, the sole entry point, called by 
 
 ## Bounded output
 
-Model-facing text, notices included, stays within Pi's 2,000-line / 50 KiB limits. Overflow is captured
+Model-facing text, notices included, stays within a 2,000-line / 50 KiB budget (`MAX_OUTPUT_LINES` /
+`MAX_OUTPUT_BYTES` in `shared.ts`; pinned rather than omp's `DEFAULT_MAX_LINES`, which is 3,000). Overflow is captured
 in a private temporary file, which may expire; capture failure is explicit and never fails a completed
 mutation. Tool errors set `isError: true` and retain a visible error marker even if capture fails.
 Structured details remain presentation data, outside model context.
 
 `todo_list` returns the whole rendered plan (group-first; loose queue and nudges last) whenever it fits
-a payload budget reserved below Pi's limits for notices (1,990 lines / 48 KiB). Only a larger plan
+a payload budget reserved below those limits for notices (1,990 lines / 48 KiB). Only a larger plan
 pages, by rendered-line offset with the same status filter; offsets address the current plan, not a
 snapshot, so restart after plan edits. There is deliberately no page-size parameter: a short page holds
 only the completed head of a long plan and would hide the active task, loose queue and nudge; `status`

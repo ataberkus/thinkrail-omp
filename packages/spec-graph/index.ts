@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import { registerSpecTools } from "./tools/index.ts";
 
 const SPEC_SECTION = "pi-spec-graph";
@@ -10,12 +10,16 @@ const SPEC_RULE = [
 	"- When a change alters a boundary, contract, invariant, or decision, update the owning spec as part of that change.",
 ].join("\n");
 
+export const SPEC_BLOCK = `<${SPEC_SECTION}>\n${SPEC_RULE}\n</${SPEC_SECTION}>`;
+
 const factory: ExtensionFactory = (pi: ExtensionAPI) => {
 	registerSpecTools(pi);
 
-	pi.on("before_agent_start", (event) => {
-		event.systemPromptOptions.sections[SPEC_SECTION] = SPEC_RULE;
-	});
+	pi.on("before_agent_start", (event) =>
+		event.systemPrompt.includes(SPEC_BLOCK)
+			? undefined
+			: { systemPrompt: [...event.systemPrompt, SPEC_BLOCK] },
+	);
 };
 
 export default factory;

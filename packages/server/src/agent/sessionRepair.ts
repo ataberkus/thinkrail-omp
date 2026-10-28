@@ -1,4 +1,4 @@
-import type { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { assistantToolCallsAreExecutable } from "@thinkrail/contracts";
 import { scanReplayTools } from "pi-delegation";
 import type { InteractiveTools } from "../extensions";
@@ -14,11 +14,25 @@ const GENERIC_REPAIR_TEXT =
 const TRUNCATED_REPAIR_TEXT =
 	"Tool call was not executed because the response hit the output token limit and its arguments may be truncated.";
 
+function latestToolCallIds(sessionManager: SessionManager): Set<string> {
+	const branch = sessionManager.getBranch();
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry?.type !== "message" || entry.message.role !== "assistant") continue;
+		return new Set(
+			entry.message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])),
+		);
+	}
+	return new Set();
+}
+
 export function repairDanglingToolCalls(
 	sessionManager: SessionManager,
 	interactive: InteractiveTools,
 ): RepairedToolCall[] {
-	const { messages } = sessionManager.buildSessionContext();
+	const { messages } = sessionManager.buildSessionContext({
+		inFlightToolCallIds: latestToolCallIds(sessionManager),
+	});
 	const { danglingTail: dangling } = scanReplayTools(messages);
 	const assistant = messages.findLast((message) => message.role === "assistant");
 	const danglingCallsAreExecutable =

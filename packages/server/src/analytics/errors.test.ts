@@ -39,8 +39,8 @@ test.each([
 	["packages/billing/index.ts", EXTERNAL_FRAME, false],
 	["file:///opt/thinkrail/apps/cli/src/main.ts", "apps/cli/src/main.ts", true],
 	[
-		"/opt/thinkrail/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
-		"node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+		"/opt/thinkrail/node_modules/@oh-my-pi/pi-coding-agent/dist/index.js",
+		"node_modules/@oh-my-pi/pi-coding-agent/dist/index.js",
 		false,
 	],
 	["/Users/jdoe/.pi/agent/extensions/payroll.ts", EXTERNAL_FRAME, false],

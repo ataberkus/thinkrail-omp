@@ -390,6 +390,7 @@ class Engine implements D.DagService {
 		};
 		const resource = await this.options.delegation.registerResource(state.dagId, context, {
 			maxConcurrent: state.definitionValue.maxConcurrent ?? 4,
+			terminalTools: WORKER_TOOLS,
 			childExtensionFactories: [
 				workerExtension({
 					submit: (sessionId, callId, args, signal) =>

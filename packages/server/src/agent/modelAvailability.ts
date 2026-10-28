@@ -1,19 +1,14 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "../log";
+import type { ModelRuntime } from "./modelRuntime";
 
 const log = logger("agent");
 
-const CHATGPT_SIGN_IN_BASE_URL = "https://api.openai.com/v1";
-const CHATGPT_ALLOWLIST_PROVIDER = "openai-codex";
 const LISTING_TIMEOUT_MS = 5_000;
 const LISTING_TTL_MS = 60_000;
 const DATE_SUFFIX = /^-(?:\d{8}|\d{4}-\d{2}-\d{2})$/;
 
-export type ModelAvailabilityRuntime = Pick<
-	ModelRuntime,
-	"getAvailableSnapshot" | "getModels" | "isUsingOAuth"
->;
+export type ModelAvailabilityRuntime = Pick<ModelRuntime, "getAvailableSnapshot">;
 
 export type ModelListingRuntime = Pick<ModelRuntime, "getModels" | "getAuth">;
 
@@ -37,21 +32,12 @@ export function setModelListingPublisher(publisher: (() => void) | null): void {
 
 export function accountAvailableModels(runtime: ModelAvailabilityRuntime): readonly Model<Api>[] {
 	const snapshot = runtime.getAvailableSnapshot();
-	const chatgpt = chatgptAllowlist(runtime);
 	const listings = listingStates.get(runtime)?.listings;
-	if (!chatgpt && !listings?.size) return snapshot;
+	if (!listings?.size) return snapshot;
 	return snapshot.filter((model) => {
-		if (chatgpt && model.provider === "openai" && model.baseUrl === CHATGPT_SIGN_IN_BASE_URL)
-			return chatgpt.has(model.id);
 		const listing = listings?.get(model.provider);
 		return !listing || listing.baseUrl !== model.baseUrl || isListed(listing.ids, model.id);
 	});
-}
-
-function chatgptAllowlist(runtime: ModelAvailabilityRuntime): ReadonlySet<string> | undefined {
-	if (!runtime.isUsingOAuth("openai")) return undefined;
-	const ids = new Set(runtime.getModels(CHATGPT_ALLOWLIST_PROVIDER).map((model) => model.id));
-	return ids.size > 0 ? ids : undefined;
 }
 
 function isListed(ids: ReadonlySet<string>, id: string): boolean {

@@ -38,23 +38,29 @@ with their owning modules.
 
 ## Artifact verification
 
-Shared probes boot the real artifact, load a synthetic external PI extension with no pi executable (the
-fixture value-imports a bare `@earendil-works/pi-coding-agent` specifier and surfaces the imported value in
-its model name, so the load exercises pi's virtual-module mapping through the transform path the host
-forces — a bundle missing the `PI_BUNDLED_NODE` define fails this probe; [[submodule-server-agent]] owns
-the seam),
-exercise the bundled factories/skills, run **two scripted provider turns** — the fixture also registers a
-pi-ai faux `streamSimple` under its own `api` name that calls `visualize` with a dangling flowchart edge,
+Shared probes boot the real artifact, load a synthetic external extension (Central's candidate path) with
+no `pi` or `omp` executable on `PATH` (the fixture value-imports bare `@oh-my-pi/pi-coding-agent`,
+`@oh-my-pi/pi-ai` and the `@oh-my-pi/pi-ai/utils/event-stream` subpath, surfaces the imported
+`CONFIG_DIR_NAME` in its model name, and throws unless the subpath and root resolve to one module instance,
+so the load exercises the artifact's `omp-legacy-pi-modules` registry — a build without build-support's
+engine configuration fails to build or loads a second omp; [[module-cli]] owns the seam),
+exercise the bundled factories/skills, run **four scripted provider turns** — the fixture also registers a
+scripted `streamSimple` (built on omp's `createAssistantMessageEventStream`) under its own `api` name that calls `visualize` with a dangling flowchart edge,
 so the probe asserts the strict mermaid parse error reaches the transcript as an `isError` tool result
 (the packaged host composes the ThinkRail extension registry, never the portable package's best-effort
 probe; [[module-ext-visualize]]), and on a second prompt calls `ask_user_question`, so the probe sees the
 session block with `needsInput.kind === "tool-response"`, answers through `session.respondToTool`, and reads
 the answer back as the call's non-error tool result (the registry's per-session composition and the host
-mailbox inside the artifact; [[module-ext-ask-user-question]]) — start pi's bundled MCP engine in a real chat (a written-out
+mailbox inside the artifact; [[module-ext-ask-user-question]]), on a third calls the tool a second
+synthetic extension in the agent dir's `extensions/` registers with omp's value-imported `z` schema builder
+(user extension discovery, tool registration and dispatch inside the artifact), and on a fourth `read`s a
+committed PNG, which must come back as an image block (image decoding inside the artifact) — start the
+engine's MCP runtime in a real chat (a written-out
 stdio fixture must report *connected · 1 tool* and an in-probe HTTP server that answers 401 with
 protected-resource metadata *needs sign-in*, read back through `mcp.list`, which proves the lazily imported
 MCP runtime executes inside the artifact), reach an OAuth URL without a provider turn, verify health/UI
-and transcript trash, and shut down. CLI-specific probes also check its exit-only and embedded-cache behavior.
+and transcript trash, and shut down. CLI-specific probes also check its exit-only and embedded-cache behavior and that an omp worker selector
+reaches omp's worker host instead of booting ThinkRail.
 On Windows both smokes first read executables' resources, without running them:
 - the CLI smoke reads the built exe;
 - the desktop smoke reads the bundle's `bin/bun.exe`, `bin/launcher.exe` and `Resources/uninstall`.

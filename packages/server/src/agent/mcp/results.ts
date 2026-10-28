@@ -110,3 +110,19 @@ export function summarizeMcpResult(
 	);
 	return { ...kept, ...boundedStructured(structured.structuredContent, remaining), ...flag };
 }
+
+export function mcpCallResultOf(details: unknown): Record<string, unknown> | undefined {
+	if (
+		!isRecord(details) ||
+		typeof details.serverName !== "string" ||
+		typeof details.mcpToolName !== "string"
+	) {
+		return undefined;
+	}
+	return {
+		content: Array.isArray(details.rawContent) ? details.rawContent : [],
+		...(details.structuredContent !== undefined
+			? { structuredContent: details.structuredContent }
+			: {}),
+	};
+}

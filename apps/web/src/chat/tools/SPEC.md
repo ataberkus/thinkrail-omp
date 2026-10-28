@@ -19,13 +19,30 @@ renderers are registered by the host's `extensions/registry.ts`. Unregistered to
 
 ## What's here
 
-- **Core pi tools** — `BashCard` (terminal block), `ReadCard`/`WriteCard` (project-relative path +
-  highlighted textual file), `EditCard` (path + removed/added line diff). All **routine**. A settled `read`
-  (success or error) and a successful `write`/`edit` use the shared structured file-link primitive when the
-  path belongs to the active worktree, opening the shell's preview slot; a running/failed mutation or foreign
-  path stays text. Image content
+- **Core engine tools** (omp `read`/`write`/`edit`/`bash`) — `BashCard` (terminal block; the `cwd` argument shown
+  beside the command, a backgrounded job's id from `details.async`), `ReadCard`/`WriteCard`
+  (project-relative path + highlighted textual file), `EditCard` (per-file path + numbered diff). All
+  **routine**. omp's `read` takes only `path`, with line selectors inline (`file:50-80`, `file:3000+2`,
+  `file:-15`, `file:raw`); `readTarget.ts` peels the selector the way omp's own TUI does, links the bare file
+  and labels the range (lists and non-range selectors show verbatim). The body prefers
+  `details.displayContent.text` because omp's model-facing text carries line-number/hashline prefixes. A
+  `read` of an HTTP(S)/`www.` target (omp's replacement for a separate fetch tool) delegates to `web/`'s URL
+  card. `edit` has several argument dialects (`path`+`old_string`/`new_string`, `path`+`edits`, or a bare
+  `input` patch whose `[PATH#TAG]` / `*** Update File:` headers name the files), so `editView.ts` takes files
+  from `details.path` / `details.perFileResults[]` once settled and from the arguments only before then; the
+  diff is omp's numbered `±N|text` form (pi's `±N text` still parses for old transcripts), and a running
+  replace-mode call (or a settled one without a diff) shows `old_string`/`new_string`. A settled `read`
+  (success or error) and a successful
+  `write`/`edit` use the shared structured file-link primitive when the path (or the tool's
+  `resolvedPath`) belongs to the active worktree, opening the shell's preview slot; a running/failed
+  mutation, a deleted file or a foreign path stays text. Image content
   returned by `read` is previewed by the parent chat module's common result-content layer, the same path as
   every other image-producing tool; `ReadCard` does not special-case image payloads.
+- **Search tools** — one defensive `SearchToolCard` for omp's `grep`, `glob`, `find`, `ast_grep` and
+  `ast_edit`: the pattern/query as summary and header (plus scope and a count from `details`), and the
+  folded `details.displayContent` (the user-facing gutter without model-only anchors) or the result text.
+  Registered rather than left on the default renderer because a normal chat exposes them and the fallback
+  has no collapsed summary. Routine.
 - **`ResolveCommentCard`** — the compact receipt for the host-owned `resolve_comment` review tool
   (capability: the server's `agent` module + `reviews` seam; see [[submodule-server-reviews]]): a ✓ +
   the resolved comment id/note. **Routine** — the review sidebar is where resolution state lives; the
@@ -48,7 +65,7 @@ renderers are registered by the host's `extensions/registry.ts`. Unregistered to
   activity summary, and turns only exact standalone worktree-path tokens obtained from known successful
   result `details` shapes into preview actions; a shorter known path never links a suffix inside another
   path. `spec_delete` never links its successful deleted path. Routine.
-- **`web/`** — search/fetch/stored-content renderers for `pi-web-access`; own child spec
+- **`web/`** — omp's `web_search` card and the URL-`read` presentation; own child spec
   ([web/SPEC.md](web/SPEC.md)). Routine.
 - **`mcp/`** — pi's built-in MCP tools: the `mcp__*` card (server / tool, key/value args, ordered text,
   collapsed JSON tree of the host's structured-content summary, Full output, sign-in action), the
@@ -61,7 +78,8 @@ renderers are registered by the host's `extensions/registry.ts`. Unregistered to
 - **Shared pieces** — `CodeBlock` (shiki), `Collapsible` ("Show all N lines" fold for long output;
   callers supply a stable tool-call-derived id so state and geometry anchoring survive virtualization),
   `ToolFileLink` + exact-reference linked text backed by the parent chat module's shared
-  `workspaceFileTarget` + `lib`'s `projectRelativePath`. Pure `toolHelpers` (arg readers, `resultText`,
+  `workspaceFileTarget` + `lib`'s `projectRelativePath`, and `toolDetails` (best-effort typed readers for a
+  result's `details`). Pure `toolHelpers` (arg readers, `resultText`,
   `languageFromPath`) and canonical `toolResultContent` parsing live in `@thinkrail/extension-api/web`,
   so extension text extraction and chat's common image layer cannot disagree about valid content.
 

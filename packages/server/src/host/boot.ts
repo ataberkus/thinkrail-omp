@@ -1,5 +1,7 @@
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { findFreePort } from "@thinkrail/shared/freePort";
 import { resolveShellEnv } from "@thinkrail/shared/shellEnv";
+import { getPiRuntime, migratePiAgentDataOnBoot } from "../agent";
 import { reportError } from "../analytics";
 import { initializeJbcentralRuntime } from "../auth";
 import { applyHostEnvironment } from "../environment";
@@ -28,27 +30,30 @@ export interface BootedHost {
 	readonly requested: number;
 }
 
-function attachProcessSignals(server: RunningServer): RunningServer {
-	let signalExit = false;
-	const detachSignals = () => {
-		process.off("SIGINT", onSignal);
-		process.off("SIGTERM", onSignal);
-	};
+const SIGNAL_REASONS: ReadonlySet<postmortem.Reason> = new Set([
+	postmortem.Reason.SIGINT,
+	postmortem.Reason.SIGTERM,
+	postmortem.Reason.SIGHUP,
+]);
+
+export function attachProcessSignals(server: RunningServer): RunningServer {
+	const unregister = postmortem.register(
+		"thinkrail-host",
+		async (reason) => {
+			if (!SIGNAL_REASONS.has(reason)) return;
+			await server.shutdown();
+			postmortem.exitProcess(0);
+		},
+		{ exitOnly: true },
+	);
 	const stop = (): void => {
-		detachSignals();
+		unregister();
 		server.stop();
 	};
 	const shutdown = (): Promise<void> => {
-		detachSignals();
+		unregister();
 		return server.shutdown();
 	};
-	const onSignal = (): void => {
-		if (signalExit) return;
-		signalExit = true;
-		void shutdown().finally(() => process.exit(0));
-	};
-	process.on("SIGINT", onSignal);
-	process.on("SIGTERM", onSignal);
 	return {
 		get port() {
 			return server.port;
@@ -69,6 +74,7 @@ export async function bootHost(options: BootHostOptions): Promise<BootedHost> {
 	await shellEnv;
 	applyHostEnvironment();
 	await initializeJbcentralRuntime();
+	await migratePiAgentDataOnBoot(async () => (await getPiRuntime()).authStorage);
 
 	const requested = options.port;
 	const port =

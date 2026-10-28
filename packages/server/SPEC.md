@@ -32,16 +32,17 @@ e2e).
   `bootHost(options) → BootedHost` (the process-boot wrapper: installs crash logging, resolves the
   login-shell environment only when the launcher opts in with `resolveShellEnv: true`, applies the stored
   host environment ([[submodule-server-environment]]), pre-warms the
-  same initialization before choosing a port, awaits `createServer`, and installs SIGINT/SIGTERM graceful-shutdown handlers), both re-exported from
+  same initialization before choosing a port, awaits `createServer`, and registers its graceful shutdown as an omp postmortem cleanup for SIGINT/SIGTERM/SIGHUP), both re-exported from
   `host/`; plus `registerBundledRuntime` (+ its types, re-exported from `agent/`) — the compiled-binary
   seam by which a launcher that cannot path-load the bundled pi extensions (no `node_modules` inside a
   `bun build --compile` binary or packaged Electrobun server runtime) injects them as value-imported factories + a staged skills dir (registry extensions need no injection — their factories arrive through the
-  static import graph), injects
-  the staged macOS/Windows OS-trash helper paths, and registers pi's statically-bundled provider flows
-  (the OAuth flows + the Bedrock module) that pi otherwise reaches through binary-hostile
-  variable-specifier dynamic imports (see the agent SPEC). Build-only
+  static import graph) and injects
+  the staged macOS/Windows OS-trash helper paths (omp imports its provider flows statically, so nothing
+  else needs registering). Build-only
   **`@thinkrail/server/build-support`** is the single manifest of bundled extension entries, skill roots,
-  per-platform `bun-pty` libraries, and trash helpers consumed by both launcher packagers. Artifact
+  per-platform `bun-pty` libraries, and trash helpers consumed by both launcher packagers, plus the omp
+  engine's artifact build configuration (`engineCompiledBuildConfig` / `engineBundledBuildConfig`, native
+  addons, worker-host sources; rationale in [[module-cli]]). Artifact
   fixture/assertion runners live in [[module-artifact-tests]], not in this library. The package also exposes the
   **`@thinkrail/server/agent` subpath export** (the `agent` barrel): the
   server-side session surface for the **headless workflow-test harness** (`e2e/workflows/`), which
@@ -49,7 +50,7 @@ e2e).
   deliberate second entry that avoids evaluating `host` (Bun-only: `Bun.serve`, `bun-pty`) under the
   node-run e2e worker. Not for `apps/*` use — the web/CLI boundary rules are unchanged.
 - **Allowed deps:** `contracts` (types + WS constants), `shared` (`shellEnv` and the Central adapter), `bun-pty`,
-  `@earendil-works/pi-coding-agent` + `@earendil-works/pi-ai` (runtime), `extension-api` (`./server` types)
+  `@oh-my-pi/pi-coding-agent` + `@oh-my-pi/pi-ai` (runtime), `extension-api` (`./server` types)
   + every `thinkrail-extensions/*` **server subpath only** (the registry's composition edge; the host no
   longer depends directly on a pi package an extension owns), `pino` + its pretty/rolling
   destinations (host diagnostics), `jsonc-parser` (targeted shared Pi configuration edits), Bun/Node.

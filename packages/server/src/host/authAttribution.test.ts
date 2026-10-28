@@ -2,10 +2,14 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createProvider, envApiKeyAuth, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { TODO_NUDGE_PREFIX, type WsResult } from "@thinkrail/contracts";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	activatePiRuntimeGeneration,
 	configurePiRuntime,
@@ -13,6 +17,7 @@ import {
 	disposeAllSessions,
 	getSessionRuntimeGeneration,
 	isSessionStreaming,
+	ModelRuntime,
 	preparePiRuntimeGeneration,
 	setSessionCreatedPublisher,
 	setSessionManagerFactory,
@@ -31,27 +36,30 @@ const TEST_KEY = "phc_test";
 const PRIVATE = "private-auth-attribution";
 const context = { clientKey: `${PRIVATE}-client` };
 const workspaceId = `${PRIVATE}-workspace`;
-const saved = {
+const saved: Record<string, string | undefined> = {
 	THINKRAIL_DATA_DIR: process.env.THINKRAIL_DATA_DIR,
-	PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 	PI_OFFLINE: process.env.PI_OFFLINE,
 };
+const ambientAws = Object.keys(process.env).filter((key) => key.startsWith("AWS_"));
+for (const key of ambientAws) saved[key] = process.env[key];
+const originalFetch = globalThis.fetch;
 let directory: string;
-let credentials: InMemoryCredentialStore;
+let agentDir: IsolatedAgentDir;
 let runtime: ModelRuntime;
 let faux: ReturnType<typeof createFauxCore>;
 let events: { event: string; properties: Record<string, unknown> }[];
 let outgoing: string[];
 let sessionIds: string[];
 let unexpectedAuthCalls: string[];
+let fauxApis = 0;
 
 async function addFauxProvider(
 	target: ModelRuntime,
-	store: InMemoryCredentialStore,
 	providerId: string,
 	authMethod: "api_key" | "subscription" | "oauth",
 ) {
-	await store.modify(providerId, async () =>
+	await target.authStorage.credentials.set(
+		providerId,
 		authMethod === "api_key"
 			? { type: "api_key", key: `${PRIVATE}-api-key` }
 			: {
@@ -63,35 +71,31 @@ async function addFauxProvider(
 	);
 	const core = createFauxCore({
 		provider: providerId,
-		api: `${PRIVATE}-api`,
+		api: `${PRIVATE}-api-${++fauxApis}`,
 		models: [{ id: `${PRIVATE}-model`, name: `${PRIVATE}-model-label` }],
 		tokensPerSecond: 2_000,
 	});
 	core.setResponses([fauxAssistantMessage("Complete")]);
-	target.registerNativeProvider(
-		createProvider({
-			id: providerId,
-			name: `${PRIVATE}-provider-label`,
-			auth: {
-				apiKey: envApiKeyAuth(`${PRIVATE}-key-label`, []),
-				oauth: {
-					name: `${PRIVATE}-oauth-label`,
-					isSubscription: authMethod !== "oauth",
-					login: async () => {
-						unexpectedAuthCalls.push("login");
-						throw new Error("Preconfigured credentials must not log in");
-					},
-					refresh: async () => {
-						unexpectedAuthCalls.push("refresh");
-						throw new Error("Valid credentials must not refresh");
-					},
-					toAuth: async (credential) => ({ apiKey: credential.access }),
+	const { apiKey: _fauxKey, ...config } = core.providerConfig();
+	target.registerNativeProvider({
+		id: providerId,
+		name: `${PRIVATE}-provider-label`,
+		config: {
+			...config,
+			oauth: {
+				name: `${PRIVATE}-oauth-label`,
+				login: async () => {
+					unexpectedAuthCalls.push("login");
+					throw new Error("Preconfigured credentials must not log in");
 				},
+				refreshToken: async () => {
+					unexpectedAuthCalls.push("refresh");
+					throw new Error("Valid credentials must not refresh");
+				},
+				getApiKey: (credential) => credential.access,
 			},
-			models: core.models,
-			api: { stream: core.stream, streamSimple: core.streamSimple },
-		}),
-	);
+		},
+	});
 	if (authMethod === "api_key") await target.setRuntimeApiKey(providerId, `${PRIVATE}-api-key`);
 	await target.refresh({ allowNetwork: false });
 	return core;
@@ -100,25 +104,31 @@ async function addFauxProvider(
 beforeEach(async () => {
 	directory = mkdtempSync(join(tmpdir(), "thinkrail-auth-attribution-"));
 	process.env.THINKRAIL_DATA_DIR = directory;
-	process.env.PI_CODING_AGENT_DIR = join(directory, "pi");
+	agentDir = isolateAgentDir(join(directory, "pi"));
 	process.env.PI_OFFLINE = "1";
+	for (const key of ambientAws) delete process.env[key];
 	events = [];
 	outgoing = [];
 	sessionIds = [];
 	unexpectedAuthCalls = [];
+	globalThis.fetch = Object.assign(
+		(input: Parameters<typeof fetch>[0]) => {
+			unexpectedAuthCalls.push(`network:${input instanceof Request ? input.url : String(input)}`);
+			return Promise.reject(new Error("Preconfigured credentials must not log in or refresh"));
+		},
+		{ preconnect: originalFetch.preconnect },
+	);
 	resetConfigCache();
 	runObservation.reset();
 	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd));
 	setSessionCreatedPublisher(() => {});
 	setSessionPublisher(({ sessionId, event }) => runObservation.observe(sessionId, event));
-	credentials = new InMemoryCredentialStore();
 	runtime = await ModelRuntime.create({
-		credentials,
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
-		refreshOnCreate: false,
 	});
-	faux = await addFauxProvider(runtime, credentials, "anthropic", "api_key");
+	faux = await addFauxProvider(runtime, "anthropic", "api_key");
 	configurePiRuntime(runtime);
 	saveWorkspaces([
 		{
@@ -154,6 +164,8 @@ afterEach(async () => {
 	setSessionCreatedPublisher(() => {});
 	setSessionPublisher(() => {});
 	resetConfigCache();
+	globalThis.fetch = originalFetch;
+	agentDir.restore();
 	rmSync(directory, { recursive: true, force: true });
 	for (const [key, value] of Object.entries(saved)) {
 		if (value === undefined) delete process.env[key];
@@ -232,15 +244,14 @@ test("preconfigured API-key chats and accepted prompt, steer and follow-up sends
 });
 
 test("unmodified builtin providers report preconfigured stored keys without an in-app login", async () => {
-	const builtinCredentials = new InMemoryCredentialStore();
-	await builtinCredentials.modify("anthropic", async () => ({
-		type: "api_key",
-		key: `${PRIVATE}-stored-key`,
-	}));
 	const builtinRuntime = await ModelRuntime.create({
-		credentials: builtinCredentials,
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
+	});
+	await builtinRuntime.authStorage.credentials.set("anthropic", {
+		type: "api_key",
+		key: `${PRIVATE}-stored-key`,
 	});
 	configurePiRuntime(builtinRuntime);
 	const model = builtinRuntime.getModels("anthropic")[0];
@@ -260,10 +271,9 @@ test("unmodified builtin providers report preconfigured stored keys without an i
 
 test("a chat created without any usable model still counts, bucketed as none", async () => {
 	const bare = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
-		refreshOnCreate: false,
 	});
 	configurePiRuntime(bare);
 	const created = (await handleRequest(
@@ -279,13 +289,13 @@ test("a chat created without any usable model still counts, bucketed as none", a
 });
 
 test("a startup extension that switches the model is reported as the model the chat actually got", async () => {
-	const alternate = await addFauxProvider(runtime, credentials, `${PRIVATE}-provider`, "oauth");
+	const alternate = await addFauxProvider(runtime, `${PRIVATE}-provider`, "oauth");
 	const extensionPath = join(directory, "pi", "extensions", "switch-on-start.ts");
 	mkdirSync(join(directory, "pi", "extensions"), { recursive: true });
 	writeFileSync(
 		extensionPath,
 		[
-			'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";',
+			'import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";',
 			"export default function (pi: ExtensionAPI) {",
 			'\tpi.on("session_start", async (_event, ctx) => {',
 			`\t\tconst model = ctx.modelRegistry.find(${JSON.stringify(`${PRIVATE}-provider`)}, ${JSON.stringify(`${PRIVATE}-model`)});`,
@@ -309,7 +319,7 @@ test("a startup extension that switches the model is reported as the model the c
 });
 
 test("model changes affect later sends but not provider/auth captured before a delayed acknowledgement", async () => {
-	const alternate = await addFauxProvider(runtime, credentials, `${PRIVATE}-provider`, "oauth");
+	const alternate = await addFauxProvider(runtime, `${PRIVATE}-provider`, "oauth");
 	const sessionId = await createChat();
 	const started = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
@@ -358,14 +368,12 @@ test("model changes affect later sends but not provider/auth captured before a d
 test("retained sessions keep their generation's API-key auth when new same-provider chats use a subscription", async () => {
 	const retainedId = await createChat();
 	const retainedGeneration = getSessionRuntimeGeneration(retainedId);
-	const nextCredentials = new InMemoryCredentialStore();
 	const nextRuntime = await ModelRuntime.create({
-		credentials: nextCredentials,
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
-		refreshOnCreate: false,
 	});
-	const nextFaux = await addFauxProvider(nextRuntime, nextCredentials, "anthropic", "subscription");
+	const nextFaux = await addFauxProvider(nextRuntime, "anthropic", "subscription");
 	configurePiRuntimeFactory(async () => nextRuntime);
 	const candidate = await preparePiRuntimeGeneration([]);
 	if (candidate.outcome !== "prepared") throw new Error("Candidate was not prepared");

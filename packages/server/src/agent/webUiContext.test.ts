@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Theme } from "@earendil-works/pi-coding-agent";
+import { Theme } from "@oh-my-pi/pi-coding-agent";
 import type { ExtUiRequest } from "@thinkrail/contracts";
 import {
 	cancelExtUiForSession,
@@ -73,59 +73,121 @@ test("extension-UI bridge: a dialog names the running tool call it is about, if 
 	setExtUiPublisher(() => {});
 });
 
-test("theme: pi's Theme contract is implemented and every method yields plain text", () => {
+const THEME_CALLS: Record<string, (theme: Theme) => unknown> = {
+	getColorHex: (t) => t.getColorHex("accent"),
+	getBgHex: (t) => t.getBgHex("selectedBg"),
+	getAllThemeColorHexes: (t) => t.getAllThemeColorHexes(),
+	getMajorThemeColorHexes: (t) => t.getMajorThemeColorHexes(),
+	getAccentColorHex: (t) => t.getAccentColorHex(),
+	hasColor: (t) => t.hasColor("accent"),
+	fg: (t) => t.fg("accent", "Theme works"),
+	fgResolved: (t) => t.fgResolved("accent", "Theme works"),
+	bg: (t) => t.bg("selectedBg", "Theme works"),
+	bgFill: (t) => t.bgFill("selectedBg", "Theme works"),
+	fgOnBg: (t) => t.fgOnBg("accent", "selectedBg", "Theme works"),
+	bold: (t) => t.bold("Theme works"),
+	italic: (t) => t.italic("Theme works"),
+	underline: (t) => t.underline("Theme works"),
+	strikethrough: (t) => t.strikethrough("Theme works"),
+	inverse: (t) => t.inverse("Theme works"),
+	getFgAnsi: (t) => t.getFgAnsi("accent"),
+	getBgAnsi: (t) => t.getBgAnsi("selectedBg"),
+	getFgOnBgAnsi: (t) => t.getFgOnBgAnsi("accent", "selectedBg"),
+	getContrastFgAnsi: (t) => t.getContrastFgAnsi("accent"),
+	getColorMode: (t) => t.getColorMode(),
+	getThinkingBorderColor: (t) => t.getThinkingBorderColor("high")("Theme works"),
+	getBashModeBorderColor: (t) => t.getBashModeBorderColor()("Theme works"),
+	getPythonModeBorderColor: (t) => t.getPythonModeBorderColor()("Theme works"),
+	symbol: (t) => t.symbol("status.success"),
+	styledSymbol: (t) => t.styledSymbol("status.success", "success"),
+	getSymbolPreset: (t) => t.getSymbolPreset(),
+	getSpinnerFrames: (t) => t.getSpinnerFrames(),
+	getLangIcon: (t) => t.getLangIcon("typescript"),
+	getLangIconStyled: (t) => t.getLangIconStyled("typescript"),
+};
+
+const PLAIN_METHODS = [
+	"fg",
+	"fgResolved",
+	"bg",
+	"bgFill",
+	"fgOnBg",
+	"bold",
+	"italic",
+	"underline",
+	"strikethrough",
+	"inverse",
+	"getThinkingBorderColor",
+	"getBashModeBorderColor",
+	"getPythonModeBorderColor",
+];
+
+const ANSI_METHODS = ["getFgAnsi", "getBgAnsi", "getFgOnBgAnsi", "getContrastFgAnsi"];
+
+function prototypeMembers(kind: "method" | "getter"): string[] {
+	return Object.getOwnPropertyNames(Theme.prototype).filter((name) => {
+		if (name === "constructor") return false;
+		const isGetter = Object.getOwnPropertyDescriptor(Theme.prototype, name)?.get !== undefined;
+		return kind === "getter" ? isGetter : !isGetter;
+	});
+}
+
+function strings(value: unknown): string[] {
+	if (typeof value === "string") return [value];
+	if (Array.isArray(value)) return value.flatMap(strings);
+	if (value && typeof value === "object") return Object.values(value).flatMap(strings);
+	return [];
+}
+
+test("theme: omp's Theme contract is implemented and every decorator yields plain text", () => {
 	const { theme } = createWebUiContext("sess-theme");
 
 	expect(theme).toBeInstanceOf(Theme);
-	for (const name of Object.getOwnPropertyNames(Theme.prototype)) {
-		if (name === "constructor") continue;
-		if (Object.getOwnPropertyDescriptor(Theme.prototype, name)?.get) continue;
+	for (const name of prototypeMembers("method")) {
 		expect(typeof Reflect.get(theme, name)).toBe("function");
 	}
-
-	expect(theme.fg("accent", "Theme works")).toBe("Theme works");
-	expect(theme.bg("selectedBg", "Theme works")).toBe("Theme works");
-	expect(theme.style("Theme works", { fg: "accent", bg: "selectedBg", bold: true })).toBe(
-		"Theme works",
-	);
-	for (const decorate of [
-		theme.bold,
-		theme.italic,
-		theme.underline,
-		theme.inverse,
-		theme.strikethrough,
-	]) {
-		expect(decorate.call(theme, "Theme works")).toBe("Theme works");
-	}
-	expect(theme.getFgAnsi("accent")).toBe("");
-	expect(theme.getBgAnsi("selectedBg")).toBe("");
+	for (const name of PLAIN_METHODS) expect(THEME_CALLS[name]?.(theme)).toBe("Theme works");
+	for (const name of ANSI_METHODS) expect(THEME_CALLS[name]?.(theme)).toBe("");
 });
 
-test("theme: the methods inherited from pi stay plain text too", () => {
-	const { theme } = createWebUiContext("sess-theme-inherited");
-
-	expect(theme.getThinkingBorderColor("high")("Theme works")).toBe("Theme works");
-	expect(theme.getBashModeBorderColor()("Theme works")).toBe("Theme works");
-});
-
-test("theme: nothing the theme renders carries terminal escapes", () => {
+test("theme: the whole inherited surface is exercised, and nothing it renders carries terminal escapes", () => {
 	const { theme } = createWebUiContext("sess-theme-ansi");
 
-	const rendered = [
-		theme.fg("accent", "x"),
-		theme.bg("selectedBg", "x"),
-		theme.style("x", { fg: { kind: "rgb", r: 255, g: 0, b: 0 }, italic: true }),
-		theme.bold("x"),
-		theme.italic("x"),
-		theme.underline("x"),
-		theme.inverse("x"),
-		theme.strikethrough("x"),
-		theme.getFgAnsi("accent"),
-		theme.getBgAnsi("selectedBg"),
-		theme.getThinkingBorderColor("high")("x"),
-		theme.getBashModeBorderColor()("x"),
-	];
-	for (const out of rendered) expect(out).not.toContain(ESC);
+	expect(Object.keys(THEME_CALLS).sort()).toEqual(prototypeMembers("method").sort());
+	for (const [name, call] of Object.entries(THEME_CALLS)) {
+		for (const out of strings(call(theme))) {
+			if (out.includes(ESC))
+				throw new Error(`${name} rendered a terminal escape: ${JSON.stringify(out)}`);
+		}
+	}
+	for (const name of prototypeMembers("getter")) {
+		for (const out of strings(Reflect.get(theme, name))) {
+			if (out.includes(ESC))
+				throw new Error(`${name} carries a terminal escape: ${JSON.stringify(out)}`);
+		}
+	}
+	expect(theme.styledSymbol("status.success", "success")).toBe(theme.symbol("status.success"));
+	expect(theme.getLangIconStyled("typescript")).toBe(theme.getLangIcon("typescript"));
+});
+
+test("theme: the context's theme queries answer like omp's own rpc mode", async () => {
+	const ui = createWebUiContext("sess-theme-queries");
+
+	expect(await ui.getAllThemes()).toEqual([]);
+	expect(await ui.getTheme("dark")).toBeUndefined();
+});
+
+test("select: an option with a description is offered, and answered, by its label", async () => {
+	const frames: ExtUiRequest[] = [];
+	setExtUiPublisher((f) => frames.push(f));
+	const ui = createWebUiContext("sess-select-items");
+
+	const picked = ui.select("Pick", ["plain", { label: "Rich", description: "with detail" }]);
+	expect(frames.at(-1)).toMatchObject({ kind: "select", options: ["plain", "Rich"] });
+	resolveExtUi({ id: frames.at(-1)?.id ?? "", value: "Rich" });
+	expect(await picked).toBe("Rich");
+
+	setExtUiPublisher(() => {});
 });
 
 test("no member of the context is left undefined", () => {

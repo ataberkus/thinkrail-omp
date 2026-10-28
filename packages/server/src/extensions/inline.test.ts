@@ -1,25 +1,38 @@
-import { describe, expect, it } from "bun:test";
-import type {
-	Extension,
-	ExtensionAPI,
-	InlineExtension,
-	LoadExtensionsResult,
-} from "@earendil-works/pi-coding-agent";
-import type { ExtensionSessionServices } from "@thinkrail/extension-api/server";
+import { afterAll, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-	omitDisabledRegistryExtensions,
-	preferRegistryTools,
-	registryExtensionName,
+	createAgentSession,
+	type ExtensionAPI,
+	type ExtensionFactory,
+	SessionManager,
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionSessionServices } from "@thinkrail/extension-api/server";
+import { createFauxCore, createFauxModelRegistry, registerFaux } from "pi-faux";
+import {
+	type RegistryExtensionFactory,
 	registryInlineExtensions,
+	registryToolOwner,
 } from "./inline";
 import type { ServerExtensionEntry } from "./registry";
+
+function toolNamed(name: string): Parameters<ExtensionAPI["registerTool"]>[0] {
+	const parameters = { type: "object", properties: {} };
+	return {
+		name,
+		label: name,
+		description: name,
+		parameters,
+		execute: async () => ({ content: [{ type: "text", text: name }] }),
+	};
+}
 
 function entry(name: string, parents: number, children = 0): ServerExtensionEntry {
 	const factories = (prefix: string, count: number) =>
 		Array.from({ length: count }, (_, index) => (pi: ExtensionAPI) => {
-			pi.registerTool({ name: `${name}-${prefix}${index}` } as Parameters<
-				ExtensionAPI["registerTool"]
-			>[0]);
+			pi.registerTool(toolNamed(`${name}-${prefix}${index}`));
 		});
 	return {
 		specifier: `@acme/${name}/server`,
@@ -31,24 +44,23 @@ function entry(name: string, parents: number, children = 0): ServerExtensionEntr
 	};
 }
 
-async function registered(inline: InlineExtension): Promise<string[]> {
+async function registered(factory: ExtensionFactory): Promise<string[]> {
 	const tools: string[] = [];
 	const pi = { registerTool: (tool: { name: string }) => tools.push(tool.name) };
-	const factory = typeof inline === "function" ? inline : inline.factory;
 	await factory(pi as unknown as ExtensionAPI);
 	return tools;
 }
 
-const nameOf = (inline: InlineExtension) => (typeof inline === "function" ? "fn" : inline.name);
+const nameOf = (factory: RegistryExtensionFactory) => factory.registryName;
 
 describe("registryInlineExtensions", () => {
 	const entries = [entry("solo", 1), entry("multi", 2, 1)];
 
-	it("names one factory after the extension and several as name#n", () => {
+	it("tags every factory with the extension that owns it", () => {
 		expect(registryInlineExtensions("extensions", undefined, entries).map(nameOf)).toEqual([
 			"solo",
-			"multi#1",
-			"multi#2",
+			"multi",
+			"multi",
 		]);
 		expect(registryInlineExtensions("childExtensions", undefined, entries).map(nameOf)).toEqual([
 			"multi",
@@ -65,6 +77,22 @@ describe("registryInlineExtensions", () => {
 		disabled.delete("solo");
 		expect(await registered(solo)).toEqual(["solo-p0"]);
 	});
+
+	it("records which extension registered each tool and reports what loaded", async () => {
+		const loaded: string[] = [];
+		const factories = registryInlineExtensions(
+			"extensions",
+			undefined,
+			entries,
+			undefined,
+			(name) => loaded.push(name),
+		);
+		for (const factory of factories) await registered(factory);
+		expect(registryToolOwner("solo-p0")).toBe("solo");
+		expect(registryToolOwner("multi-p1")).toBe("multi");
+		expect(registryToolOwner("unknown-tool")).toBeUndefined();
+		expect(loaded).toEqual(["solo", "multi", "multi"]);
+	});
 });
 
 describe("registryInlineExtensions with per-session factories", () => {
@@ -73,6 +101,7 @@ describe("registryInlineExtensions with per-session factories", () => {
 		const services: ExtensionSessionServices = {
 			expectToolResponse: () => {},
 			awaitToolResponse: async () => ({ kind: "deferred" }),
+			endRun: () => {},
 		};
 		labels.set(services, label);
 		return services;
@@ -87,20 +116,18 @@ describe("registryInlineExtensions with per-session factories", () => {
 				seen.push(label);
 				return [
 					(pi: ExtensionAPI) => {
-						pi.registerTool({ name: `${name}-session-${label}` } as Parameters<
-							ExtensionAPI["registerTool"]
-						>[0]);
+						pi.registerTool(toolNamed(`${name}-session-${label}`));
 					},
 				];
 			},
 		},
 	});
 
-	it("appends the session's factories to the parent set under one naming scheme", async () => {
+	it("appends the session's factories to the parent set under the same owner", async () => {
 		const seen: string[] = [];
 		const entries = [sessionEntry("asker", 0, seen), sessionEntry("mixed", 1, seen)];
 		const inline = registryInlineExtensions("extensions", undefined, entries, session("a"));
-		expect(inline.map(nameOf)).toEqual(["asker", "mixed#1", "mixed#2"]);
+		expect(inline.map(nameOf)).toEqual(["asker", "mixed", "mixed"]);
 		expect(await Promise.all(inline.map(registered))).toEqual([
 			["asker-session-a"],
 			["mixed-p0"],
@@ -146,93 +173,60 @@ describe("registryInlineExtensions with per-session factories", () => {
 	});
 });
 
-describe("omitDisabledRegistryExtensions", () => {
-	const entries = [entry("solo", 1), entry("multi", 2, 1)];
-	const loaded = (path: string) => ({ path }) as Extension;
-	const result: LoadExtensionsResult = {
-		extensions: [
-			loaded("/disk/other.ts"),
-			loaded("<inline:solo>"),
-			loaded("<inline:multi#1>"),
-			loaded("<inline:multi#2>"),
-			loaded("<inline:headless>"),
-		],
-		errors: [],
-		runtime: {} as LoadExtensionsResult["runtime"],
-	};
+describe("omp tool precedence the registry relies on", () => {
+	const root = mkdtempSync(join(tmpdir(), "thinkrail-inline-precedence-"));
+	afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-	it("drops only the disabled extension's inline entries", () => {
-		const next = omitDisabledRegistryExtensions(result, (name) => name === "multi", entries);
-		expect(next.extensions.map((extension) => extension.path)).toEqual([
-			"/disk/other.ts",
-			"<inline:solo>",
-			"<inline:headless>",
-		]);
-		expect(next.errors).toBe(result.errors);
-	});
-
-	it("returns the result untouched when nothing is disabled", () => {
-		expect(omitDisabledRegistryExtensions(result, () => false, entries)).toBe(result);
-	});
-});
-
-describe("registryExtensionName", () => {
-	const entries = [entry("solo", 1), entry("multi", 2, 1)];
-
-	it("maps a registry inline path back to its extension and ignores everything else", () => {
-		expect(registryExtensionName("<inline:solo>", entries)).toBe("solo");
-		expect(registryExtensionName("<inline:multi#2>", entries)).toBe("multi");
-		expect(registryExtensionName("<inline:multi>", entries)).toBe("multi");
-		expect(registryExtensionName("<inline:multi#7>", entries)).toBe("multi");
-		expect(registryExtensionName("<inline:multi#x>", entries)).toBeUndefined();
-		expect(registryExtensionName("<inline:headless>", entries)).toBeUndefined();
-		expect(registryExtensionName("<inline:3>", entries)).toBeUndefined();
-		expect(registryExtensionName("/disk/solo.ts", entries)).toBeUndefined();
-	});
-});
-
-describe("preferRegistryTools", () => {
-	const entries = [entry("solo", 1), entry("multi", 2, 1)];
-	const loaded = (path: string, tools: string[]) =>
-		({ path, tools: new Map(tools.map((name) => [name, {}])) }) as unknown as Extension;
-	const result = (...extensions: Extension[]): LoadExtensionsResult => ({
-		extensions,
-		errors: [],
-		runtime: {} as LoadExtensionsResult["runtime"],
-	});
-	const paths = (next: LoadExtensionsResult) => next.extensions.map((extension) => extension.path);
-
-	it("moves a registry extension directly ahead of the first other extension with one of its tools", () => {
-		const next = preferRegistryTools(
-			result(
-				loaded("/user/first.ts", ["read-later"]),
-				loaded("/user/rival.ts", ["ask"]),
-				loaded("/user/rival-two.ts", ["ask"]),
-				loaded("<inline:3>", ["host"]),
-				loaded("<inline:solo>", ["ask", "solo-only"]),
-			),
-			entries,
+	it("lets an inline registry factory win a tool name over a user package loaded by path", async () => {
+		const packagePath = join(root, "rival.ts");
+		writeFileSync(
+			packagePath,
+			`export default function (pi) {
+	pi.registerTool({ name: "shared_tool", label: "rival", description: "rival", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "rival" }] }) });
+}
+`,
 		);
-		expect(paths(next)).toEqual([
-			"/user/first.ts",
-			"<inline:solo>",
-			"/user/rival.ts",
-			"/user/rival-two.ts",
-			"<inline:3>",
+		const [ours] = registryInlineExtensions("extensions", undefined, [
+			{
+				specifier: "@acme/ours/server",
+				extension: {
+					name: "ours",
+					extensions: [
+						(pi: ExtensionAPI) => {
+							pi.registerTool({ ...toolNamed("shared_tool"), description: "ours" });
+						},
+					],
+				},
+			},
 		]);
-	});
-
-	it("never reorders against another registry extension or a later rival", () => {
-		const untouched = result(
-			loaded("<inline:solo>", ["shared"]),
-			loaded("<inline:multi#1>", ["shared"]),
-			loaded("/user/later.ts", ["shared"]),
-		);
-		expect(preferRegistryTools(untouched, entries)).toBe(untouched);
-	});
-
-	it("returns the result untouched when no tool names collide", () => {
-		const calm = result(loaded("/user/other.ts", ["x"]), loaded("<inline:solo>", ["y"]));
-		expect(preferRegistryTools(calm, entries)).toBe(calm);
+		if (!ours) throw new Error("missing registry factory");
+		const settings = Settings.isolated({});
+		const { authStorage, modelRegistry } = await createFauxModelRegistry(settings);
+		const model = registerFaux(modelRegistry, createFauxCore({ provider: "precedence-faux" }));
+		const { session } = await createAgentSession({
+			cwd: root,
+			agentDir: join(root, "agent"),
+			settings,
+			authStorage,
+			modelRegistry,
+			model,
+			sessionManager: SessionManager.inMemory(root),
+			extensions: [ours],
+			preloadedExtensionPaths: [packagePath],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			hasUI: false,
+		});
+		try {
+			expect(
+				session.extensionRunner?.getRegisteredTool("shared_tool")?.definition.description,
+			).toBe("ours");
+		} finally {
+			await session.dispose();
+		}
 	});
 });

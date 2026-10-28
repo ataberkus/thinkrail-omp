@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { AuthInteraction, AuthType } from "@earendil-works/pi-ai";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { LoginPush } from "@thinkrail/contracts";
 import {
+	type AuthInteraction,
+	type AuthType,
 	activatePiRuntimeGeneration,
 	configurePiRuntime,
 	getPiRuntimeGeneration,
+	ModelRuntime,
 	piLoginOptions,
 } from "../agent";
 import {
@@ -31,7 +32,7 @@ interface Harness {
 	lastOptions: () => unknown;
 }
 
-function install(loginImpl: LoginImpl): Harness {
+async function install(loginImpl: LoginImpl): Promise<Harness> {
 	const frames: LoginPush[] = [];
 	const publications: Harness["publications"] = [];
 	setLoginPublisher((...args) => {
@@ -45,18 +46,17 @@ function install(loginImpl: LoginImpl): Harness {
 	let interaction: AuthInteraction | undefined;
 	let options: unknown;
 
-	const runtime = {
-		login: (providerId: string, type: AuthType, i: AuthInteraction, o?: unknown) => {
-			logins.push([providerId, type]);
-			options = o;
-			signal = i.signal;
-			interaction = i;
-			return loginImpl(providerId, i);
-		},
-		logout: async (id: string) => {
-			logout.push(id);
-		},
-	} as unknown as ModelRuntime;
+	const runtime = await ModelRuntime.create({ inMemoryCredentials: true, modelsPath: null });
+	runtime.login = async (providerId, type, i, o) => {
+		logins.push([providerId, type]);
+		options = o;
+		signal = i.signal;
+		interaction = i;
+		await loginImpl(providerId, i);
+	};
+	runtime.logout = async (id) => {
+		logout.push(id);
+	};
 
 	configurePiRuntime(runtime);
 	return {
@@ -77,8 +77,8 @@ afterEach(() => {
 });
 
 describe("startLogin", () => {
-	test("returns a handle synchronously (the flow runs detached, never awaited)", () => {
-		const { frames } = install(() => new Promise(() => {}));
+	test("returns a handle synchronously (the flow runs detached, never awaited)", async () => {
+		const { frames } = await install(() => new Promise(() => {}));
 		const { loginId } = startLogin("anthropic");
 		expect(loginId).toMatch(/^login_\d+$/);
 		expect(frames).toEqual([]);
@@ -88,10 +88,10 @@ describe("startLogin", () => {
 		"configure",
 		"activate",
 	])("delayed success retains its login generation after %s", async (cutover) => {
-		const replacement = install(async () => {});
+		const replacement = await install(async () => {});
 		const replacementGeneration = await getPiRuntimeGeneration();
 		const completion = Promise.withResolvers<void>();
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			i.notify({ type: "progress", message: "Waiting" });
 			await completion.promise;
 			i.notify({ type: "progress", message: "Done" });
@@ -120,14 +120,14 @@ describe("startLogin", () => {
 	});
 
 	test("passes pi's login options so flows that need a device id (ChatGPT) can run", async () => {
-		const h = install(async () => {});
+		const h = await install(async () => {});
 		startLogin("openai");
 		await tick();
 		expect(h.lastOptions()).toBe(piLoginOptions);
 	});
 
 	test("device-code flow: pushes deviceCode, then success (as an oauth login)", async () => {
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			i.notify({ type: "device_code", userCode: "WDJB-MJHT", verificationUri: "https://x/device" });
 		});
 		const { loginId } = startLogin("github-copilot");
@@ -146,7 +146,7 @@ describe("startLogin", () => {
 	});
 
 	test("progress + info notifications stream through, then the terminal success frame", async () => {
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			i.notify({ type: "progress", message: "Polling device…" });
 			i.notify({ type: "device_code", userCode: "WDJB-MJHT", verificationUri: "https://x/device" });
 			i.notify({ type: "info", message: "See the docs", links: [{ url: "https://docs.example" }] });
@@ -168,7 +168,7 @@ describe("startLogin", () => {
 
 	test("select round-trip: a parked frame is answered by loginReply, then the flow completes", async () => {
 		let chosen: string | undefined;
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			chosen = await i.prompt({
 				type: "select",
 				message: "How do you want to sign in?",
@@ -196,7 +196,7 @@ describe("startLogin", () => {
 
 	test('an empty prompt reply reaches pi as "" — not swallowed as a cancel (Copilot github.com path)', async () => {
 		let answered: string | undefined;
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			answered = await i.prompt({
 				type: "text",
 				message: "GitHub Enterprise URL/domain (blank for github.com)",
@@ -219,7 +219,7 @@ describe("startLogin", () => {
 
 	test("authUrl + concurrent paste: notify shows the URL while a manual_code prompt awaits a paste", async () => {
 		let pasted: string | undefined;
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			i.notify({ type: "auth_url", url: "https://provider/authorize?x=1" });
 			pasted = await i.prompt({ type: "manual_code", message: "Paste the authorization code" });
 		});
@@ -239,7 +239,7 @@ describe("startLogin", () => {
 
 	test("pi aborting a prompt's signal (race lost) settles the parked input; a late reply is a no-op", async () => {
 		const promptAbort = new AbortController();
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			await i
 				.prompt({ type: "manual_code", message: "Paste code", signal: promptAbort.signal })
 				.catch(() => "callback-won");
@@ -256,7 +256,7 @@ describe("startLogin", () => {
 	});
 
 	test("error path: a rejected login() pushes an error frame with the message", async () => {
-		const h = install(async () => {
+		const h = await install(async () => {
 			throw new Error("provider said no");
 		});
 		startLogin("anthropic");
@@ -274,7 +274,7 @@ describe("startLogin", () => {
 
 describe("cancelLogin", () => {
 	test("aborts the signal AND rejects the parked prompt — and pushes no stray terminal frame", async () => {
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			await i.prompt({ type: "text", message: "Paste code" });
 		});
 		const { loginId } = startLogin("anthropic");
@@ -290,7 +290,7 @@ describe("cancelLogin", () => {
 
 	test("a login resolving after cancellation publishes neither success nor generation context", async () => {
 		const completion = Promise.withResolvers<void>();
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			i.notify({ type: "progress", message: "Waiting" });
 			await completion.promise;
 		});
@@ -307,7 +307,7 @@ describe("cancelLogin", () => {
 	});
 
 	test("an interaction firing after cancel pushes no stray frame (push guards on settled)", async () => {
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			await i.prompt({ type: "text", message: "code" });
 		});
 		const { loginId } = startLogin("anthropic");
@@ -321,7 +321,7 @@ describe("cancelLogin", () => {
 	});
 
 	test("a reply after cancel is a no-op (the login is gone)", async () => {
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			await i.prompt({ type: "text", message: "code" });
 		});
 		const { loginId } = startLogin("anthropic");
@@ -334,7 +334,7 @@ describe("cancelLogin", () => {
 
 	test("cancelAllLogins settles every in-flight login", async () => {
 		const signals: (AbortSignal | undefined)[] = [];
-		install(async (_id, i) => {
+		await install(async (_id, i) => {
 			signals.push(i.signal);
 			await i.prompt({ type: "text", message: "code" });
 		});
@@ -351,7 +351,7 @@ describe("cancelLogin", () => {
 describe("api-key login / logoutProvider", () => {
 	test("startLogin with type api_key drives the provider-owned key flow over the same bridge (#97)", async () => {
 		let stored: string | undefined;
-		const h = install(async (_id, i) => {
+		const h = await install(async (_id, i) => {
 			stored = await i.prompt({ type: "secret", message: "Enter your OpenAI API key" });
 			return { type: "api_key", key: stored };
 		});
@@ -380,14 +380,14 @@ describe("api-key login / logoutProvider", () => {
 	});
 
 	test("startLogin defaults to the oauth flow when no type is given", async () => {
-		const h = install(async () => {});
+		const h = await install(async () => {});
 		startLogin("anthropic");
 		await tick();
 		expect(h.loginCalls()).toEqual([["anthropic", "oauth"]]);
 	});
 
 	test("logoutProvider removes the credential through the runtime", async () => {
-		const h = install(async () => {});
+		const h = await install(async () => {});
 		await logoutProvider("anthropic");
 		expect(h.logoutCalls()).toEqual(["anthropic"]);
 	});

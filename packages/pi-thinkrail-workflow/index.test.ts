@@ -1,106 +1,125 @@
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import type {
-	BeforeAgentStartEvent,
-	NormalizedBuildSystemPromptOptions,
-} from "@earendil-works/pi-coding-agent";
-import factory, { WORKFLOW_RULE, WORKFLOW_SECTION } from "./index.ts";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	createAgentSession,
+	type ExtensionAPI,
+	type ExtensionFactory,
+	SessionManager,
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxModelRegistry,
+	type FauxProviderHandle,
+	fauxAssistantMessage,
+	fauxProvider,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+	registerFaux,
+} from "pi-faux";
+import factory, { WORKFLOW_BLOCK, WORKFLOW_RULE, WORKFLOW_SECTION } from "./index.ts";
 
-type BeforeAgentStartHandler = (event: BeforeAgentStartEvent) => unknown;
+const root = mkdtempSync(join(tmpdir(), "pi-thinkrail-workflow-"));
+let agentDirIsolation: IsolatedAgentDir | undefined;
 
-type PiSystemPromptRenderer = {
-	buildSystemPromptSections: (
-		options: NormalizedBuildSystemPromptOptions,
-	) => Record<string, string>;
-	buildSystemPrompt: (options: NormalizedBuildSystemPromptOptions) => string;
-};
+beforeAll(() => {
+	agentDirIsolation = isolateAgentDir(join(root, "agent"));
+});
 
-// pi 0.86.1 does not re-export its renderer from the package root; this reaches an internal path.
-async function loadPiRenderer(): Promise<PiSystemPromptRenderer> {
-	return await import(
-		new URL("./core/system-prompt.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href
-	);
-}
+afterAll(() => {
+	agentDirIsolation?.restore();
+	rmSync(root, { recursive: true, force: true });
+});
 
-function loadHandler(): BeforeAgentStartHandler {
-	let captured: BeforeAgentStartHandler | undefined;
-	const fakePi = {
-		on: (eventName: string, handler: BeforeAgentStartHandler) => {
-			if (eventName === "before_agent_start") captured = handler;
+async function promptsSeen(
+	start: (session: Awaited<ReturnType<typeof createAgentSession>>["session"]) => Promise<unknown>,
+	extensions: ExtensionFactory[] = [factory],
+	seedBase = false,
+): Promise<string[][]> {
+	const settings = Settings.isolated({});
+	const { authStorage, modelRegistry } = await createFauxModelRegistry(settings);
+	const faux: FauxProviderHandle = fauxProvider({ provider: "faux-workflow" });
+	const model = registerFaux(modelRegistry, faux);
+	const seen: string[][] = [];
+	faux.setResponses([
+		(context) => {
+			seen.push([...(context.systemPrompt ?? [])]);
+			return fauxAssistantMessage("ok");
 		},
-	};
-	factory(fakePi as unknown as Parameters<typeof factory>[0]);
-	if (!captured) throw new Error("factory did not register a before_agent_start handler");
-	return captured;
-}
-
-function promptOptions(): NormalizedBuildSystemPromptOptions {
-	return {
-		selectedTools: ["read"],
-		hiddenTools: [],
-		toolSnippets: { read: "Read a file" },
-		toolGuidelines: {},
-		promptGuidelines: [],
-		appendSystemPrompt: "",
-		sections: {},
-		cwd: "/workspace",
-		contextFiles: [],
+	]);
+	const { session } = await createAgentSession({
+		cwd: root,
+		agentDir: join(root, "agent"),
+		settings,
+		authStorage,
+		modelRegistry,
+		model,
+		sessionManager: SessionManager.inMemory(root),
+		extensions,
+		...(seedBase ? { systemPrompt: (base: string[]) => [...base, WORKFLOW_BLOCK] } : {}),
+		disableExtensionDiscovery: true,
 		skills: [],
-	};
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
+	});
+	try {
+		await start(session);
+		await session.waitForIdle();
+	} finally {
+		await session.dispose();
+	}
+	return seen;
 }
 
 describe("pi-thinkrail-workflow extension", () => {
-	test("contributes the workflow rule as its own prompt section", () => {
-		const systemPromptOptions = promptOptions();
-		const result = loadHandler()({
-			type: "before_agent_start",
-			messageType: "user",
-			prompt: "do the thing",
-			systemPrompt: "You are a helpful agent.",
-			systemPromptOptions,
-		});
-
-		expect(systemPromptOptions.sections).toEqual({ [WORKFLOW_SECTION]: WORKFLOW_RULE });
-		expect(result).toBeUndefined();
+	test("contributes the workflow rule as its own prompt section", async () => {
+		const seen = await promptsSeen((session) => session.prompt("do the thing"));
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.filter((part) => part.includes(WORKFLOW_RULE))).toEqual([WORKFLOW_BLOCK]);
 	});
 
-	test("contributes the rule to runs started by a custom message too", () => {
-		const systemPromptOptions = promptOptions();
-		loadHandler()({
-			type: "before_agent_start",
-			messageType: "custom",
-			message: {
-				role: "custom",
-				customType: "test",
-				content: "continue",
-				display: false,
-				timestamp: 0,
-			},
-			systemPrompt: "You are a helpful agent.",
-			systemPromptOptions,
-		});
-
-		expect(systemPromptOptions.sections).toEqual({ [WORKFLOW_SECTION]: WORKFLOW_RULE });
+	test("reaches runs started by a custom message when the host seeds it into the base prompt", async () => {
+		const seen = await promptsSeen(
+			(session) =>
+				session.sendCustomMessage(
+					{ customType: "test", content: "continue", display: false },
+					{ triggerTurn: true },
+				),
+			[factory],
+			true,
+		);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.filter((part) => part === WORKFLOW_BLOCK)).toEqual([WORKFLOW_BLOCK]);
 	});
 
-	test("pi renders the rule as its own tagged block at the tail of the prompt", async () => {
-		const systemPromptOptions = promptOptions();
-		loadHandler()({
-			type: "before_agent_start",
-			messageType: "user",
-			prompt: "do the thing",
-			systemPrompt: "You are a helpful agent.",
-			systemPromptOptions,
-		});
+	test("does not repeat a rule the host already seeded into the base prompt", async () => {
+		const seen = await promptsSeen((session) => session.prompt("do the thing"), [factory], true);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.filter((part) => part.includes(WORKFLOW_RULE))).toEqual([WORKFLOW_BLOCK]);
+	});
 
-		const { buildSystemPromptSections, buildSystemPrompt } = await loadPiRenderer();
-		const sections = buildSystemPromptSections(systemPromptOptions);
-		const block = `<pi-thinkrail-workflow>\n${WORKFLOW_RULE}\n</pi-thinkrail-workflow>`;
-		const keys = Object.keys(sections);
+	test("omp renders the rule as its own tagged block at the tail of the prompt", async () => {
+		const later = (pi: ExtensionAPI): void => {
+			pi.on("before_agent_start", (event) => {
+				expect(event.systemPrompt.at(-1)).toBe(WORKFLOW_BLOCK);
+			});
+		};
+		const seen = await promptsSeen((session) => session.prompt("do the thing"), [factory, later]);
+		const prompt = seen[0] ?? [];
+		const block = `<${WORKFLOW_SECTION}>\n${WORKFLOW_RULE}\n</${WORKFLOW_SECTION}>`;
 
-		expect(sections[WORKFLOW_SECTION]).toBe(block);
-		expect(keys.indexOf(WORKFLOW_SECTION)).toBeGreaterThan(keys.indexOf("cwd"));
-		expect(buildSystemPrompt(systemPromptOptions)).toEndWith(block);
+		expect(WORKFLOW_BLOCK).toBe(block);
+		expect(prompt.length).toBeGreaterThan(1);
+		expect(prompt.findIndex((part) => part.includes("<workstation>"))).toBeLessThan(
+			prompt.indexOf(block),
+		);
+		expect(prompt.at(-1)).toBe(block);
+		expect(prompt.join("\n")).toEndWith(block);
 	});
 
 	test("classifies every GitHub merge state before declaring a PR ready", () => {

@@ -151,7 +151,7 @@ test("Settings → Providers offers JetBrains AI with host-authoritative Central
 test("the Welcome trust notice names a project's Pi resources, grants them, and revokes on confirmation", async ({
 	page,
 }) => {
-	const prompts = join(E2E_FIXTURE_REPO, ".pi", "prompts");
+	const prompts = join(E2E_FIXTURE_REPO, ".omp", "prompts");
 	mkdirSync(prompts, { recursive: true });
 	writeFileSync(join(prompts, "e2e-kickoff.md"), "---\ndescription: Kick off\n---\nGo\n");
 	try {
@@ -174,7 +174,7 @@ test("the Welcome trust notice names a project's Pi resources, grants them, and 
 		await expect(notice).toHaveAttribute("data-state", "untrusted");
 		await expect(page.getByTestId("project-untrust-button")).toHaveCount(0);
 	} finally {
-		rmSync(join(E2E_FIXTURE_REPO, ".pi"), { recursive: true, force: true });
+		rmSync(join(E2E_FIXTURE_REPO, ".omp"), { recursive: true, force: true });
 	}
 });
 

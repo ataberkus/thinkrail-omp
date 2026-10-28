@@ -15,7 +15,7 @@ Repository-wide development orchestration and conformance gates that do not belo
 
 ## Boundary
 
-- **Owns:** the multi-process development launcher; exact-version/catalog validation; the PI binary-seam canary; module dependency/import boundary validation; the UI-text gate (`check:i18n`); declared-spec-surface to TypeScript-barrel conformance; the on-demand CI flake report (`ci:flakes`); and focused root contract tests that compose otherwise independent product implementations.
+- **Owns:** the multi-process development launcher; exact-version/catalog validation; the engine binary-seam canary (`check:seams`: opaque and build-supplied dynamic imports in `@oh-my-pi/*`); module dependency/import boundary validation; the UI-text gate (`check:i18n`); declared-spec-surface to TypeScript-barrel conformance; the on-demand CI flake report (`ci:flakes`); and focused root contract tests that compose otherwise independent product implementations.
 - **Public surface:** the root `package.json` commands consumed by developers, Husky, and CI.
 - **Allowed deps:** Bun/Node, the developer's authenticated `gh` CLI (read-only, `ci:flakes` only), the TypeScript compiler API, `pi-spec-graph/core` for the canonical spec/frontmatter model, and `mdast-util-from-markdown` for CommonMark block structure; read-only inspection of workspace manifests and source trees; the public package metadata and bundle outputs each check validates; and test-only imports of real product internals when a root harness must prove a cross-package contract without creating a product dependency.
 - **Forbidden:** product runtime logic, a second source of package or feature behavior, editing source as part of a check, or application-internal imports outside focused root contract tests. A root contract test may compose implementations but must not become the protocol source or a product dependency.
@@ -69,3 +69,8 @@ a call (direct, through a namespace import, or passed by reference to such a cal
 reaches them synchronously, default parameters included, transitively; a module-load call; and any getter
 or registered tool `summary` that reads them. Event handlers (`on*` and other non-render props), effects and
 deferred callbacks are event-time and pass. Fixture tests pin each shape, both flagged and allowed. There is no suppression mechanism; a false positive is fixed in the checker with a test.
+
+`check:pi-packages` and the `release:pack` / `release:publish` helpers (`pi-packages.ts`) belong to
+[[module-pi-extensions]], which specifies the vanilla-omp parity gate: a fixture outside the repo, the real
+`omp plugin install` against a loopback registry for the packages' scope, and a runner copied into the fixture
+so omp never resolves from the workspace.

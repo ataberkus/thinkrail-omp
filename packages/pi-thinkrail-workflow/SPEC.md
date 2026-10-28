@@ -38,9 +38,9 @@ the next skill (meta-rule 12 in [[submodule-workflow-skills]]).
 
 Same mechanism as `pi-spec-graph` ([[module-spec-graph]]): each workflow lives in its own skill,
 auto-discovered via the `pi.skills` manifest / `additionalSkillPaths`. The `before_agent_start` rule
-mirrors `pi-spec-graph`'s `SPEC_RULE` — including its mechanism: the handler mutates
-`systemPromptOptions.sections` under the `pi-thinkrail-workflow` tag and returns nothing, so pi patches
-that one section instead of forcing a whole prompt ([[module-spec-graph]] owns the rationale). Short and
+mirrors `pi-spec-graph`'s `SPEC_RULE` — including its mechanism: the handler returns the incoming omp
+`systemPrompt` array with one `<pi-thinkrail-workflow>`-tagged element appended ([[module-spec-graph]] owns
+the rationale and the custom-message-turn gap). Short and
 byte-stable so it rides every run without churning provider prompt-caching, and a pointer, not a
 restatement — it applies only at the start of new work, while an already-routed continuation resumes its
 active workflow. Routing rules live once in the router skill; each workflow's steps live once in its own
@@ -51,7 +51,7 @@ dispatcher to load rather than relying on description-matching (see [[module-web
 
 ## Boundary
 
-- **Allowed deps:** `@earendil-works/pi-coding-agent` (**types only** — `ExtensionAPI`/`ExtensionFactory`),
+- **Allowed deps:** `@oh-my-pi/pi-coding-agent` (**types only** — `ExtensionAPI`/`ExtensionFactory`),
   as a `peerDependency`. No `typebox`: this package registers no custom tool, only a
   `before_agent_start` rule and skill content.
 - **Forbidden:** any `@thinkrail/*` package, `apps/web`, `packages/server` internals — reached only by
@@ -82,17 +82,14 @@ dispatcher to load rather than relying on description-matching (see [[module-web
 
 ## Testing
 
-`index.test.ts` pins the one runtime behavior this package has: the factory registers a
-`before_agent_start` handler that puts `WORKFLOW_RULE` into `systemPromptOptions.sections` and returns
-nothing — for runs started by a user prompt and by a custom message alike (pi 1.2 emits the event for
-both, discriminated by `messageType`) — and pi's own renderer (`buildSystemPromptSections` /
-`buildSystemPrompt`) turns those mutated options into a `<pi-thinkrail-workflow>` block ordered after `cwd` and ending the prompt — the tail
-position the old free-text append had. pi does not re-export that renderer from its package root or
-`core/index.ts` (only its `BuildSystemPromptOptions`/`NormalizedBuildSystemPromptOptions` types are
-root-exported), so the test reaches `dist/core/system-prompt.js` by resolved path; a pi that moves it breaks the
-import loudly rather than silently weakening the assertion. The options literal is typed
-`NormalizedBuildSystemPromptOptions`, so a shape change is a compile error. The rule's *wording* is prose,
-not contract, and stays unpinned.
+`index.test.ts` pins the one runtime behavior this package has, end to end through a real omp session
+(`createAgentSession` + a `pi-faux` provider that records each request's `systemPrompt`): the
+`WORKFLOW_BLOCK` (`WORKFLOW_RULE` in a `<pi-thinkrail-workflow>` tag) reaches the provider exactly once, as
+its own prompt element after omp's project context and ending the prompt — the tail position the old
+free-text append had — and survives later extensions' `before_agent_start` handlers. omp does not emit
+`before_agent_start` for runs started by a custom message (`sendCustomMessage` with `triggerTurn`), so the
+tests assert the host path instead: with `WORKFLOW_BLOCK` seeded into the base prompt the rule reaches a
+custom-message run exactly once, and a prompt run does not repeat it (see [[module-spec-graph]]). The rule's *wording* is prose, not contract, and stays unpinned.
 
 Skill behavior is tested headlessly by the **workflow-test harness** — design, verdict model,
 suites, and coverage live in [[module-workflow-tests]] (`bun run test:workflows`; on-demand — needs

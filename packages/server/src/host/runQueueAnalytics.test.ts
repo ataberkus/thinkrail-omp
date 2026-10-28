@@ -2,13 +2,19 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	configurePiRuntime,
 	createSession,
 	disposeAllSessions,
+	getSessionState,
+	ModelRuntime,
 	setSessionCreatedPublisher,
 	setSessionManagerFactory,
 	setSessionPublisher,
@@ -28,16 +34,16 @@ import { runObservation } from "./runAnalytics";
 const TEST_KEY = "phc_test";
 
 let directory: string;
+let isolatedAgentDir: IsolatedAgentDir | undefined;
 const saved = {
 	THINKRAIL_DATA_DIR: process.env.THINKRAIL_DATA_DIR,
-	PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 	PI_OFFLINE: process.env.PI_OFFLINE,
 };
 
 beforeEach(() => {
 	directory = mkdtempSync(join(tmpdir(), "thinkrail-queue-analytics-"));
 	process.env.THINKRAIL_DATA_DIR = directory;
-	process.env.PI_CODING_AGENT_DIR = join(directory, "pi");
+	isolatedAgentDir = isolateAgentDir(join(directory, "pi"));
 	process.env.PI_OFFLINE = "1";
 	resetConfigCache();
 	runObservation.reset();
@@ -54,12 +60,22 @@ afterEach(async () => {
 	configurePiRuntime(null);
 	setSessionPublisher(() => {});
 	resetConfigCache();
+	isolatedAgentDir?.restore();
+	isolatedAgentDir = undefined;
 	rmSync(directory, { recursive: true, force: true });
 	for (const [key, value] of Object.entries(saved)) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
 	}
 });
+
+async function untilIdle(sessionId: string): Promise<void> {
+	for (let attempt = 0; attempt < 400; attempt++) {
+		if (getSessionState(sessionId).execution === "idle") return;
+		await Bun.sleep(5);
+	}
+	throw new Error("session did not become idle");
+}
 
 test.each([
 	"clear",
@@ -83,7 +99,7 @@ test.each([
 	});
 	provider.setResponses([fauxAssistantMessage("Complete")]);
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -116,6 +132,12 @@ test.each([
 			return new Response("{}");
 		}) as typeof fetch,
 	});
+	const settled = new Promise<void>((resolve) =>
+		setSessionPublisher(({ sessionId, event }) => {
+			runObservation.observe(sessionId, event);
+			if (event.type === "agent_settled") resolve();
+		}),
+	);
 	const session = await createSession({
 		cwd: directory,
 		workspaceId: "workspace",
@@ -130,8 +152,10 @@ test.each([
 	} else {
 		await handleRequest("session.abort", { sessionId, restoreQueue: true }, context);
 	}
+	await untilIdle(sessionId);
 	setAdditionalAnalyticsEnabled(true);
 	await handleRequest("session.prompt", { sessionId, text: "fresh private input" }, context);
+	await settled;
 	await shutdownAnalytics();
 	const runs = events.filter((event) => event.event.startsWith("agent_run_"));
 	expect(runs.map((event) => event.event)).toEqual(["agent_run_started", "agent_run_settled"]);

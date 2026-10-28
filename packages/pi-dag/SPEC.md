@@ -40,13 +40,14 @@ A trusted `owner` binding may perform lifecycle controls, but is not a human and
 bypass human-only release. Sessionless construction uses an explicit execution context.
 
 Resource acquisition eagerly retains execution dependencies even when created paused with zero
-workers. Exact runtime injection is preferred; standalone registry projection reuses delegation's
-opaque provider replay. Retained objects are borrowed, not frozen or secretly disposed. The supplying
+workers. Execution contexts carry the host's omp `ModelRegistry`, which delegation children use
+live rather than through a provider replay. Retained objects are borrowed, not frozen or secretly disposed. The supplying
 owner guarantees their usability for its chosen lifetime; unavailable models/auth paths fail loudly,
 never fall back or borrow the latest controlling chat's defaults. No blanket extension-provider ban.
 
-Standalone owners are process-rooted by canonical root/scope, survive chat switches, close on quit
-and quiesce on reload. Process loss restores paused; no model invocation survives host exit. The
+Standalone owners are process-rooted by canonical root/scope, survive chat switches, and quiesce
+and close when the main session shuts down (omp's reasonless `session_shutdown`, from dispose or
+process exit). Process loss restores paused; no model invocation survives host exit. The
 owner's `close` settles only its resources and preserves resumable state and unrelated parent children.
 
 ## Commands and evidence
@@ -178,11 +179,12 @@ through the service directly.
 
 The zero-config default installs the same adapter with lazy process-rooted owners keyed by canonical
 agent storage root and canonical cwd scope. A versioned global registry, not module-cache lifetime,
-holds owners. New/resume/fork shutdown reasons revoke only the old conversation; reload/quit quiesce
-all standalone owners (including undisplayed scopes) before replacement/exit. Incompatible retained
+holds owners. omp's `session_switch` (new/resume/fork) only rebinds the conversation;
+`session_shutdown` revokes it and, for the main agent, quiesces all standalone owners (including
+undisplayed scopes) before exit. omp has no extension reload. Incompatible retained
 registry versions fail loudly rather than adopting old-code runtime objects. Injected services are
 never closed by the adapter. Idle-only passive notices use pi messages with `triggerTurn: false`,
-wake on `agent_settled`, and detach on revocation. No raw session or second execution loop is exposed.
+wake on a terminal `agent_end` (`willContinue` unset), and detach on revocation. No raw session or second execution loop is exposed.
 
 ## Verification
 

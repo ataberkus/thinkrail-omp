@@ -4,12 +4,13 @@ import defaultFactory, {
 	type MermaidValidator,
 	type VisualizeExtensionOptions,
 } from "./index.ts";
+import { promptGuidelines, promptGuidelinesSection } from "./src/extension.ts";
 
 type ExecResult = { content: Array<{ type: string; text: string }>; details: unknown };
 type CapturedTool = {
 	name: string;
 	label: string;
-	promptGuidelines?: string[];
+	loadMode?: string;
 	execute: (
 		id: string,
 		params: unknown,
@@ -21,15 +22,24 @@ type CapturedTool = {
 	renderResult?: unknown;
 };
 
+type BeforeAgentStart = (event: { systemPrompt: string[] }) => unknown;
+
+let beforeAgentStart: BeforeAgentStart | undefined;
+
 function loadTool(
 	validateMermaid?: MermaidValidator,
 	options: VisualizeExtensionOptions = {},
+	activeTools = ["visualize"],
 ): CapturedTool {
 	let captured: CapturedTool | undefined;
 	const fakePi = {
 		registerTool: (def: CapturedTool) => {
 			captured = def;
 		},
+		on: (event: string, handler: BeforeAgentStart) => {
+			if (event === "before_agent_start") beforeAgentStart = handler;
+		},
+		getActiveTools: () => activeTools,
 	};
 	const factory =
 		validateMermaid || Object.keys(options).length > 0
@@ -41,9 +51,10 @@ function loadTool(
 }
 
 describe("visualize extension", () => {
-	test("registers a tool named 'visualize' with TUI renderers", () => {
+	test("registers an essential tool named 'visualize' with TUI renderers", () => {
 		const tool = loadTool();
 		expect(tool.name).toBe("visualize");
+		expect(tool.loadMode).toBe("essential");
 		expect(typeof tool.renderCall).toBe("function");
 		expect(typeof tool.renderResult).toBe("function");
 	});
@@ -189,10 +200,16 @@ describe("visualize extension", () => {
 	});
 
 	test("the prompt guideline names the host scratch directory when given", () => {
-		expect(loadTool().promptGuidelines?.[0]).toContain("outside version control");
-		expect(loadTool().promptGuidelines?.[0]).toContain("current content");
-		expect(
-			loadTool(undefined, { scratchDir: ".scratch/mockups/" }).promptGuidelines?.[0],
-		).toContain("`.scratch/mockups/`");
+		const systemPrompt = () => beforeAgentStart?.({ systemPrompt: ["base"] });
+		loadTool();
+		expect(systemPrompt()).toEqual({
+			systemPrompt: ["base", promptGuidelinesSection(promptGuidelines(undefined))],
+		});
+		expect(promptGuidelines(undefined)[0]).toContain("outside version control");
+		expect(promptGuidelines(undefined)[0]).toContain("current content");
+		loadTool(undefined, { scratchDir: ".scratch/mockups/" });
+		expect(JSON.stringify(systemPrompt())).toContain("`.scratch/mockups/`");
+		loadTool(undefined, {}, ["read"]);
+		expect(systemPrompt()).toBeUndefined();
 	});
 });

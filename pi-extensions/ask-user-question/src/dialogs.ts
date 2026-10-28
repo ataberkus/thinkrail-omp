@@ -1,4 +1,4 @@
-import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@oh-my-pi/pi-coding-agent";
 import {
 	type AskOutcome,
 	type AskRequest,

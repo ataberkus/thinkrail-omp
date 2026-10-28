@@ -1,7 +1,8 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
+import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils";
 import type {
 	HostEnvironment,
 	HostEnvironmentIssue,
@@ -123,6 +124,7 @@ export function applyHostEnvironment(options: { platform?: NodeJS.Platform } = {
 	) {
 		process.env[AGENT_DIR_VAR] = expandAgentDir(stored.agentDir);
 	}
+	refreshDirsFromEnv();
 	for (const issue of issues)
 		log.warn(`stored environment entry skipped: ${issue.field}/${issue.code}`);
 }

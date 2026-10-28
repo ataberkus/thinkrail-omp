@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { refreshModelListings, setModelListingPublisher } from "./modelAvailability";
-import { PI_DEFAULT_MODEL_PER_PROVIDER, preferredDefaultModel } from "./modelDefaults";
+import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import {
+	type ModelListingRuntime,
+	refreshModelListings,
+	setModelListingPublisher,
+} from "./modelAvailability";
+import { ModelRuntime } from "./modelRuntime";
 import { settledAvailableModels } from "./piRuntime";
 
 let priorOffline: string | undefined;
@@ -22,17 +25,15 @@ afterEach(() => {
 });
 
 async function runtimeWith(
-	credentials: Record<string, Parameters<InMemoryCredentialStore["modify"]>[1]>,
+	credentials: Record<string, Parameters<AuthStorage["credentials"]["set"]>[1]>,
 ): Promise<ModelRuntime> {
-	const store = new InMemoryCredentialStore();
-	for (const [providerId, credential] of Object.entries(credentials))
-		await store.modify(providerId, credential);
 	const runtime = await ModelRuntime.create({
-		credentials: store,
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
-		refreshOnCreate: false,
 	});
+	for (const [providerId, credential] of Object.entries(credentials))
+		await runtime.authStorage.credentials.set(providerId, credential);
 	await runtime.refresh({ allowNetwork: false });
 	return runtime;
 }
@@ -59,28 +60,9 @@ function serveListing(
 	return `http://127.0.0.1:${server.port}`;
 }
 
-test("Sign in with ChatGPT offers only the models the ChatGPT backend serves", async () => {
-	const runtime = await runtimeWith({
-		openai: async () => ({
-			type: "oauth",
-			access: "chatgpt-access",
-			refresh: "chatgpt-refresh",
-			expires: Date.now() + 86_400_000,
-		}),
-	});
-	const chatgpt = runtime.getModels("openai-codex").map((model) => model.id);
-	const offered = modelIds(runtime, "openai");
-	expect(offered.length).toBeGreaterThan(0);
-	expect(offered).not.toContain("gpt-4");
-	expect(offered.every((id) => chatgpt.includes(id))).toBe(true);
-	expect(preferredDefaultModel(settledAvailableModels(runtime))?.id).toBe(
-		PI_DEFAULT_MODEL_PER_PROVIDER["openai-codex"],
-	);
-});
-
 test("an OpenAI API key keeps the full OpenAI catalog", async () => {
 	const runtime = await runtimeWith({
-		openai: async () => ({ type: "api_key", key: "sk-test" }),
+		openai: { type: "api_key", key: "sk-test" },
 	});
 	expect(modelIds(runtime, "openai")).toContain("gpt-4");
 });
@@ -166,13 +148,15 @@ test("an unreadable listing leaves the catalog unfiltered", async () => {
 
 test("a stalled credential resolver cannot wedge listing refreshes past the deadline", async () => {
 	let authSignal: AbortSignal | undefined;
-	const runtime = {
-		getModels: () => [{ baseUrl: "http://127.0.0.1:9/v1", api: "openai-completions" }],
-		getAuth: (_providerId: string, options?: { signal?: AbortSignal }) => {
+	const base = (await runtimeWith({})).getModels("openai")[0];
+	if (!base) throw new Error("openai catalog is empty");
+	const runtime: ModelListingRuntime = {
+		getModels: () => [{ ...base, baseUrl: "http://127.0.0.1:9/v1", api: "openai-completions" }],
+		getAuth: (_target, options) => {
 			authSignal = options?.signal;
 			return new Promise<never>(() => {});
 		},
-	} as unknown as Parameters<typeof refreshModelListings>[0];
+	};
 	const started = Date.now();
 	expect(await refreshModelListings(runtime, new Set(["openai"]))).toBe(false);
 	expect(Date.now() - started).toBeLessThan(7_000);

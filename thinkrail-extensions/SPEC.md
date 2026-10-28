@@ -94,8 +94,8 @@ What a `./web` half may import:
   shared resolver resolves the extension's entry from `specifier`, then each `skillPackages` manifest via
   `createRequire(extensionEntry)` — build support stages the flattened roots, unbundled dev resolves at
   runtime, the bundled runtime uses only the injected staged root. The launcher infrastructure (desktop's
-  bundled server runtime, `startDesktopHost`, `registerBundledRuntime`'s OAuth/Bedrock/trash registration,
-  the generated-module isolation of `pi-web-access`) is unchanged by this.
+  bundled server runtime, `startDesktopHost`, `registerBundledRuntime`'s trash-helper registration) is
+  unchanged by this.
 - **Web:** `apps/web/src/extensions/registry.ts` exports the ordered web extensions;
   `registerWebExtensions()` feeds their `toolRenderers` into the chat tool registry. App-local tool
   registrations retain their side-effect imports; extension descriptors need none.
@@ -132,4 +132,3 @@ the default tool renderer until step 2 — never visualize, whose renderer exist
 | --- | --- | --- |
 | `visualize` | `@thinkrail/pi-visualize` | shipped. `./server` injects the **strict** mermaid validator (`mermaid` at the web renderer's catalog version, initialised through `linkedom` — required: DOMPurify needs a real `document` for flowchart/class/state/gantt/mindmap, verified under Bun). `./web` carries the diagram/comparison cards and exports `MermaidView`. The guarantee is syntax parsing, not SVG/layout success; the browser renderer keeps its fallback. |
 | `ask-user-question` | `@thinkrail/pi-ask-user-question` | shipped; the first interactive tool. `./server` is session-only: `sessionExtensions` composes the portable tool with ThinkRail's wording and an asker over the host's interactive-tool mailbox (`awaitToolResponse`); `interactiveTools` declares `ask_user_question` with a `describeResponse` that renders a late answer in the package's own envelope wording. `./web` registers the questionnaire card `interactive`, fed entirely by the host through `ToolRenderProps.interaction`; the plan page renders it through the tool registry like the chat does. [[module-ext-ask-user-question]]. |
-| `web-access` | third-party `pi-web-access` | planned next: wraps the npm package with the existing renderers and `headlessSearchPolicy`, removing the last packager special case. |

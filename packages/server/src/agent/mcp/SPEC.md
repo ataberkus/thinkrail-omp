@@ -2,229 +2,160 @@
 id: submodule-server-agent-mcp
 type: submodule-design
 status: active
-title: "agent/mcp — host-owned MCP layer: pi-parity config loader, writers, fingerprints, per-session host extension"
+title: "agent/mcp — host-owned MCP layer: omp-schema config loader, writers, fingerprints, per-load MCP manager and session host"
 parent: submodule-server-agent
 depends-on: [module-contracts]
-tags: [mcp, pi]
+tags: [mcp, omp]
 ---
 
 ## Responsibility
 
-What ThinkRail owns around pi's built-in MCP: at the configuration layer, reading the two `mcp.json`
-files exactly as pi does, editing them safely from a long-lived multi-client process, and the two
-host-only derivations — the exposure normalization that stands in for codemode, and the per-entry
-fingerprint behind repo-server approvals; at the session layer, the per-session host extension that
-guards calls and the per-server lock that keeps two sign-ins for one server from running at once; and
-reading one server's lines from pi's shared MCP log. The engine (connections, OAuth, tools) stays pi's;
-this module never opens a connection.
+What ThinkRail owns around omp's MCP client (`@oh-my-pi/pi-coding-agent/mcp`): at the configuration
+layer, reading omp's two native `mcp.json` files under ThinkRail's policy, editing them safely from a
+long-lived multi-client process, and the two host-only derivations — exposure (a ThinkRail key omp
+ignores) and the per-entry fingerprint behind repo-server approvals; at the session layer, one omp
+`MCPManager` per engine-session load that the host connects, closes and reports on, the host wrapper
+around every MCP tool it hands the session (call confirmation, exposure, bounded result summary), the
+chat's `/mcp` command, OAuth sign-in through omp's reauthorization engine, and the server log omp does
+not keep. Transports, OAuth flows, credential storage (omp's `AuthStorage`) and tool bridging stay omp's.
 
 Upgrade removal gates live in [[pi-compatibility]]; the contracts below own the implementation detail.
 
-## pi facts (`@earendil-works/pi-coding-agent`, the catalog-pinned version)
+## omp facts (`@oh-my-pi/pi-coding-agent`, the catalog-pinned version)
 
-pi does not export `loadMcpConfig` / `validateMcpServerConfig` / its writers, and a host-supplied
-`loadConfig` replaces pi's loader wholesale — so `config.ts` is a **port** of `dist/core/mcp-servers.js`
-and `dist/extensions/mcp/config.js` (MIT). The rules that matter for safety are the same by
-construction and pinned by `config.test.ts`, which runs the same fixtures through pi's installed loader
-(reached by its dist path, since the package `exports` map hides it) and ours: server-name charset,
-exposure values and the `codemode-deferred` alias, `toolExposure` shape, `type: "sse"` rejection,
-URL/`headers`/`args`/`env`/`cwd` typing, OAuth (`callbackUrl` loopback-only, `callbackPort`
-consistency, CIMD constraints, `authServerMetadataUrl`), `auth.provider` only with https or loopback and
-**never in the project file**, project override entries (`enabled` / `exposure` / `toolExposure` only, on
-an existing global server, reported merged with `scope: "global"` and an `override` path), and the
-`-`/`_` namespace clash. Re-verify on every pi bump; a parity failure is a port bug, never a reason to
-relax a rule. One leading UTF-8 BOM is ignored consistently by the loader, writers, and raw-entry
-occupancy/fingerprint reads. A successful edit writes ordinary JSON without the BOM; a refused edit or
-removal of an absent name preserves the original bytes. This keeps Windows-authored files editable
-without bypassing approvals or treating an occupied name as absent.
+- **Files and schema.** omp's native files are `getAgentDir()/mcp.json` (user) and
+  `<cwd>/.omp/mcp.json` (project, `CONFIG_DIR_NAME` from `@oh-my-pi/pi-utils`). An entry is
+  `{ type?: "stdio" | "http" | "sse", command, args, env, cwd | url, headers, enabled, timeout (ms),
+  requestIdFormat, instructions, auth: { type: "oauth" | "apikey", credentialId, … }, oauth: { clientId,
+  clientSecret, scope, redirectUri, callbackPort, callbackPath, prompt } }`; a `url` without `type` is
+  HTTP. The user file may carry `disabledServers` (always wins) and `enabledServers` (overrides a file's
+  `enabled: false`). omp also reads `.mcp.json`/`mcp.json` variants and other tools' configurations; the
+  host reads only the two native files (repository configuration from other tools would otherwise run
+  without an approval). omp's discovery collapses two definitions with the same transport into one;
+  the host keeps both names.
+- **Loader.** omp's public `loadAllMCPConfigs` is a multi-source capability loader: it silently drops
+  invalid entries (logger warnings), offers no per-entry admission and returns only connectable,
+  merged configs. `MCPManager`'s third constructor argument (`MCPConfigLoader`) lets the host supply its
+  own; omp's `validateServerName` / `validateServerConfig` are public and the host's validator ends
+  with them. The parity test runs every fixture through `loadAllMCPConfigs` (agent directory isolated):
+  every server ThinkRail admits loads in omp with the same transport definition and source path, and
+  every server omp loads that ThinkRail does not has a reported ThinkRail error. Re-run on every omp
+  bump; a parity failure is a port bug.
+- **Session wiring.** `createAgentSession({ enableMCP: true, mcpManager })` skips omp's own discovery and
+  does not wire the manager's tool or prompt callbacks, does not disconnect it on `dispose()`, and makes
+  it the process-global `MCPManager.instance()` (read by the `mcp://` resource handler). The host
+  therefore connects servers itself after the session exists, delivers tools with
+  `session.refreshMCPTools`, registers `setPendingMCPDiscovery` so the first turn waits
+  (`MCP_DISCOVERY_TURN_WAIT_MS`), clears the global instance again (several chats share the process), and
+  closes the manager. `dispose()` itself emits `session_shutdown` (no `reason`) and runs handlers in
+  parallel with a 2 s cap; MCP closure never depends on them.
+- **Tools.** Minted `mcp__<server>_<tool>` (lowercase, `[^a-z0-9_]` → `_`, single separator, ≤ 64
+  chars); `CustomTool` carries `mcpServerName`, `mcpToolName`, `mcpReadOnlyHint`. Results put the raw MCP
+  content and `structuredContent` in `details` (`MCPToolDetails`, base64 included); omp's spill wrapper
+  saves oversized text as a session artifact (`details.meta.truncation.artifactId`). A tool whose
+  `loadMode` is `discoverable` (the default) is mounted under `xd://` while `tools.xdev` is on;
+  `essential` stays top-level. There is no `tool_search`, codemode or resource tool.
+- **Status and auth.** `MCPManager` has typed state (`getConnectionStatus`, `addConnectionStatusListener`
+  events `connecting`/`connected`/`failed`/`reconnecting`, `reconnectServer(name, { manual })`,
+  `waitForStartup`, `getTools`). OAuth runs through `reauthorizeMcpServer` (public subpath
+  `mcp/oauth-reauth`) with `onAuth`, `onManualCodeInput`, an `AbortSignal` and a per-owner single
+  flight; credentials are url-keyed rows in `AuthStorage`. omp writes no `mcp.log` and drops a stdio
+  server's stderr.
+- **tool_call budget.** An extension `tool_call` handler runs under a 30 s active-work budget that only
+  omp-owned `ctx.ui` dialogs pause, so a confirmation through the host's anchored dialog would time out
+  and block the call; confirmation therefore runs inside the host's tool wrapper.
 
 ## What's here
 
-- `summaries.ts` — `summarizeMcpServers()`: one `McpServerSummary` per entry as written (an override-only
-  project entry folds into its user-level server with both its `approval` and its validation error;
-  an entry that is not an object
-  keeps its row with pi's `must be an object` error), with scope, defining file, the `fingerprint` of
-  the row's own raw entry (`fingerprintMcpEntry` over the entry as written in the defining file, at both
-  scopes — the identity a rewrite or removal must present), transport, masked endpoint (`maskMcpEndpoint`), whether this row is the admitted effective definition,
-  configured vs effective exposure and enablement (record
-  overrides and admitted repo overrides applied), OAuth applicability, replacement of a user-level server,
-  approval state (`approved` / `pending` / `changed` against the current fingerprint), the configured
-  description and pi-equivalent config errors (both through `redactMcpText`), and on the effective row the
-  `alwaysAllowed` tools whose grant still matches its target. `summarizeMcpConfigErrors()` is the file-level rest (unparsable
-  JSON, `mcpServers` not an object, a mistyped `autoEnableCodemode`) as `{ source, message }`, masked, for
-  `McpListResult.configErrors`: for the first two pi's loader lists none of that file's servers, so without
-  it Settings would read "no servers".
-- `redact.ts` — the host's one credential mask for text that leaves it. pi redacts nothing in its status
-  texts: a connection error, an HTTP error-body snippet and a stdio server's stderr tail (up to 2 000
-  chars) arrive verbatim. `redactMcpText` masks, deterministically and idempotently, URL user info and
-  credential-named query values (`maskUrl`; any other URL is returned exactly as written), `Bearer` /
-  `Basic` credentials (any case), credential-named `key=value` and unquoted `key: value` pairs (as a
-  server's stderr prints them; a `Bearer`/`Basic` value keeps its scheme) and quoted `"key": value` pairs, the
-  known token prefixes (`gh[pousr]_`, `github_pat_`, `sk-`, `xox[abprs]-`, `glpat-`, `AKIA`), and runs of
-  32+ characters that are hex, or mixed-case with digits in the base64url alphabet — `/` and `.` end a
-  run, so paths, URLs and package names survive (a standard-base64 secret split by `/` into short parts is
-  the accepted miss). It is applied where pi's text becomes a host DTO: both status parsers (every
-  `detail` and parsed config error), `summarizeMcpServers` (`configError`), `summarizeMcpConfigErrors`,
-  `readMcpServerLog`, legacy-client startup notifications and the sign-in probe's error frames. `maskMcpEndpoint` is the command-line form: the URL, or the command
-  with the value after a credential-named flag or assignment, URL-shaped arguments (user info, credential-named query values),
-  header arguments (any value after `-H` / `--header`, a credential-named `Name: value` anywhere) and
-  token-prefixed arguments masked; `${VAR}` references stay, and arguments with spaces, quotes or nothing in
-  them are JSON-quoted so the line is unambiguous (the approve dialog shows it as what runs).
-- `status.ts` — parsers for pi's two status texts (`formatStatus` lines `name: state[, N tools] (exposure)`
-  with indented errors, and the startup attention notice) and `deriveMcpServerStatuses()`; the formats are
-  pinned by fixtures and re-checked on every pi bump; multiline configuration diagnostics do not discard
-  valid server rows, and parsed details are redacted before anything else sees them.
-- `log.ts` — `readMcpServerLog(name)` → `McpServerLog`: pi appends every `notifications/message` a
-  server sends to one `mcp.log` in the agent dir (rotated to `mcp.log.1` past 5 MiB), one entry per
-  message as `<ISO time> [<server>] <level>[ <logger>:] <text>` with continuation lines indented four
-  spaces (`formatMcpLogMessage`, so a server cannot forge another's head). `mcpServerLogLines` keeps the
-  entries whose head names the server plus their continuations — never a substring match — and the
-  latest 200 lines; both files are read (the last 8 MiB each, a missing one is empty) and the result goes
-  through `redactMcpText`. The format is pinned by a test against pi's own formatter; re-check it on every
-  pi bump.
-- `results.ts` — `summarizeMcpResult()`: the `McpResultSummary` the session host's `tool_result` handler
-  writes into `details.thinkrail` for `mcp__*` and the three resource tools, built from pi's
-  machine-readable result (`structuredContent` = the server's raw `CallToolResult`, or the resource
-  payload): block kinds, URIs, MIME types and sizes — never image/audio/blob data — plus the server's own
-  `structuredContent`. One byte budget (`MCP_SUMMARY_BYTES`, 64 KiB) bounds the whole summary: blocks are
-  kept in order until it is spent (`omittedBlocks` counts the rest, since a server may return thousands of
-  resource links with long URIs), and `structuredContent` is kept only if it fits what remains (else
-  `structuredContentTruncated`); a resource read keeps only its contents' URIs and types. pi drops
-  `structuredContent` from finalized messages, so this is what lets a card render the same live, after
-  reload and on another client.
-- `management.ts` — `effectiveMcpServerConfig` reads the admitted definition through the same loader
-  used by sessions, so probes never infer it from a presentation row. The host composes
-  `writeMcpServerEntry` (pi validation plus the project `auth` ban, add vs update, project containment;
-  returns a project entry's fingerprint).
-  Add requires the name to be absent as an own property in the defining file's `mcpServers`, regardless
-  of entry validity: scalar, null and array values occupy the name at both user and project scope, even
-  if they appeared after the client's list read. Refusal changes neither file bytes nor approvals.
-  Update intentionally still requires an existing object entry; it does not replace malformed
-  non-object values. The other helpers are `removeMcpServerEntry`, `mcpEntryFingerprint(scope, worktree,
-  name)` (the fingerprint of the raw entry currently in that scope's file — the global `mcp.json` or the
-  worktree's `.pi/mcp.json` — `undefined` when absent; what the host compares a rendered
-  `expectedFingerprint` against before any rewrite or removal), and
-  `shareMcpOverrideWithRepo` (writes pi's override entry from the record; refuses when the user-level
-  server it overrides no longer exists — an override without a definition would be an invalid entry —
-  when the project file has any own value that is not an override object, or when it holds an override
-  not approved at its current fingerprint, so a share never merges into unreviewed repository content).
-  Sharing checks raw repository occupancy independently of validity; rejecting a malformed occupied
-  entry preserves the file, approvals and record override. Its user-level definition read and
-  written-override verification intentionally remain object-only checks, not absence checks.
-- `config.ts` — the port plus the host additions: `loadHostMcpConfig()` is what a session hands pi —
-  project-file entries (servers and override-only entries alike) are admitted only when the project
-  record's `mcpApprovals[name]` equals their current fingerprint (an unapproved override leaves the global
-  server as configured), the record's `mcpOverrides` set `enabled` / `exposure` of user-level servers, an
-  optional chat-local disabled set wins over both, and exposure is normalized; `loadMcpConfigFiles()`
-  (with the optional `admitProjectEntry` predicate it is built on) returns pi's `LoadedMcpConfig`
-  **and** `entries` (every named `mcpServers` value as written — objects and invalid values alike — with
-  file, scope and whether it is an override) because pi's merged result loses project provenance, **and**
-  `fileErrors` (the file-level subset of `errors`, split into path and message);
-  `fingerprintMcpEntry(name, raw)` = SHA-256 over the name and the canonical JSON of the whole raw entry (keys sorted recursively except
-  `toolExposure`, whose order is semantic) — never over resolved values; `normalizeExposureForHost()` maps
-  unset and `codemode` exposures (server and per-tool) to `deferred` in memory while codemode is not
-  shipped. `mcpPolicyOf(project)` reads that policy (approvals, overrides, tool grants) off a project
-  record (absent fields read as empty); `mcpTargetOf` / `grantedMcpTools` / `mcpToolLabel` (the tool name
-  without `mcp__<server>__`) back the tool grants.
-- `sessionHost.ts` — `createMcpSessionHost({ policy, onCommandSettled?, askForToolCall, grantTool })`,
-  one per parent session (the manager keeps it on its entry; child sessions get none): a `tool_call`
-  handler for every `mcp__*` call whose tool does not declare `readOnlyHint: true`. It skips the question
-  for a tool allowed in this chat or holding a valid project grant; otherwise it asks through the injected
-  `askForToolCall` (the manager's `selectForToolCall`, so the dialog names `event.toolCallId`, renders
-  on that call's card, and carries `event.input` as `toolInput` — the input as it reaches the guard, which
-  the prompt lists in full; the title never embeds a preview) with **Deny · Allow once · Allow in this chat · Always allow**, in that order so a
-  lasting grant never sits next to Deny on a stacked mobile layout. When Always allow is offered, the
-  title's second line states its scope ("Always allow trusts this tool in every chat of this project.
-  Manage it in Settings › MCP servers."); the web renders later title lines as supporting text, so the
-  copy needs no contract field. Anything but an affirmative answer
-  (Deny, dismissal, a user message that answered instead, abort, no UI) blocks with a reason. The only
-  abort it wires is the run's `ctx.signal`, passed to the port; a user message pi accepts cancels the
-  dialog through the bridge's generic `cancelExtUiForSession` ([[submodule-server-agent]] ›
-  `webUiContext`), so the host owns no cancel set or `AbortController` of its own and exposes no cancel
-  method. "Allow in this chat" lives in the host object, so it survives resource reloads and dies
-  with the session. **Always allow** is offered only when `loaded()` knows the tool's server (pi's
-  `ToolInfo.namespace.aliases[0]`); it calls `grantTool(server, mcpTargetOf(config), toolName)` and never
-  touches the in-chat set, so a revoke in Settings reaches open chats at their next call. Grants are read
-  through `policy().toolGrants` on every call (`grantedMcpTools`): a grant counts only while its `target`
-  — SHA-256 of the effective entry's `command` + `args`, or `url`, as written — still matches, so env,
-  header or exposure edits keep it and a new command or URL asks again. Tools are keyed by pi's tool name,
-  the only name the guard sees (pi's `ToolInfo` carries no raw MCP tool name). Grants live in the project
-  record, never in `.pi/mcp.json`, which a repository could ship pre-granted. Its `extensions` also carry the engine (`engine.ts`) with the session's `loadConfig`
-  (`loadHostMcpConfig` over `getAgentDir()`, the session `cwd`, `ctx.isProjectTrusted()` and the injected
-  project policy). The host extension is an always-loaded inline factory, so its factory starts every load:
-  it clears `loaded()` (each server's effective config as pi received it, set again only when the built-in
-  starts — a load where another extension owns `/mcp`, or `-builtin:mcp`, leaves it `null`) and keeps that load's `ExtensionAPI` for `registered()` (pi's
-  `getMcpServers()`: the servers extensions registered, `[]` once the load is stale). `shutdownEngine(event,
-  ctx)` runs the engine's captured shutdown. The manager captures whether `loaded()` was non-null
-  before a gated reload: a failed replacement can clear or update that snapshot without successfully
-  applying the runtime. Together with any newly loaded engine, that provenance allows the parent
-  `mcpSessions` tracked object to retain one retryable failure for immediate, deferred, manual and
-  chat-local override reloads, even with no remaining config delta. Only successful reloads clear it;
-  this host owns no second failure marker. The optional command-completion callback is supplied by the
-  session manager; this child module never imports the status coordinator.
-- `engine.ts` — `createMcpEngine({ loadConfig, lockSignIns?, openUrl?, onCommandSettled? })` →
-  `{ extensions, shutdown }`: pi's two built-in descriptors (`mcp` = `createMcpExtension`, `tool-search`),
-  `replaceable: true, builtin: true` exactly like pi's CLI. Optional host callbacks deliver Settings
-  authorization URLs through `openUrl` and invalidate status after mutating commands. Ordinary chats
-  never open a browser on the host. The `mcp` factory first registers its own
-  `session_start` / `mcp_servers_change` handlers that activate `tool_search` whenever
-  `pi.getMcpServers()` is non-empty, so they run before pi's reachability check: extension-registered
-  servers bypass the loader's normalization (pi defaults them to codemode, which is not shipped) and
-  `tool_search` reaches them. Living inside the replaceable built-in, the activation disappears with it when
-  another extension owns MCP, and handling `mcp_servers_change` there does not distort pi's "nobody
-  connects registered servers" report. The `mcp` factory hands pi a `Proxy` of the `ExtensionAPI`; every
-  member but two is forwarded with `Reflect.get` (pi's API object is never spread, so nothing is read
-  eagerly). Each factory load owns a closed flag and one cleanup promise. `on` captures pi's
-  `session_shutdown` handlers; both `shutdown(event, ctx)` and the runner's shutdown dispatch close that
-  load synchronously and join the same cleanup promise. Pi clears its server list before awaiting
-  transport closure (re-verified on every upgrade), so a second raw dispatch would return early: idempotence alone does not preserve
-  completion ordering. Reload must await actual cleanup before admitting a replacement, not the bounded
-  quit wait. The proxy guards the actual `session_start` and `mcp_servers_change` callbacks, including
-  tool-search activation, against a closed load: an earlier async handler can resume the dispatch after
-  shutdown has already finished. These guards own only that load's engine resources, not persistent
-  session lifecycle state. Re-check these ordering guarantees on every pi bump. Unless the caller passes
-  `lockSignIns: false` (only the Settings probe, which holds the lock itself), `registerCommand` wraps
-  `/mcp`'s handler: `login <name>` /
-  `logout <name>`, parsed the way pi parses them, take `acquireMcpSignInLock(name, "chat")` for the
-  command's duration and release it in `finally`; while another holder has it the command posts "A sign-in
-  for "<name>" is already running in Settings." (or "in a chat") as a warning and never reaches pi. Status,
-  `reconnect`, a bare `login` / `logout` and malformed arguments retain pi's dispatch behavior.
-  A mutating command's completion triggers the supplied status invalidation, including failure; status
-  reads do not, preventing capture recursion.
-- `signInLock.ts` — `acquireMcpSignInLock(serverName, holder)`: the process-wide lock, keyed by pi's
-  normalized server namespace (`-` and `_` aliases share it, matching pi credential identity), that Settings probes (`"settings"`) and chats (`"chat"`) share (why and who holds it:
-  [[submodule-server-agent]] › MCP servers). It returns `{ release }` (frees only its own hold, so a late
-  or repeated call is harmless) or `{ heldBy }`, which callers turn into their refusal.
-- `writers.ts` — `add` / `update` / `remove` with pi's editing semantics (unknown keys and indentation
-  kept; a global server's `enabled: true` / `exposure: "codemode"` defaults are removed rather than
-  written; an override entry keeps explicit values), replacing the file atomically (temp file + rename)
-  with its mode preserved. A user-file symlink stays a symlink: the writer resolves and atomically
-  replaces its real target with that target's permissions, never the link's permissive mode.
-  `assertProjectMcpConfigWritable(worktree, path)` is the containment rule for
-  project files: the target stays inside the worktree, an existing `.pi/` is a real directory and an
-  existing `mcp.json` a regular file — never a symlink, because pi's reader follows links and a
-  read-modify-write would copy a foreign file into the repository (`McpConfigPathUnsafeError`,
-  wire code `MCP_PATH_UNSAFE`). Writes are synchronous, so one process never interleaves two edits; the
-  atomic rename keeps a concurrent `pi mcp add` from ever reading a torn file (a lost update between two
-  processes is accepted). `add` creates a missing file and reports whether it replaced a same-name entry,
-  `remove` whether the file defined the server, and `update` with `override` adds a missing override entry.
+- `config.ts` — `validateMcpServerConfig(name, raw)`: omp's name rule, field typing for every key omp
+  reads (a mistyped value is an error, where omp would ignore it with a warning), `command` xor `url`,
+  ThinkRail's `exposure` / `toolExposure` / `description`, then omp's `validateServerConfig`; returns a
+  typed `HostMcpServerConfig` (omp's `MCPServerConfig` plus the host keys, `type` always set).
+  `loadMcpConfigFiles()` reads the two files (one leading BOM ignored; omp tolerates it too) and returns
+  `servers` (admitted, merged, with `disabledServers` / `enabledServers` applied), `errors`, `entries`
+  (every named value as written, with file, scope and whether it is an override) and `fileErrors`
+  (unparsable JSON, `mcpServers` not an object, a mistyped server list). Project rules: an entry
+  without `command`/`url`/`type` is a ThinkRail override of `enabled` / `exposure` / `toolExposure` of
+  the same-named user server (omp's CLI honours only `{ "enabled": false }` there — any other override
+  shadows the user server in omp and is documented as such); `auth` is refused in the project file (a
+  repository entry could otherwise point a stored credential at its own URL); names whose tool prefixes
+  collide (`mcpNamespace`) are refused. `loadHostMcpConfig()` admits project entries only at their
+  approved fingerprint, applies record overrides, then the chat-local disabled set, and normalizes
+  exposure. `fingerprintMcpEntry` = SHA-256 over the name and canonical JSON of the raw entry
+  (`toolExposure` order kept). `mcpTargetOf` hashes `command`+`args` or `url` for tool grants;
+  `mcpToolLabel` strips `mcp__<namespace>_`. `ompServerConfig` drops the host keys before a config
+  reaches omp. `toolExposureOf(config, tool)` resolves exact name, then `*` patterns, then the server.
+- **Exposure.** omp has no exposure: unset and `codemode` read as `deferred` (the tool stays
+  `discoverable`, mounted under `xd://`), `direct` makes the host wrapper report `loadMode: "essential"`
+  (declared top-level), `hidden` withholds the tool from the session entirely.
+- `engine.ts` — `McpEngineLoad`, one per engine-session load: an `MCPManager(cwd, null, loader)` whose
+  loader returns the load's enabled servers (env-expanded with omp's `expandEnvVarsDeep`, source = the
+  defining file) and nothing once the load is closed. `attach(session, deliver)` sets the session's
+  `AuthStorage`, clears the global instance, subscribes to connection status (into the tracker), tool
+  changes and `notifications/message` (into the log), then runs omp's own deferred sequence:
+  `discoverAndConnect`, deliver, `waitForStartup(MCP_DISCOVERY_TURN_WAIT_MS)`, deliver again, all
+  guarded by the closed flag and `session.isDisposed`, and registers it with `setPendingMCPDiscovery`.
+  `close()` marks the load closed synchronously, aborts its sign-ins, unsubscribes, `disconnectAll()`
+  (which also aborts in-flight handshakes) and joins the discovery, whose `finally` disconnects again if
+  a connect started after closure; repeated calls join the one cleanup promise. omp's stdio close sends
+  SIGTERM then SIGKILL.
+- `sessionHost.ts` — `createMcpSessionHost({ cwd, policy, projectTrusted, onCommandSettled?,
+  askForToolCall, grantTool })`, one per parent session. `sessionOptions()` (called once per load)
+  closes a previous unclosed load, reads `loadHostMcpConfig` with the host-supplied trust (omp's
+  `ctx.isProjectTrusted()` is always true), records `loaded()` and returns `{ enableMCP: true,
+  mcpManager }`, or `{ enableMCP: false }` when no server is enabled. `attach(session)` starts the load;
+  `shutdownEngine()` closes it; `registered()` is the load's per-server runtime status;
+  `reconnect(name)` and
+  `startup()` serve `mcpSessions`. Every delivered tool is a `Proxy` of omp's tool overriding `execute`
+  and, for `direct`, `loadMode`. `execute` first confirms: a tool with `mcpReadOnlyHint`, one allowed in
+  this chat, or one holding a valid project grant runs; with no UI the call is blocked; otherwise
+  `askForToolCall(toolCallId, input, title, options, signal)` with **Deny · Allow once · Allow in this
+  chat · Always allow** (the title's second line states Always allow's scope). Anything but an
+  affirmative answer returns an error result with the reason (denied, cancelled, or dismissed / replied
+  in the chat). Then it runs omp's tool and rewrites `details`: omp's raw `rawContent` and
+  `structuredContent` are dropped, `server` / `tool` (the wire's `McpToolDetails`) and `thinkrail`
+  (`summarizeMcpResult` of the raw result, before omp's spill wrapper prunes it) are added. The
+  extension factory registers `/mcp` (status list; `login` / `logout` / `reconnect <server>`, each under
+  the sign-in lock where relevant, each calling `onCommandSettled`) and a `tool_result` handler that sets
+  `details.fullOutputPath` to the spilled artifact's path (`artifact://<id>` for an in-memory session).
+  Chat login shows the address as a notice and asks for the paste-back through `ctx.ui.input`;
+  dismissing it cancels the flow.
+- `auth.ts` — `signInMcpServer` (omp's `reauthorizeMcpServer` with `acpOwned: true`, so omp never
+  rewrites a ThinkRail-managed file; a per-server flow owner so two servers do not cancel each other),
+  `signOutMcpServer` (removes the `auth.credentialId` row and the url-keyed rows) and
+  `testMcpConnection` (a throwaway `MCPManager` connect: connected with its tool count, needs sign-in by
+  omp's `analyzeAuthError`, or failed with the reason).
+- `status.ts` — `McpRuntimeTracker` turns omp's connection events and per-server connection state into
+  `McpRuntimeStatus` (`starting` before attach or while connecting, `connected` with its tool count,
+  `needs-sign-in` for an HTTP auth failure, `failed` with the reason, `disconnected`, `disabled`);
+  `reportMcpRuntime` redacts it into the derivation input; `formatMcpRuntime` is the `/mcp` text;
+  `deriveMcpServerStatuses` merges it with configuration (disabled in chat / project, pending approval,
+  invalid config, pending reload).
+- `log.ts` — the host appends every `notifications/message` to `mcp.log` in omp's agent directory in
+  pi's former format (`<ISO time> [<server>] <level>[ <logger>:] <text>`, continuation lines indented
+  four spaces, rotated to `mcp.log.1` past 5 MiB); `readMcpServerLog(name)` returns the server's latest
+  200 lines from both files, masked.
+- `results.ts` — `summarizeMcpResult()`: block kinds, URIs, MIME types and sizes, never data, plus the
+  server's `structuredContent`, within one 64 KiB budget; `mcpCallResultOf(details)` rebuilds the call
+  result from omp's `MCPToolDetails`.
+- `redact.ts`, `summaries.ts`, `management.ts`, `writers.ts`, `signInLock.ts` — unchanged contracts on the
+  new schema: masking of every host DTO, Settings rows (unset exposure reads `deferred`; OAuth applies to
+  HTTP/SSE servers without an `Authorization` header whose `auth` is absent or `oauth`), raw-entry
+  writes with containment (`.omp` must be a real directory, `mcp.json` a regular file), stale-write
+  fingerprints, add-vs-update occupancy, `__proto__` safety, BOM handling, mode-preserving atomic
+  rename and user-file symlink preservation; the writer drops a global server's default `enabled: true`
+  and `exposure: "deferred"`. omp's async writers (`addMCPServer` …) are not used: they add `$schema`,
+  rewrite formatting and permissions and replace symlinks. The sign-in lock is keyed by
+  `mcpNamespace`.
+- `fixtures/` — a stdio server, an OAuth HTTP server and the session-test harness (faux provider,
+  isolated agent directory, in-memory credentials).
 
 ## Boundary
 
-- **Public surface (barrel):** `loadMcpConfigFiles`, `validateMcpServerConfig`,
-  `mcpNamespace`, `isOverrideEntry`, `fingerprintMcpEntry`, `normalizeExposureForHost`,
-  `globalMcpConfigPath`, `projectMcpConfigPath`, `addMcpServerConfig`, `updateMcpServerConfig`,
-  `removeMcpServerConfig`, `assertProjectMcpConfigWritable`, `McpConfigPathUnsafeError`,
-  `createMcpSessionHost` + `McpSessionHost` and the option labels `MCP_CONFIRM_DENY` / `MCP_CONFIRM_ONCE` /
-  `MCP_CONFIRM_CHAT` / `MCP_CONFIRM_ALWAYS`, `createMcpEngine` (`{ loadConfig, lockSignIns?, openUrl?, onCommandSettled? }`), `acquireMcpSignInLock`,
-  `loadHostMcpConfig` + `McpProjectPolicy` + `mcpPolicyOf`, `summarizeMcpServers`, `maskMcpEndpoint` /
-  `redactMcpText`, `readMcpServerLog`, `effectiveMcpServerConfig`, the `management.ts` mutations (`writeMcpServerEntry`,
-  `removeMcpServerEntry`, `mcpEntryFingerprint`, `shareMcpOverrideWithRepo`),
-  `summarizeMcpConfigErrors`, the status parsers (`parseMcpStatusText`, `parseMcpAttentionNotice`,
-  `MCP_ATTENTION_PREFIX`, `deriveMcpServerStatuses`, `ParsedMcpStatus`), `summarizeMcpResult` /
-  `isMcpResultTool` / `MCP_SUMMARY_BYTES`, and the types `LoadedMcpFiles`,
-  `McpConfigFileEntry`, `McpConfigScope`, `McpServerConfigPatch`.
-- **Allowed deps:** `@earendil-works/pi-coding-agent` (types, `CONFIG_DIR_NAME`, `getAgentDir`, and the
-  engine factories `createMcpExtension` / `createToolSearchExtension`); `@thinkrail/contracts` (types);
-  `@thinkrail/shared/codedError`; Node `fs`/`path`/`crypto`.
-- **Forbidden:** `host`, `projects`, the web; no connection, OAuth or transport code — those stay in pi.
+- **Public surface (barrel):** `index.ts` — the config, writer, management, status, results, log,
+  auth and session-host exports listed there.
+- **Allowed deps:** `@oh-my-pi/pi-coding-agent` (root types, `getAgentDir`, `MCP_DISCOVERY_TURN_WAIT_MS`)
+  and its `mcp`, `mcp/oauth-reauth`, `mcp/oauth-credentials`, `mcp/startup-events`,
+  `discovery/helpers` and `capability/types` subpaths; `@oh-my-pi/pi-utils` (`CONFIG_DIR_NAME`);
+  `@thinkrail/contracts`; `@thinkrail/shared/codedError`; Node `fs`/`path`/`crypto`.
+- **Forbidden:** `host`, `projects`, the web; no transport or OAuth protocol code of its own.

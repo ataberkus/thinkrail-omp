@@ -10,8 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import { JBCENTRAL_STATUS_TTL_MS } from "@thinkrail/shared/jbcentral";
 import {
 	configurePiRuntime,
@@ -20,6 +19,7 @@ import {
 	disposeAllSessions,
 	getSessionMessages,
 	listAvailableModels,
+	ModelRuntime,
 	setSessionManagerFactory,
 	usePiRuntime,
 } from "../agent";
@@ -184,7 +184,7 @@ async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<voi
 
 async function emptyRuntime(): Promise<ModelRuntime> {
 	return ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});

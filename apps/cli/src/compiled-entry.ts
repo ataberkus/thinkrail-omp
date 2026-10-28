@@ -6,12 +6,16 @@ import { parseSubcommand } from "./args";
 import {
 	bundledExtensionFactories,
 	bundledSkillsVersion,
-	bundledWebAccessFactory,
 	embeddedSkillFiles,
-} from "./bundled-extensions.generated";
+} from "./bundled-extensions.generated.ts";
+import {
+	declareEngineWorkerHost,
+	isEngineWorkerSelector,
+	runEngineWorker,
+} from "./engine-worker-host.generated.ts";
 import { stagingRoot } from "./paths";
-import { embeddedRuntimeAssets, runtimeAssetsVersion } from "./runtime-assets.generated";
-import { embeddedWebAssets, webAssetsVersion } from "./web-assets.generated";
+import { embeddedRuntimeAssets, runtimeAssetsVersion } from "./runtime-assets.generated.ts";
+import { embeddedWebAssets, webAssetsVersion } from "./web-assets.generated.ts";
 
 async function stage(
 	kind: string,
@@ -32,21 +36,26 @@ async function stage(
 	return dir;
 }
 
-if (parseSubcommand(Bun.argv.slice(2)) === undefined) {
-	const staticDir = await stage("web", webAssetsVersion, embeddedWebAssets);
-	const skillsDir = await stage("skills", bundledSkillsVersion, embeddedSkillFiles);
-	const runtimeDir = await stage("runtime", runtimeAssetsVersion, embeddedRuntimeAssets);
-	const macosTrash = join(runtimeDir, "macos-trash");
-	const windowsTrash = join(runtimeDir, "windows-trash.exe");
-	if (process.platform !== "win32") chmodSync(macosTrash, 0o755);
-	process.env.THINKRAIL_STATIC_DIR ??= staticDir;
-	const { registerBundledRuntime } = await import("@thinkrail/server");
-	await registerBundledRuntime({
-		factories: bundledExtensionFactories,
-		skillsDir,
-		trashHelpers: { macos: macosTrash, windows: windowsTrash },
-		webAccessFactory: bundledWebAccessFactory,
-	});
+const argv = Bun.argv.slice(2);
+if (isEngineWorkerSelector(argv[0])) {
+	await runEngineWorker();
+} else {
+	declareEngineWorkerHost();
+	if (parseSubcommand(argv) === undefined) {
+		const staticDir = await stage("web", webAssetsVersion, embeddedWebAssets);
+		const skillsDir = await stage("skills", bundledSkillsVersion, embeddedSkillFiles);
+		const runtimeDir = await stage("runtime", runtimeAssetsVersion, embeddedRuntimeAssets);
+		const macosTrash = join(runtimeDir, "macos-trash");
+		const windowsTrash = join(runtimeDir, "windows-trash.exe");
+		if (process.platform !== "win32") chmodSync(macosTrash, 0o755);
+		process.env.THINKRAIL_STATIC_DIR ??= staticDir;
+		const { registerBundledRuntime } = await import("@thinkrail/server");
+		await registerBundledRuntime({
+			factories: bundledExtensionFactories,
+			skillsDir,
+			trashHelpers: { macos: macosTrash, windows: windowsTrash },
+		});
+	}
+	const { launch } = await import("./bootstrap");
+	await launch("binary");
 }
-const { launch } = await import("./bootstrap");
-await launch("binary");

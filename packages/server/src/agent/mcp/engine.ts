@@ -1,140 +1,156 @@
 import {
-	createMcpExtension,
-	createToolSearchExtension,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type ExtensionEvent,
-	type ExtensionHandler,
-	type InlineExtension,
-	type LoadedMcpConfig,
-	type RegisteredCommand,
-	type SessionShutdownEvent,
-} from "@earendil-works/pi-coding-agent";
-import { acquireMcpSignInLock } from "./signInLock";
+	type AgentSession,
+	type CustomTool,
+	MCP_DISCOVERY_TURN_WAIT_MS,
+} from "@oh-my-pi/pi-coding-agent";
+import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { expandEnvVarsDeep } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import {
+	type LoadMCPConfigsResult,
+	MCPManager,
+	type MCPServerConfig,
+} from "@oh-my-pi/pi-coding-agent/mcp";
+import { type HostMcpServerEntry, ompServerConfig } from "./config";
+import { appendMcpServerLog } from "./log";
+import { type McpRuntimeStatus, McpRuntimeTracker } from "./status";
 
-const TOOL_SEARCH = "tool_search";
+export type DeliverMcpTools = (
+	session: AgentSession,
+	tools: readonly CustomTool[],
+) => Promise<void>;
 
-type ShutdownHandler = ExtensionHandler<SessionShutdownEvent>;
-
-export interface McpEngine {
-	extensions: InlineExtension[];
-	shutdown(event: SessionShutdownEvent, ctx: ExtensionContext): Promise<void>;
-}
-
-function activateToolSearchForRegisteredServers(pi: ExtensionAPI): void {
-	if (pi.getMcpServers().length === 0) return;
-	const active = pi.getActiveTools();
-	if (active.includes(TOOL_SEARCH)) return;
-	if (!pi.getAllTools().some((tool) => tool.name === TOOL_SEARCH)) return;
-	pi.setActiveTools([...active, TOOL_SEARCH]);
-}
-
-function observingCommands(
-	handler: RegisteredCommand["handler"],
-	lockSignIns: boolean,
-	onCommandSettled?: (sessionId: string) => void,
-): RegisteredCommand["handler"] {
-	return async (args, ctx) => {
-		const [action, name, ...extra] = args.trim().split(/\s+/).filter(Boolean);
-		const mutates =
-			(action === "login" || action === "logout" || action === "reconnect") && extra.length === 0;
-		if (!mutates) return handler(args, ctx);
-		const sessionId = onCommandSettled ? ctx.sessionManager.getSessionId() : undefined;
-		const lock =
-			lockSignIns && name && (action === "login" || action === "logout")
-				? acquireMcpSignInLock(name, "chat")
-				: undefined;
-		if (lock && "heldBy" in lock) {
-			const where = lock.heldBy === "settings" ? "in Settings" : "in a chat";
-			ctx.ui.notify(`A sign-in for "${name}" is already running ${where}.`, "warning");
-			return;
-		}
-		try {
-			await handler(args, ctx);
-		} finally {
-			lock?.release();
-			if (sessionId !== undefined) onCommandSettled?.(sessionId);
-		}
+function sourceOf(entry: HostMcpServerEntry): SourceMeta {
+	return {
+		provider: "thinkrail",
+		providerName: "ThinkRail",
+		path: entry.override ?? entry.source,
+		level: entry.scope === "global" ? "user" : "project",
 	};
 }
 
-function engineApi(
-	pi: ExtensionAPI,
-	lockSignIns: boolean,
-	onCommandSettled?: (sessionId: string) => void,
-): { api: ExtensionAPI; shutdown: McpEngine["shutdown"] } {
-	const shutdownHandlers: ShutdownHandler[] = [];
-	let closed = false;
-	let cleanup: Promise<void> | undefined;
-	const shutdown: McpEngine["shutdown"] = (event, ctx) => {
-		closed = true;
-		cleanup ??= (async () => {
-			for (const handler of shutdownHandlers) await handler(event, ctx);
-		})();
-		return cleanup;
-	};
-	const registerCommand: ExtensionAPI["registerCommand"] = (name, options) =>
-		pi.registerCommand(
-			name,
-			name === "mcp"
-				? { ...options, handler: observingCommands(options.handler, lockSignIns, onCommandSettled) }
-				: options,
-		);
-	const on = (event: string, handler: ExtensionHandler<ExtensionEvent>): (() => void) => {
-		if (event === "session_shutdown") {
-			shutdownHandlers.push(handler);
-			return pi.on("session_shutdown", shutdown);
+export class McpEngineLoad {
+	readonly manager: MCPManager;
+	readonly servers: ReadonlyMap<string, HostMcpServerEntry>;
+	readonly #tracker = new McpRuntimeTracker();
+	readonly #onStatus: () => void;
+	readonly #unsubscribe: (() => void)[] = [];
+	readonly #abort = new AbortController();
+	#closed = false;
+	#attached = false;
+	#cleanup: Promise<void> | undefined;
+	#discovery: Promise<void> | undefined;
+
+	constructor(cwd: string, servers: readonly HostMcpServerEntry[], onStatus: () => void) {
+		this.servers = new Map(servers.map((server) => [server.name, server]));
+		this.#onStatus = onStatus;
+		this.manager = new MCPManager(cwd, null, () => this.#loadConfigs());
+	}
+
+	get closed(): boolean {
+		return this.#closed;
+	}
+
+	get signal(): AbortSignal {
+		return this.#abort.signal;
+	}
+
+	async #loadConfigs(): Promise<LoadMCPConfigsResult> {
+		const configs: Record<string, MCPServerConfig> = {};
+		const sources: Record<string, SourceMeta> = {};
+		if (this.#closed) return { configs, sources, exaApiKeys: [] };
+		for (const [name, entry] of this.servers) {
+			if (entry.config.enabled === false) continue;
+			configs[name] = expandEnvVarsDeep(ompServerConfig(entry.config));
+			sources[name] = sourceOf(entry);
 		}
-		const guarded: typeof handler = (event, ctx) => {
-			if (!closed) return handler(event, ctx);
+		return { configs, sources, exaApiKeys: [] };
+	}
+
+	attach(session: AgentSession, deliver: DeliverMcpTools): void {
+		if (this.#closed || this.#attached) return;
+		if (![...this.servers.values()].some((entry) => entry.config.enabled !== false)) return;
+		this.#attached = true;
+		const { manager } = this;
+		if (MCPManager.instance() === manager) MCPManager.setInstance(undefined);
+		manager.setAuthStorage(session.modelRegistry.authStorage);
+		const publish = async (tools: readonly CustomTool[]) => {
+			if (this.#closed || session.isDisposed) return;
+			await deliver(session, tools);
 		};
-		return Reflect.apply(pi.on, pi, [
-			event,
-			event === "session_start" || event === "mcp_servers_change" ? guarded : handler,
-		]);
-	};
-	return {
-		api: new Proxy(pi, {
-			get: (target, key) =>
-				key === "registerCommand" ? registerCommand : key === "on" ? on : Reflect.get(target, key),
-		}),
-		shutdown,
-	};
-}
+		manager.setOnToolsChanged((tools) => publish(tools));
+		this.#unsubscribe.push(
+			manager.addConnectionStatusListener((event) => {
+				this.#tracker.observe(event);
+				this.#onStatus();
+			}),
+			manager.addToolsChangedListener(() => {
+				void publish(manager.getTools()).catch(() => {});
+				this.#onStatus();
+			}),
+			manager.addNotificationListener((server, method, params) => {
+				if (method === "notifications/message") appendMcpServerLog(server, params);
+			}),
+		);
+		this.#discovery = (async () => {
+			try {
+				const result = await manager.discoverAndConnect();
+				if (this.#closed) return;
+				for (const [name, error] of result.errors) this.#tracker.fail(name, error);
+				await publish(result.tools);
+				await manager.waitForStartup(MCP_DISCOVERY_TURN_WAIT_MS);
+				await publish(manager.getTools());
+			} catch {
+			} finally {
+				if (this.#closed) await manager.disconnectAll();
+				this.#onStatus();
+			}
+		})();
+		session.setPendingMCPDiscovery(this.#discovery);
+	}
 
-export function createMcpEngine(options: {
-	loadConfig: (ctx: ExtensionContext) => LoadedMcpConfig;
-	lockSignIns?: boolean;
-	openUrl?: (url: string) => void;
-	onCommandSettled?: (sessionId: string) => void;
-}): McpEngine {
-	const mcp = createMcpExtension({
-		loadConfig: options.loadConfig,
-		openUrl: options.openUrl ?? (() => {}),
-	});
-	const lockSignIns = options.lockSignIns ?? true;
-	let shutdown: McpEngine["shutdown"] = async () => {};
-	return {
-		extensions: [
-			{
-				name: "mcp",
-				replaceable: true,
-				builtin: true,
-				factory: (pi) => {
-					const load = engineApi(pi, lockSignIns, options.onCommandSettled);
-					shutdown = load.shutdown;
-					load.api.on("session_start", () => activateToolSearchForRegisteredServers(pi));
-					load.api.on("mcp_servers_change", () => activateToolSearchForRegisteredServers(pi));
-					return mcp(load.api);
-				},
-			},
-			{
-				name: "tool-search",
-				replaceable: true,
-				builtin: true,
-				factory: createToolSearchExtension(),
-			},
-		],
-		shutdown: (event, ctx) => shutdown(event, ctx),
-	};
+	startup(): Promise<void> {
+		return this.#discovery ?? Promise.resolve();
+	}
+
+	statuses(): McpRuntimeStatus[] {
+		const configs = new Map([...this.servers].map(([name, entry]) => [name, entry.config]));
+		const { manager } = this;
+		return this.#tracker.statuses(
+			configs,
+			this.#attached
+				? {
+						connectionStatus: (name) => manager.getConnectionStatus(name),
+						toolCount: (name) =>
+							manager.getTools().filter((tool) => tool.mcpServerName === name).length,
+					}
+				: null,
+		);
+	}
+
+	async reconnect(name: string): Promise<void> {
+		const entry = this.servers.get(name);
+		if (!entry) throw new Error(`No MCP server named "${name}" is configured for this chat.`);
+		if (entry.config.enabled === false) throw new Error(`MCP server "${name}" is disabled.`);
+		if (this.#closed) throw new Error("The chat is closing.");
+		try {
+			const connection = await this.manager.reconnectServer(name, { manual: true });
+			if (!connection) {
+				const failure = this.statuses().find((status) => status.name === name)?.detail;
+				throw new Error(failure ?? `Could not reconnect to MCP server "${name}".`);
+			}
+		} finally {
+			this.#onStatus();
+		}
+	}
+
+	close(): Promise<void> {
+		this.#closed = true;
+		this.#abort.abort();
+		this.#cleanup ??= (async () => {
+			for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
+			await this.manager.disconnectAll();
+			await this.#discovery;
+		})();
+		return this.#cleanup;
+	}
 }

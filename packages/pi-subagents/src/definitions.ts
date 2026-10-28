@@ -1,7 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import type { DelegationThinkingLevel } from "pi-delegation";
 import { BUILTIN_AGENTS } from "./builtins";
 import { isThinkingLevel } from "./thinking";
 
@@ -12,7 +11,7 @@ export interface AgentDefinition {
 	filePath?: string;
 	tools?: string[];
 	model?: string;
-	thinking?: ThinkingLevel;
+	thinking?: DelegationThinkingLevel;
 	maxTurns?: number;
 	inheritProjectContext?: boolean;
 	skills?: string[];
@@ -95,6 +94,8 @@ function readDefinitionDir(dir: string, source: AgentDefinition["source"]): Agen
 	return definitions;
 }
 
+const PROJECT_CONFIG_DIR = ".omp";
+
 export interface DiscoverOptions {
 	cwd: string;
 	agentDir: string;
@@ -107,7 +108,7 @@ export function discoverAgentDefinitions(options: DiscoverOptions): AgentDefinit
 		readDefinitionDir(join(options.agentDir, "agents"), "personal"),
 		...(options.includeProject
 			? [
-					readDefinitionDir(join(options.cwd, CONFIG_DIR_NAME, "agents"), "project"),
+					readDefinitionDir(join(options.cwd, PROJECT_CONFIG_DIR, "agents"), "project"),
 					readDefinitionDir(join(options.cwd, ".agents", "agents"), "project"),
 				]
 			: []),

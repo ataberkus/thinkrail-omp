@@ -1,6 +1,4 @@
-import { StringEnum } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { TODO_STATUSES, type Todo, type TodoPatch, type TodoPlan } from "../core/index.ts";
 import {
 	consistencyNudge,
@@ -11,39 +9,39 @@ import {
 	withNudges,
 } from "./shared.ts";
 
-const parameters = Type.Object({
-	id: Type.String({ description: "Id of the item to update." }),
-	status: Type.Optional(
-		StringEnum(TODO_STATUSES, {
-			description:
-				"New lifecycle status: pending | in_progress | done. Setting in_progress auto-returns any other in_progress item to pending (one step in work at a time).",
-		}),
-	),
-	title: Type.Optional(
-		Type.String({
-			description:
-				'New title. Keep the step contract: imperative and about the change/outcome, short and scannable — not the process ("make a plan", "look into X") and not agent bookkeeping (that goes in note).',
-		}),
-	),
-	note: Type.Optional(Type.String({ description: "New note (empty string clears it)." })),
-	summary: Type.Optional(
-		Type.String({
-			description:
-				"Completion summary, set together with status=done when the step changed code. Rendered as Markdown on the plan page — write it structured: a short lead sentence plus a bullet list when it has parts (what changed, why — decisions not visible in the diff — and any scope drift), NOT one run-on paragraph. Do NOT restate the title — add what the title can't show. Verification goes in the separate verification field, not here. Empty string clears it.",
-		}),
-	),
-	verification: Type.Optional(
-		Type.String({
-			description:
-				'Verification, set together with status=done: each check in the normalized shape `check → result` — the EXACT check you ran and its outcome ("bun test src/todos → 34 pass", "typecheck → green"). Rendered as Markdown on the plan page: when you ran several checks write them as a Markdown bullet list (one `- check → result` per line), not one run-on line; a single check stays one line. Write exactly "not verified" when you ran nothing. No prose, no summary restatement. Never claim a check you did not run. Empty string clears it.',
-		}),
-	),
-	commitSubject: Type.Optional(
-		Type.String({
-			description:
-				"Commit subject for this step's code changes, set together with status=done when the step changed code — the host commits the step's delta under it verbatim. One line, imperative, describing the CHANGE (not the plan step), and written in THIS repository's existing commit style: read `git log --oneline -20` and match what you see (a Conventional-Commits repo gets `type(scope): subject`, a prose-subject repo gets prose). It lands on the user's branch and must be pushable as-is: no todo/plan markers, no ids, no tool attribution. Empty string clears it; omitted, the host falls back to the step title.",
-		}),
-	),
+const parameters = z.object({
+	id: z.string().describe("Id of the item to update."),
+	status: z
+		.enum(TODO_STATUSES)
+		.optional()
+		.describe(
+			"New lifecycle status: pending | in_progress | done. Setting in_progress auto-returns any other in_progress item to pending (one step in work at a time).",
+		),
+	title: z
+		.string()
+		.optional()
+		.describe(
+			'New title. Keep the step contract: imperative and about the change/outcome, short and scannable — not the process ("make a plan", "look into X") and not agent bookkeeping (that goes in note).',
+		),
+	note: z.string().optional().describe("New note (empty string clears it)."),
+	summary: z
+		.string()
+		.optional()
+		.describe(
+			"Completion summary, set together with status=done when the step changed code. Rendered as Markdown on the plan page — write it structured: a short lead sentence plus a bullet list when it has parts (what changed, why — decisions not visible in the diff — and any scope drift), NOT one run-on paragraph. Do NOT restate the title — add what the title can't show. Verification goes in the separate verification field, not here. Empty string clears it.",
+		),
+	verification: z
+		.string()
+		.optional()
+		.describe(
+			'Verification, set together with status=done: each check in the normalized shape `check → result` — the EXACT check you ran and its outcome ("bun test src/todos → 34 pass", "typecheck → green"). Rendered as Markdown on the plan page: when you ran several checks write them as a Markdown bullet list (one `- check → result` per line), not one run-on line; a single check stays one line. Write exactly "not verified" when you ran nothing. No prose, no summary restatement. Never claim a check you did not run. Empty string clears it.',
+		),
+	commitSubject: z
+		.string()
+		.optional()
+		.describe(
+			"Commit subject for this step's code changes, set together with status=done when the step changed code — the host commits the step's delta under it verbatim. One line, imperative, describing the CHANGE (not the plan step), and written in THIS repository's existing commit style: read `git log --oneline -20` and match what you see (a Conventional-Commits repo gets `type(scope): subject`, a prose-subject repo gets prose). It lands on the user's branch and must be pushable as-is: no todo/plan markers, no ids, no tool attribution. Empty string clears it; omitted, the host falls back to the step title.",
+		),
 });
 
 function nextOpenStep(plan: TodoPlan, id: string): Todo | undefined {
@@ -68,8 +66,7 @@ export function registerTodoUpdate(pi: ExtensionAPI): void {
 		label: "Todo Update",
 		description:
 			"Update one item by id (status, title, or note) — the tool for progressing your plan: flip an item to in_progress when you start it and done when you finish. Marking done is how items complete — they STAY in the list as history (don't remove them). This is the safe way to edit the list: it touches only the one item.",
-		promptSnippet:
-			"todo_update — progress one item (in_progress on start, done when finished; done items stay).",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const patch: TodoPatch = {};

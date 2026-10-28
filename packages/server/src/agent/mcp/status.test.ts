@@ -1,28 +1,50 @@
 import { describe, expect, test } from "bun:test";
 import type { McpServerStatus, McpServerSummary } from "@thinkrail/contracts";
 import { validateMcpServerConfig } from "./config";
-import { deriveMcpServerStatuses, parseMcpAttentionNotice, parseMcpStatusText } from "./status";
+import {
+	deriveMcpServerStatuses,
+	formatMcpRuntime,
+	type McpRuntimeStatus,
+	McpRuntimeTracker,
+	reportMcpRuntime,
+} from "./status";
 
-describe("pi's headless /mcp text", () => {
-	test("every state line, indented errors, config errors and overrides", () => {
-		const parsed = parseMcpStatusText(
-			[
-				"docs: connected, 2 tools (deferred)",
-				"empty: connected, 0 tools (direct)",
-				"linear: needs sign-in, run /mcp login linear (deferred)",
-				"off: disabled (deferred)",
-				"flaky: disconnected, reconnects on next call (direct)",
-				"slow: connecting (deferred)",
-				"cold: starting (deferred)",
-				"broken: failed (deferred)",
-				"    spawn npx ENOENT",
-				"    stderr: command not found",
-				'config error: /home/u/.pi/agent/mcp.json: server "bad" needs either "command" or "url"',
-				'overridden: "jira" registered by ext.ts is overridden by "jira" in mcp.json',
-			].join("\n"),
-		);
-		expect(parsed).not.toBeNull();
-		const state = (name: string) => parsed?.servers.get(name);
+const http = (url: string) => ({ type: "http", url });
+const stdio = { type: "stdio" };
+
+function source(connected: Record<string, number>, connecting: string[] = []) {
+	return {
+		connectionStatus: (name: string) =>
+			name in connected
+				? ("connected" as const)
+				: connecting.includes(name)
+					? ("connecting" as const)
+					: ("disconnected" as const),
+		toolCount: (name: string) => connected[name] ?? 0,
+	};
+}
+
+describe("omp's typed connection status", () => {
+	test("every state from omp's connection events and per-server connection status", () => {
+		const tracker = new McpRuntimeTracker();
+		tracker.observe({
+			type: "connecting",
+			serverNames: ["docs", "empty", "linear", "flaky", "slow", "broken"],
+		});
+		tracker.observe({ type: "failed", serverName: "linear", error: "HTTP 401: Unauthorized" });
+		tracker.observe({ type: "failed", serverName: "broken", error: "spawn npx ENOENT" });
+		const configs = new Map<string, { enabled?: boolean; type?: string; url?: string }>([
+			["docs", http("https://docs.example/mcp")],
+			["empty", stdio],
+			["linear", http("https://linear.example/mcp")],
+			["off", { ...stdio, enabled: false }],
+			["flaky", stdio],
+			["slow", stdio],
+			["cold", stdio],
+			["broken", stdio],
+		]);
+		const statuses = tracker.statuses(configs, source({ docs: 2, empty: 0 }, ["slow"]));
+		const state = (name: string) => statuses.find((status) => status.name === name);
 		expect(state("docs")).toMatchObject({ state: "connected", toolCount: 2 });
 		expect(state("empty")).toMatchObject({ state: "connected", toolCount: 0 });
 		expect(state("linear")?.state).toBe("needs-sign-in");
@@ -30,70 +52,94 @@ describe("pi's headless /mcp text", () => {
 		expect(state("flaky")?.state).toBe("disconnected");
 		expect(state("slow")?.state).toBe("starting");
 		expect(state("cold")?.state).toBe("starting");
-		expect(state("broken")).toMatchObject({ state: "failed" });
-		expect(state("broken")?.detail).toContain("stderr: command not found");
-		expect(parsed?.configErrors).toHaveLength(1);
-		expect(parsed?.servers.has("jira")).toBe(false);
+		expect(state("broken")).toMatchObject({ state: "failed", detail: "spawn npx ENOENT" });
+		expect(tracker.statuses(configs, null).map((status) => status.state)).toEqual([
+			"starting",
+			"starting",
+			"starting",
+			"disabled",
+			"starting",
+			"starting",
+			"starting",
+			"starting",
+		]);
 	});
 
 	test("multiline config diagnostics keep healthy server rows and remain redacted", () => {
 		const error = validateMcpServerConfig("bad\nname", { command: "unused" });
 		expect(typeof error).toBe("string");
-		const parsed = parseMcpStatusText(
+		const parsed = reportMcpRuntime(
 			[
-				"first: connected, 1 tools (deferred)",
-				`config error: /fixture/mcp.json: ${error}`,
-				"    token=private-value",
-				"second: connected, 2 tools (direct)",
-			].join("\n"),
+				{ name: "first", state: "connected", toolCount: 1 },
+				{ name: "second", state: "connected", toolCount: 2 },
+			],
+			[`/fixture/mcp.json: ${error}\n    token=private-value`],
 		);
-		expect([...(parsed?.servers.keys() ?? [])]).toEqual(["first", "second"]);
-		expect(parsed?.configErrors).toEqual([`/fixture/mcp.json: ${error}\n    token=***`]);
+		expect([...parsed.servers.keys()]).toEqual(["first", "second"]);
+		expect(parsed.configErrors).toEqual([`/fixture/mcp.json: ${error}\n    token=***`]);
 	});
 
-	test("the empty report parses; anything else is not status text", () => {
-		expect(
-			parseMcpStatusText("No MCP servers configured. Add them to x or .pi/mcp.json.")?.servers.size,
-		).toBe(0);
-		expect(
-			parseMcpStatusText('Reconnected to MCP server "docs" (connected · 2 tools).'),
-		).toBeNull();
+	test("the empty report has no rows, and the chat's /mcp text lists each state", () => {
+		expect(reportMcpRuntime([]).servers.size).toBe(0);
+		expect(formatMcpRuntime([])).toBe("No MCP servers configured.");
+		const statuses: McpRuntimeStatus[] = [
+			{ name: "docs", state: "connected", toolCount: 2 },
+			{ name: "broken", state: "failed", detail: "spawn ENOENT\nexit 1" },
+		];
+		expect(formatMcpRuntime(statuses)).toBe(
+			"docs: connected, 2 tools\nbroken: failed\n    spawn ENOENT\n    exit 1",
+		);
 	});
 
-	test("details are redacted: pi reports connection errors and stderr tails verbatim", () => {
-		const parsed = parseMcpStatusText(
-			[
-				"remote: failed (deferred)",
-				'    MCP HTTP request failed with status 400: {"error":"rejected","api_key":"sk-live-abcdefgh1234"}',
-				"local: disconnected, reconnects on next call (deferred)",
-				"    Connection closed",
-				"    GITHUB_TOKEN=ghp_abcdefghijklmnop1234 POST https://ada:pw@api.example/mcp",
-			].join("\n"),
-		);
-		expect(parsed?.servers.get("remote")).toMatchObject({
-			state: "failed",
-			detail:
-				'remote: failed (deferred)\nMCP HTTP request failed with status 400: {"error":"rejected","api_key":"***"}',
+	test("details are redacted: omp reports connection errors and HTTP bodies verbatim", () => {
+		const tracker = new McpRuntimeTracker();
+		tracker.observe({
+			type: "failed",
+			serverName: "remote",
+			error:
+				'MCP HTTP request failed with status 400: {"error":"rejected","api_key":"sk-live-abcdefgh1234"}',
 		});
-		expect(parsed?.servers.get("local")?.detail).toBe(
-			"local: disconnected, reconnects on next call (deferred)\nConnection closed\nGITHUB_TOKEN=*** POST https://***:***@api.example/mcp",
+		tracker.observe({
+			type: "failed",
+			serverName: "local",
+			error:
+				"Connection closed\nGITHUB_TOKEN=ghp_abcdefghijklmnop1234 POST https://ada:pw@api.example/mcp",
+		});
+		const parsed = reportMcpRuntime(
+			tracker.statuses(
+				new Map([
+					["remote", http("https://remote.example/mcp")],
+					["local", stdio],
+				]),
+				source({}),
+			),
 		);
-		const notice = parseMcpAttentionNotice(
-			"MCP servers need attention:\n  remote: failed: 401 for Bearer abc123\n  config: token=abc\nRun /mcp to fix.",
+		expect(parsed.servers.get("remote")).toMatchObject({
+			state: "failed",
+			detail: 'MCP HTTP request failed with status 400: {"error":"rejected","api_key":"***"}',
+		});
+		expect(parsed.servers.get("local")?.detail).toBe(
+			"Connection closed\nGITHUB_TOKEN=*** POST https://***:***@api.example/mcp",
 		);
-		expect(notice?.servers.get("remote")?.detail).toBe("remote: failed: 401 for Bearer ***");
-		expect(notice?.configErrors).toEqual(["token=***"]);
 	});
 
-	test("the startup attention notice has its own format", () => {
-		const notice = parseMcpAttentionNotice(
-			"MCP servers need attention:\n  config: bad file\n  linear: needs sign-in\n  broken: failed: spawn ENOENT\n  docs: connected · 3 tools · resources\nRun /mcp to fix.",
-		);
-		expect(notice?.servers.get("docs")).toMatchObject({ state: "connected", toolCount: 3 });
-		expect(notice?.servers.get("linear")?.state).toBe("needs-sign-in");
-		expect(notice?.servers.get("broken")).toMatchObject({ state: "failed" });
-		expect(notice?.configErrors).toEqual(["bad file"]);
-		expect(parseMcpAttentionNotice("something else")).toBeNull();
+	test("a startup failure lasts until omp reports the server connected again", () => {
+		const tracker = new McpRuntimeTracker();
+		const configs = new Map([["docs", http("https://docs.example/mcp")]]);
+		tracker.observe({ type: "failed", serverName: "docs", error: "fetch failed" });
+		expect(tracker.statuses(configs, source({}))[0]).toMatchObject({
+			state: "failed",
+			detail: "fetch failed",
+		});
+		tracker.observe({ type: "reconnecting", serverName: "docs" });
+		expect(tracker.statuses(configs, source({}, ["docs"]))[0]?.state).toBe("starting");
+		tracker.observe({ type: "connected", serverName: "docs" });
+		expect(tracker.statuses(configs, source({ docs: 3 }))[0]).toEqual({
+			name: "docs",
+			state: "connected",
+			toolCount: 3,
+		});
+		expect(tracker.statuses(configs, source({}))[0]?.state).toBe("disconnected");
 	});
 });
 
@@ -117,9 +163,10 @@ test("statuses explain what pi does not run and keep the last report when pi did
 		summary({ name: "repo", scope: "project", approval: { state: "pending", fingerprint: "f" } }),
 		summary({ name: "invalid", configError: 'server "invalid" needs either "command" or "url"' }),
 	];
-	const reported = parseMcpStatusText(
-		"chat-off: disabled (deferred)\nproject-off: disabled (deferred)",
-	);
+	const reported = reportMcpRuntime([
+		{ name: "chat-off", state: "disabled" },
+		{ name: "project-off", state: "disabled" },
+	]);
 	const derived = deriveMcpServerStatuses({
 		summaries,
 		reported,

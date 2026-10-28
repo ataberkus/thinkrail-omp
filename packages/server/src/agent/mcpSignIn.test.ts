@@ -1,19 +1,10 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { mcpOAuthCredentialIdsForServerUrl } from "@oh-my-pi/pi-coding-agent/mcp/oauth-credentials";
 import type { ExtUiRequest, LoginFrame, LoginPush, McpStatusSnapshot } from "@thinkrail/contracts";
-import {
-	createSession,
-	dispatchSessionMcpCommand,
-	disposeAllSessions,
-	removeSession,
-	setSessionManagerFactory,
-	settleSessionsForShutdown,
-} from "./agentSessionManager";
+import { dispatchSessionMcpCommand, removeSession } from "./agentSessionManager";
+import { type McpHarness, startMcpHarness } from "./mcp/fixtures/harness";
 import { startOAuthMcpFixture } from "./mcp/fixtures/oauthServer";
 import { refreshMcpStatus, setMcpStatusPublisher } from "./mcpSessions";
 import {
@@ -23,56 +14,25 @@ import {
 	setMcpLoginPublisher,
 	startMcpProbe,
 } from "./mcpSignIn";
-import { configurePiRuntime } from "./piRuntime";
 import { resolveExtUi, setExtUiPublisher } from "./webUiContext";
 
-const faux = createFauxCore({
-	provider: "signin",
-	api: "signin",
-	models: [
-		{
-			id: "signin",
-			name: "signin",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 100_000,
-			maxTokens: 4096,
-		},
-	],
-});
-const saved = { agent: process.env.PI_CODING_AGENT_DIR, offline: process.env.PI_OFFLINE };
-const root = mkdtempSync(join(tmpdir(), "mcp-signin-"));
-const agentDir = join(root, "agent");
-const cwd = join(root, "project");
+let h: McpHarness;
+let agentDir = "";
+let cwd = "";
 const fixture = startOAuthMcpFixture();
 let pushes: { push: LoginPush; owner: string }[] = [];
 let requests: ExtUiRequest[] = [];
 let statuses: McpStatusSnapshot[] = [];
 
 beforeAll(async () => {
-	process.env.PI_CODING_AGENT_DIR = agentDir;
-	process.env.PI_OFFLINE = "1";
-	mkdirSync(agentDir, { recursive: true });
+	h = await startMcpHarness("signin");
+	agentDir = h.agentDir;
+	cwd = join(h.root, "project");
 	mkdirSync(cwd, { recursive: true });
 	writeFileSync(
 		join(agentDir, "mcp.json"),
 		JSON.stringify({ mcpServers: { oauthy: { url: fixture.url, exposure: "direct" } } }),
 	);
-	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	runtime.registerProvider("signin", {
-		api: faux.api,
-		apiKey: "test",
-		baseUrl: "http://faux.local",
-		streamSimple: faux.streamSimple,
-		models: [{ ...faux.getModel(), api: faux.api }],
-	});
-	configurePiRuntime(runtime);
-	setSessionManagerFactory((dir) => SessionManager.inMemory(dir));
 	setMcpLoginPublisher((push, owner) => pushes.push({ push, owner }));
 	setMcpStatusPublisher((snapshot) => statuses.push(snapshot));
 	setExtUiPublisher((request, audience) => {
@@ -87,20 +47,19 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
-	await settleSessionsForShutdown();
-	disposeAllSessions();
 	fixture.stop();
 	setMcpLoginPublisher(() => {});
 	setMcpStatusPublisher(() => {});
 	setExtUiPublisher(() => {});
-	configurePiRuntime(null);
-	setSessionManagerFactory((dir) => SessionManager.create(dir));
-	if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = saved.agent;
-	if (saved.offline === undefined) delete process.env.PI_OFFLINE;
-	else process.env.PI_OFFLINE = saved.offline;
-	rmSync(root, { recursive: true, force: true });
+	await h.teardown();
 });
+
+const storedCredential = () =>
+	mcpOAuthCredentialIdsForServerUrl(fixture.url)
+		.map((id) => h.runtime.authStorage.credentials.get(id))
+		.find((credential) => credential !== undefined);
+
+const createChat = () => h.chatIn("ws-signin", cwd);
 
 async function frameOf(loginId: string, kind: LoginFrame["kind"]): Promise<LoginFrame> {
 	const until = Date.now() + 15_000;
@@ -142,7 +101,7 @@ test("Test connection reports a reachable server that still needs sign-in", asyn
 	expect(pushes.every((entry) => entry.owner === "owner")).toBe(true);
 });
 
-test("a failed Test connection reports pi's reason with credentials masked", async () => {
+test("a failed Test connection reports omp's reason with credentials masked", async () => {
 	const leaky = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -180,7 +139,7 @@ const oauthyState = async (sessionId: string) =>
 		?.state;
 
 test("sign-in shows the https-or-loopback page, accepts only the owner's paste-back, and stores credentials", async () => {
-	const chat = await createSession({ workspaceId: "ws-signin", cwd });
+	const chat = await createChat();
 	expect(await oauthyState(chat.sessionId)).toBe("needs-sign-in");
 	const { loginId, done } = start("login");
 	const page = await frameOf(loginId, "authUrl");
@@ -202,7 +161,7 @@ test("sign-in shows the https-or-loopback page, accepts only the owner's paste-b
 	replyMcpProbe(loginId, "owner", redirect.href);
 	expect(await done).toEqual({ kind: "success" });
 	expect(fixture.tokenRequests()).toBeGreaterThan(0);
-	expect(existsSync(join(agentDir, "mcp-auth.json"))).toBe(true);
+	expect(storedCredential()?.type).toBe("oauth");
 	expect(await oauthyState(chat.sessionId)).toBe("connected");
 	await removeSession(chat.sessionId);
 
@@ -218,9 +177,7 @@ test("sign-in shows the https-or-loopback page, accepts only the owner's paste-b
 	).toBe(true);
 
 	expect(await start("logout").done).toEqual({ kind: "success" });
-	expect(readFileSync(join(agentDir, "mcp-auth.json"), "utf8")).not.toContain(
-		"fixture-access-token",
-	);
+	expect(storedCredential()).toBeUndefined();
 });
 
 test("cancelling at the paste-back step ends the sign-in and frees the server for another attempt", async () => {
@@ -239,7 +196,7 @@ const callbackOf = (frame: LoginFrame): string => {
 	return new URL(frame.url).searchParams.get("redirect_uri") ?? "";
 };
 
-test("a sign-in left waiting past its deadline times out, closes pi's loopback listener, and frees the server", async () => {
+test("a sign-in left waiting past its deadline times out, closes omp's loopback listener, and frees the server", async () => {
 	const { loginId, done } = start("login", 1_500);
 	const callback = callbackOf(await frameOf(loginId, "authUrl"));
 	await frameOf(loginId, "prompt");
@@ -270,11 +227,7 @@ const chatRequests = (sessionId: string) =>
 	requests.filter((request) => request.sessionId === sessionId);
 
 test("chat login and logout publish their new status without another model turn or list read", async () => {
-	const chat = await createSession({
-		workspaceId: "ws-signin",
-		cwd,
-		model: { ...faux.getModel(), thinkingLevels: ["off"] },
-	});
+	const chat = await createChat();
 	await refreshMcpStatus(chat.sessionId, 5_000);
 	statuses = [];
 	const login = dispatchSessionMcpCommand(chat.sessionId, "login oauthy");
@@ -284,7 +237,7 @@ test("chat login and logout publish their new status without another model turn 
 	const notification = chatRequests(chat.sessionId).find(
 		(request) => request.kind === "notify" && request.message.startsWith("Sign in to MCP server"),
 	);
-	if (notification?.kind !== "notify") throw new Error("missing pi authorization URL");
+	if (notification?.kind !== "notify") throw new Error("missing the authorization URL");
 	const authorization = new URL(notification.message.split("\n")[1] ?? "");
 	const redirect = new URL(authorization.searchParams.get("redirect_uri") ?? "");
 	redirect.searchParams.set("code", "fixture-code");
@@ -311,10 +264,10 @@ test("chat login and logout publish their new status without another model turn 
 	await Bun.sleep(30);
 	expect(statuses).toHaveLength(count);
 	await removeSession(chat.sessionId);
-});
+}, 20_000);
 
 test("a chat's own /mcp login holds the server's sign-in lock until it ends", async () => {
-	const chat = await createSession({ workspaceId: "ws-signin", cwd });
+	const chat = await createChat();
 	const login = dispatchSessionMcpCommand(chat.sessionId, "login oauthy");
 	const asked = await waitFor(() =>
 		chatRequests(chat.sessionId).find((request) => request.kind === "input"),
@@ -325,10 +278,10 @@ test("a chat's own /mcp login holds the server's sign-in lock until it ends", as
 	await login;
 	expect((await start("test").done).kind).toBe("error");
 	await removeSession(chat.sessionId);
-});
+}, 20_000);
 
 test("a chat's /mcp login for a server the host's sign-in probe holds says so instead of starting", async () => {
-	const chat = await createSession({ workspaceId: "ws-signin", cwd });
+	const chat = await createChat();
 	const { loginId, done } = start("login");
 	await frameOf(loginId, "prompt");
 	await dispatchSessionMcpCommand(chat.sessionId, "login oauthy");

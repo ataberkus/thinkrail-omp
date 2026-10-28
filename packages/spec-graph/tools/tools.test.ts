@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
 	existsSync,
 	mkdirSync,
@@ -11,12 +11,23 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type {
-	AgentToolResult,
-	ExtensionAPI,
-	ExtensionToolContext,
-	ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+import { type Api, type Model, toolWireSchema } from "@oh-my-pi/pi-ai";
+import {
+	type AgentSession,
+	type AgentToolResult,
+	createAgentSession,
+	type ExtensionContext,
+	SessionManager,
+	Settings,
+	type ToolDefinition,
+} from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxModelRegistry,
+	fauxProvider,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+	registerFaux,
+} from "pi-faux";
 import {
 	LINK_KINDS,
 	resolveSpecPath,
@@ -24,7 +35,7 @@ import {
 	SPEC_STATUSES,
 	SPEC_TYPES,
 } from "../core/index.ts";
-import { registerSpecTools } from "./index.ts";
+import factory from "../index.ts";
 
 test("spec_grep pages by bytes without losing or repeating matches", async () => {
 	await withRoot(async (root) => {
@@ -190,23 +201,71 @@ function foldsCase(): boolean {
 const caseFolding = test.skipIf(!foldsCase());
 const windowsOnly = test.skipIf(process.platform !== "win32");
 
+const agentRoot = mkdtempSync(join(tmpdir(), "spec-tools-agent-"));
 const tools = new Map<string, ToolDefinition>();
-registerSpecTools({
-	registerTool(tool: ToolDefinition) {
-		tools.set(tool.name, tool);
-	},
-} as unknown as ExtensionAPI);
+const sessions = new Map<string, AgentSession>();
+const settings = Settings.isolated({});
+let registry: Awaited<ReturnType<typeof createFauxModelRegistry>>;
+let model: Model<Api>;
+let agentDirIsolation: IsolatedAgentDir | undefined;
 
-function run(
+beforeAll(async () => {
+	agentDirIsolation = isolateAgentDir(join(agentRoot, "agent"));
+	registry = await createFauxModelRegistry(settings);
+	model = registerFaux(registry.modelRegistry, fauxProvider({ provider: "faux-spec-graph" }));
+	for (const tool of runnerOf(await sessionIn(agentRoot)).getAllRegisteredTools())
+		if (tool.extensionPath === "<inline-0>") tools.set(tool.definition.name, tool.definition);
+});
+
+afterAll(async () => {
+	for (const session of sessions.values()) await session.dispose();
+	agentDirIsolation?.restore();
+	rmSync(agentRoot, { recursive: true, force: true });
+});
+
+function runnerOf(session: AgentSession): NonNullable<AgentSession["extensionRunner"]> {
+	const runner = session.extensionRunner;
+	if (!runner) throw new Error("session has no extension runner");
+	return runner;
+}
+
+async function sessionIn(cwd: string): Promise<AgentSession> {
+	const existing = sessions.get(cwd);
+	if (existing) return existing;
+	const { session } = await createAgentSession({
+		cwd,
+		agentDir: join(agentRoot, "agent"),
+		settings,
+		authStorage: registry.authStorage,
+		modelRegistry: registry.modelRegistry,
+		model,
+		sessionManager: SessionManager.inMemory(cwd),
+		extensions: [factory],
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
+	});
+	sessions.set(cwd, session);
+	return session;
+}
+
+async function contextIn(cwd: string): Promise<ExtensionContext> {
+	return runnerOf(await sessionIn(cwd)).createContext();
+}
+
+async function run(
 	name: string,
 	params: Record<string, unknown>,
 	cwd: string,
 ): Promise<AgentToolResult<unknown>> {
 	const tool = tools.get(name);
 	if (!tool) throw new Error(`missing tool: ${name}`);
-	return tool.execute("call-1", params, undefined, undefined, {
-		cwd,
-	} as unknown as ExtensionToolContext);
+	return tool.execute("call-1", params, undefined, undefined, await contextIn(cwd));
 }
 
 function isError(result: AgentToolResult<unknown>): boolean {
@@ -214,9 +273,13 @@ function isError(result: AgentToolResult<unknown>): boolean {
 }
 
 function paramEnum(toolName: string, prop: string): readonly string[] {
-	const schema = tools.get(toolName)?.parameters as {
-		properties?: Record<string, { enum?: string[] }>;
-	};
+	const tool = tools.get(toolName);
+	if (!tool) throw new Error(`missing tool: ${toolName}`);
+	const schema: { properties?: Record<string, { enum?: string[] }> } = toolWireSchema({
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
+	});
 	return schema.properties?.[prop]?.enum ?? [];
 }
 
@@ -237,6 +300,8 @@ async function withRoot(fn: (root: string) => Promise<void>): Promise<void> {
 	try {
 		await fn(root);
 	} finally {
+		await sessions.get(root)?.dispose();
+		sessions.delete(root);
 		rmSync(root, { recursive: true, force: true });
 	}
 }

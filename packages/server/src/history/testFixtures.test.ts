@@ -2,12 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
 import type { ToolResponsePendingDetails } from "@thinkrail/contracts";
+import { fauxAssistantMessage, isolateAgentDir } from "pi-faux";
 import { defaultSessionDirFor, writeFixtureSession } from "./testFixtures";
 
-describe("writeFixtureSession — pinned against pi's real SessionManager", () => {
-	test("explicit sessionDir layout: SessionManager.list(cwd, dir) round-trips id/cwd/name/messageCount", async () => {
+describe("writeFixtureSession — pinned against omp's real SessionManager", () => {
+	test("explicit sessionDir layout: SessionManager.list(cwd, dir) round-trips id/cwd/title/messageCount", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "trpi-fixture-explicit-"));
 		try {
 			const cwd = "/tmp/thinkrail-a5-pin-explicit";
@@ -27,7 +28,7 @@ describe("writeFixtureSession — pinned against pi's real SessionManager", () =
 			expect(sessions[0]).toMatchObject({
 				id: "pin-explicit-1",
 				cwd,
-				name: "Pin test session",
+				title: "Pin test session",
 				messageCount: 2,
 			});
 		} finally {
@@ -35,7 +36,7 @@ describe("writeFixtureSession — pinned against pi's real SessionManager", () =
 		}
 	});
 
-	test("canonical ask_user_question toolCall + ack details round-trip through SessionManager", () => {
+	test("canonical ask_user_question toolCall + ack details round-trip through SessionManager", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "trpi-fixture-toolcall-"));
 		try {
 			const toolCallId = "ask-fixture-1";
@@ -82,7 +83,7 @@ describe("writeFixtureSession — pinned against pi's real SessionManager", () =
 				],
 			});
 
-			const messages = SessionManager.open(path).buildSessionContext().messages;
+			const messages = (await SessionManager.open(path)).buildSessionContext().messages;
 			expect(messages).toHaveLength(3);
 			expect(messages[1]).toMatchObject({
 				role: "assistant",
@@ -103,7 +104,7 @@ describe("writeFixtureSession — pinned against pi's real SessionManager", () =
 
 	test("default layout: no-arg discovery finds a fixture written under defaultSessionDirFor's encoded dir", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "trpi-fixture-agentdir-"));
-		const previousEnv = process.env.PI_CODING_AGENT_DIR;
+		const isolated = isolateAgentDir(agentDir);
 		try {
 			const cwd = "/tmp/thinkrail-a5-pin-default";
 			const sessionDir = defaultSessionDirFor(agentDir, cwd);
@@ -114,7 +115,6 @@ describe("writeFixtureSession — pinned against pi's real SessionManager", () =
 				messages: [{ role: "user", text: "seed prompt", timestamp: 1_700_000_000_000 }],
 			}).path;
 
-			process.env.PI_CODING_AGENT_DIR = agentDir;
 			const sessions = await SessionManager.list(cwd);
 
 			expect(sessions).toHaveLength(1);
@@ -122,19 +122,18 @@ describe("writeFixtureSession — pinned against pi's real SessionManager", () =
 			expect(sessions[0]).toMatchObject({
 				id: "pin-default-1",
 				cwd,
-				name: "Default layout pin",
+				title: "Default layout pin",
 				messageCount: 1,
 			});
 		} finally {
-			if (previousEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousEnv;
+			isolated.restore();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
 
-	test("default layout: pi's real no-arg listAll() finds what HistoryIndex's own default walk must also find", async () => {
+	test("default layout: omp's real no-arg listAll() finds what HistoryIndex's own default walk must also find", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "trpi-fixture-listall-"));
-		const previousEnv = process.env.PI_CODING_AGENT_DIR;
+		const isolated = isolateAgentDir(agentDir);
 		try {
 			const cwd = "/tmp/thinkrail-a5-pin-listall";
 			const sessionDir = defaultSessionDirFor(agentDir, cwd);
@@ -144,25 +143,28 @@ describe("writeFixtureSession — pinned against pi's real SessionManager", () =
 				messages: [{ role: "user", text: "seed prompt", timestamp: 1_700_000_000_000 }],
 			});
 
-			process.env.PI_CODING_AGENT_DIR = agentDir;
 			const sessions = await SessionManager.listAll();
 
 			expect(sessions.map((s) => s.id)).toContain("pin-listall-1");
 		} finally {
-			if (previousEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousEnv;
+			isolated.restore();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
 });
 
-test("pi records a new transcript's cwd in resolved spelling (stored directories rely on it)", async () => {
+test("omp records a new transcript's cwd verbatim, so stored directories rely on the host resolving it first", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "trpi-fixture-cwd-"));
 	try {
 		const cwd = resolve(dir, "repo");
 		const sessionDir = join(dir, "sessions");
-		const manager = SessionManager.create(`${cwd}${sep}.${sep}`, sessionDir);
+		const unresolved = `${cwd}${sep}.${sep}`;
+		expect(SessionManager.create(unresolved, sessionDir).getCwd()).toBe(unresolved);
+
+		const manager = SessionManager.create(resolve(unresolved), sessionDir);
 		manager.appendMessage({ role: "user", content: "hello", timestamp: 1_700_000_000_000 });
+		manager.appendMessage(fauxAssistantMessage("hi"));
+		await manager.flush();
 
 		expect(manager.getCwd()).toBe(cwd);
 		expect((await SessionManager.list(cwd, sessionDir)).map((info) => info.cwd)).toEqual([cwd]);

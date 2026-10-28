@@ -2,9 +2,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { getProjectPromptsDir } from "@oh-my-pi/pi-utils";
 import type {
 	Project,
 	Template,
@@ -18,11 +17,13 @@ import {
 	WORKSPACE_SETTLE_PROTOCOL_VERSION,
 	WS_METHODS,
 } from "@thinkrail/contracts";
+import { createFauxCore, isolateAgentDir } from "pi-faux";
 import { TodoStore } from "pi-todos/core";
 import {
 	type CreateSessionResult,
 	configurePiRuntime,
 	disposeAllSessions,
+	ModelRuntime,
 	setSessionManagerFactory,
 } from "../agent";
 import { recordAcceptedMessage, resetFeedbackForTests, setFeedbackPublisher } from "../feedback";
@@ -45,12 +46,11 @@ let repo: string;
 const savedDataDir = process.env.THINKRAIL_DATA_DIR;
 
 async function setupDefaultModelRuntime(): Promise<() => void> {
-	const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const agentDir = join(dataDir, "agent");
 	mkdirSync(agentDir);
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	const isolated = isolateAgentDir(agentDir);
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -75,8 +75,7 @@ async function setupDefaultModelRuntime(): Promise<() => void> {
 	configurePiRuntime(runtime);
 	return () => {
 		configurePiRuntime(null);
-		if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+		isolated.restore();
 	};
 }
 
@@ -394,12 +393,11 @@ test("the retired ask answer method and respondToTool both refuse an unknown ses
 });
 
 test("template reads resolve a project's current checkout and reject ambiguous locations", async () => {
-	const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const agentDir = join(dataDir, "agent");
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	const isolated = isolateAgentDir(agentDir);
 	try {
 		const globalDir = join(agentDir, "prompts");
-		const projectDir = join(repo, ".pi", "prompts");
+		const projectDir = getProjectPromptsDir(repo);
 		mkdirSync(globalDir, { recursive: true });
 		mkdirSync(projectDir, { recursive: true });
 		writeFileSync(join(globalDir, "kickoff.md"), "global body");
@@ -423,14 +421,13 @@ test("template reads resolve a project's current checkout and reject ambiguous l
 			handleRequest("template.list", { workspaceId: "unused", projectId: "p1" }, CTX),
 		).rejects.toThrow("either workspaceId or projectId");
 	} finally {
-		if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+		isolated.restore();
 	}
 });
 
 test("model.default and new session creation share the AppConfig default resolution", async () => {
 	const cleanup = await setupDefaultModelRuntime();
-	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd, { id: "default-resolution" }));
+	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd));
 	try {
 		const models = (await handleRequest("model.list", {}, CTX)) as WireModel[];
 		const selected = models.find((model) => model.provider === "handler");
@@ -607,9 +604,8 @@ test("workspace.rename locks the display name without changing Git or the worktr
 });
 
 test("session.rename persists a bounded title into a closed Pi transcript", async () => {
-	const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const agentDir = join(dataDir, "rename-agent");
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	const isolated = isolateAgentDir(agentDir);
 	try {
 		const rows = (await handleRequest("workspace.list", { projectId: "p1" }, CTX)) as Workspace[];
 		const workspace = rows[0];
@@ -627,7 +623,7 @@ test("session.rename persists a bounded title into a closed Pi transcript", asyn
 				CTX,
 			),
 		).toEqual({ ok: true });
-		expect(SessionManager.open(fixture.path).getSessionName()).toBe("After rename");
+		expect((await SessionManager.open(fixture.path)).getSessionName()).toBe("After rename");
 		await expect(
 			handleRequest(
 				"session.rename",
@@ -643,8 +639,7 @@ test("session.rename persists a bounded title into a closed Pi transcript", asyn
 			),
 		).rejects.toThrow("Invalid session title");
 	} finally {
-		if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+		isolated.restore();
 	}
 });
 
@@ -750,11 +745,7 @@ test("todo.requestFix on a chat that isn't on disk rolls the record back and nev
 
 test("a review send that names its chat lands every file's drafts there as one package", async () => {
 	const cleanup = await setupDefaultModelRuntime();
-	let sessions = 0;
-	setSessionManagerFactory((cwd) => {
-		sessions += 1;
-		return SessionManager.inMemory(cwd, { id: `review-send-${sessions}` });
-	});
+	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd));
 	try {
 		const rows = (await handleRequest("workspace.list", { projectId: "p1" }, CTX)) as Workspace[];
 		const workspace = rows[0];
@@ -820,18 +811,17 @@ test("workspace mutation handlers reject the Default before any side effect", as
 });
 
 test("resource handlers scope every read/control to a registered workspace and actual parent", async () => {
-	const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const priorOffline = process.env.PI_OFFLINE;
-	process.env.PI_CODING_AGENT_DIR = join(dataDir, "agent");
+	const isolated = isolateAgentDir(join(dataDir, "agent"));
 	process.env.PI_OFFLINE = "1";
 	configurePiRuntime(
 		await ModelRuntime.create({
-			credentials: new InMemoryCredentialStore(),
+			inMemoryCredentials: true,
 			modelsPath: null,
 			allowModelNetwork: false,
 		}),
 	);
-	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd, { id: "release.1" }));
+	setSessionManagerFactory((cwd) => SessionManager.inMemory(cwd));
 	try {
 		const workspace = (await handleRequest(
 			"workspace.create",
@@ -878,9 +868,10 @@ test("resource handlers scope every read/control to a registered workspace and a
 					code: "RESOURCE_UNAVAILABLE",
 				});
 		}
-		await expect(
-			handleRequest("session.resources", { ...scope, sessionId: "unknown-parent" }, CTX),
-		).rejects.toMatchObject({ code: "RESOURCE_UNAVAILABLE" });
+		for (const sessionId of ["unknown-parent", "release.1"])
+			await expect(
+				handleRequest("session.resources", { ...scope, sessionId }, CTX),
+			).rejects.toMatchObject({ code: "RESOURCE_UNAVAILABLE" });
 		for (const params of [
 			undefined,
 			null,
@@ -906,8 +897,7 @@ test("resource handlers scope every read/control to a registered workspace and a
 		disposeAllSessions();
 		configurePiRuntime(null);
 		setSessionManagerFactory((cwd) => SessionManager.create(cwd));
-		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		isolated.restore();
 		if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 		else process.env.PI_OFFLINE = priorOffline;
 	}

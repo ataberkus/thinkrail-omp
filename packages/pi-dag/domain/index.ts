@@ -36,6 +36,7 @@ export {
 	RequestSchema,
 	SessionSchema,
 	SubmissionSchema,
+	toolParameters,
 	ValueSpecSchema,
 } from "./schemas.ts";
 export type {

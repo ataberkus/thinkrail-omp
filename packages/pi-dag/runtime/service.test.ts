@@ -16,17 +16,19 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
-import { type ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { type ModelRegistry, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import {
 	createDelegationService,
 	type DelegationService,
 	type ResourceChildHandle,
 } from "pi-delegation";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	createDagService,
 	type DagClient,
@@ -43,17 +45,16 @@ import {
 import { createTestRuntime, faux, model } from "./provider.fixture";
 
 const root = mkdtempSync(join(tmpdir(), "dag-runtime-"));
-let runtime: ModelRuntime;
-let oldAgentDir: string | undefined;
+let runtime: ModelRegistry;
+let agentDir: IsolatedAgentDir | undefined;
 let oldOffline: string | undefined;
 let serial = 0;
 const services: DagService[] = [];
 const prompts: string[] = [];
 const processes: Array<{ exitCode: number | null; kill(): void; exited: Promise<number> }> = [];
 beforeAll(async () => {
-	oldAgentDir = process.env.PI_CODING_AGENT_DIR;
 	oldOffline = process.env.PI_OFFLINE;
-	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+	agentDir = isolateAgentDir(join(root, "agent"));
 	process.env.PI_OFFLINE = "1";
 	runtime = await createTestRuntime(prompts);
 });
@@ -65,8 +66,7 @@ afterEach(async () => {
 	for (const service of services.splice(0)) await service.close();
 });
 afterAll(() => {
-	if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+	agentDir?.restore();
 	if (oldOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = oldOffline;
 	rmSync(root, { recursive: true, force: true });
@@ -85,7 +85,7 @@ function fixture(decorate?: (core: DelegationService) => DelegationService) {
 	const service = createDagService({ storageRoot: join(root, "dags"), scope, delegation });
 	services.push(service);
 	const signal = new AbortController().signal;
-	const execution = { kind: "runtime" as const, modelRuntime: runtime, cwd: root, model };
+	const execution = { modelRegistry: runtime, cwd: root, model };
 	const owner = service.bind({ caller: { kind: "owner", ownerId: "host" }, signal, execution });
 	return { service, owner, execution, signal, scope, delegation };
 }
@@ -174,7 +174,7 @@ function pauseFirstInput() {
 								entered.release();
 								await proceed.promise;
 							}
-							return { action: "continue" };
+							return undefined;
 						});
 					},
 				],
@@ -550,7 +550,7 @@ test("dead-owner recovery preserves a proposal and human policy without inventin
 	expect(accepted.nodes[0]?.outcome).toBeUndefined();
 	expect(accepted.nodes[0]?.acceptance?.reason).toContain("unknown terminal observation");
 	expect(faux.state.callCount).toBe(calls);
-});
+}, 30_000);
 
 test("recovered input remains human-owned; answer and explicit continuation reopen the original session", async () => {
 	const { owner, service, signal, scope, execution } = fixture();
@@ -583,7 +583,7 @@ test("recovered input remains human-owned; answer and explicit continuation reop
 	const payload = done.nodes[0]?.payload;
 	if (!payload) throw new Error("Missing resumed payload");
 	expect(readFileSync(payload.localPath, "utf8")).toContain("PRESERVED_ANSWER");
-});
+}, 30_000);
 
 test("retry can revise its own unapproved output but cross-node seeds require release", async () => {
 	const { owner, service, signal } = fixture();

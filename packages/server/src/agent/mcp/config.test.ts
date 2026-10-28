@@ -14,9 +14,10 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
-import type { LoadedMcpConfig } from "@earendil-works/pi-coding-agent";
+import { join, relative } from "node:path";
+import { expandEnvVarsDeep } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { loadAllMCPConfigs, type MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp";
+import { isolateAgentDir } from "pi-faux";
 import {
 	addMcpServerConfig,
 	assertProjectMcpConfigWritable,
@@ -25,19 +26,11 @@ import {
 	loadMcpConfigFiles,
 	McpConfigPathUnsafeError,
 	normalizeExposureForHost,
+	ompServerConfig,
 	removeMcpServerConfig,
 	updateMcpServerConfig,
 	validateMcpServerConfig,
 } from "./index";
-
-const piDist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-const piConfig = (await import(join(piDist, "extensions", "mcp", "config.js"))) as {
-	loadMcpConfig: (options: {
-		agentDir: string;
-		cwd: string;
-		projectTrusted: boolean;
-	}) => LoadedMcpConfig;
-};
 
 const root = mkdtempSync(join(tmpdir(), "mcp-config-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -48,7 +41,7 @@ function fixture(globalConfig: unknown, projectConfig?: unknown) {
 	const agentDir = join(dir, "agent");
 	const cwd = join(dir, "project");
 	mkdirSync(agentDir, { recursive: true });
-	mkdirSync(join(cwd, ".pi"), { recursive: true });
+	mkdirSync(join(cwd, ".omp"), { recursive: true });
 	if (globalConfig !== undefined) {
 		writeFileSync(
 			join(agentDir, "mcp.json"),
@@ -57,16 +50,20 @@ function fixture(globalConfig: unknown, projectConfig?: unknown) {
 	}
 	if (projectConfig !== undefined) {
 		writeFileSync(
-			join(cwd, ".pi", "mcp.json"),
+			join(cwd, ".omp", "mcp.json"),
 			typeof projectConfig === "string" ? projectConfig : JSON.stringify(projectConfig, null, 2),
 		);
 	}
 	return { agentDir, cwd };
 }
 
-const PARITY_CASES: { name: string; global: unknown; project?: unknown }[] = [
+const PARITY_CASES: {
+	name: string;
+	global: unknown;
+	project?: unknown;
+}[] = [
 	{
-		name: "valid stdio and http servers with env, headers and oauth",
+		name: "valid stdio, http and sse servers with env, headers and oauth",
 		global: {
 			mcpServers: {
 				fs: { command: "npx", args: ["-y", "server"], env: { TOKEN: `\${TOKEN}` }, cwd: "~/x" },
@@ -76,38 +73,39 @@ const PARITY_CASES: { name: string; global: unknown; project?: unknown }[] = [
 					oauth: { clientId: "abc", callbackPort: 8765, scope: "read" },
 					exposure: "direct",
 					toolExposure: { "delete_*": "hidden", get_one: "direct" },
-					timeout: 30,
+					timeout: 30_000,
 					description: "Docs",
 				},
+				events: { type: "sse", url: "https://events.example/sse", requestIdFormat: "string" },
 				off: { url: "https://off.example/mcp", enabled: false },
 			},
 		},
 	},
 	{
-		name: "every validation error pi reports",
+		name: "every validation error ThinkRail reports",
 		global: {
 			mcpServers: {
-				"bad name": { command: "x" },
-				sse: { type: "sse", url: "https://x/sse" },
+				"bad/name": { command: "x" },
+				nourl: { type: "sse" },
 				badurl: { url: "not a url" },
 				exposure: { url: "https://x/mcp", exposure: "sometimes" },
 				tools: { url: "https://x/mcp", toolExposure: { a: "nope" } },
-				timeout: { url: "https://x/mcp", timeout: 0 },
+				timeout: { url: "https://x/mcp", timeout: -1 },
 				args: { command: "x", args: "nope" },
 				env: { command: "x", env: { A: 1 } },
 				neither: { description: "no transport" },
-				callback: { url: "https://x/mcp", oauth: { callbackUrl: "https://evil.example/cb" } },
-				cimd: { url: "https://x/mcp", oauth: { clientRegistration: "cimd", clientId: "a" } },
-				auth: { url: "http://x.example/mcp", auth: { provider: "anthropic" } },
+				both: { command: "x", url: "https://x/mcp" },
+				port: { url: "https://x/mcp", oauth: { callbackPort: 70_000 } },
+				auth: { url: "https://x.example/mcp", auth: { provider: "anthropic" } },
 			},
 		},
 	},
 	{
-		name: "exposure aliases and namespace clashes",
+		name: "namespace clashes",
 		global: {
 			mcpServers: {
-				"my-server": { url: "https://a/mcp", exposure: "codemode-deferred" },
-				my_server: { url: "https://b/mcp" },
+				"my-server": { url: "https://a/mcp" },
+				My_Server: { url: "https://b/mcp" },
 			},
 		},
 	},
@@ -125,20 +123,19 @@ const PARITY_CASES: { name: string; global: unknown; project?: unknown }[] = [
 				notion: { url: "https://impostor.example/mcp" },
 				ghost: { enabled: true },
 				extra: { enabled: true, headers: { A: "b" } },
-				bad: { url: "https://x/mcp", auth: { provider: "anthropic" } },
+				bad: { url: "https://x/mcp", auth: { type: "oauth", credentialId: "stolen" } },
 				local: { command: "./bin/server", cwd: "tools" },
 			},
-			autoEnableCodemode: false,
 		},
 	},
 	{
 		name: "invalid project override fields leave the global definition intact",
 		global: {
 			mcpServers: {
-				enabled: { command: "unused" },
+				enabled: { command: "unused-enabled" },
 				exposure: { url: "https://docs.example/mcp" },
-				tools: { command: "unused" },
-				extra: { command: "unused" },
+				tools: { command: "unused-tools" },
+				extra: { command: "unused-extra" },
 			},
 		},
 		project: {
@@ -163,17 +160,57 @@ const PARITY_CASES: { name: string; global: unknown; project?: unknown }[] = [
 	{ name: "malformed global file", global: "{ not json" },
 	{ name: "mcpServers that is not an object", global: { mcpServers: [] }, project: "[]" },
 	{ name: "non-object top level", global: "[1,2]" },
-	{ name: "autoEnableCodemode type error", global: { mcpServers: {}, autoEnableCodemode: "yes" } },
+	{
+		name: "a mistyped server list",
+		global: { mcpServers: { docs: { url: "https://docs.example/mcp" } }, disabledServers: "docs" },
+	},
+	{
+		name: "the user file's disabledServers and enabledServers lists",
+		global: {
+			mcpServers: {
+				hidden: { url: "https://hidden.example/mcp" },
+				forced: { url: "https://forced.example/mcp", enabled: false },
+			},
+			disabledServers: ["hidden"],
+			enabledServers: ["forced"],
+		},
+	},
 	{ name: "no files at all", global: undefined },
 ];
 
+const transportOf = ({ enabled: _enabled, ...config }: MCPServerConfig) => config;
+
 for (const { name, global: globalConfig, project } of PARITY_CASES) {
-	test(`parity with pi's loader: ${name}`, () => {
+	test(`parity with omp's own loader: ${name}`, async () => {
 		const { agentDir, cwd } = fixture(globalConfig, project);
-		for (const projectTrusted of [true, false]) {
-			const ours = loadMcpConfigFiles({ agentDir, cwd, projectTrusted });
-			const { entries: _entries, fileErrors: _fileErrors, ...comparable } = ours;
-			expect(comparable).toEqual(piConfig.loadMcpConfig({ agentDir, cwd, projectTrusted }));
+		const isolated = isolateAgentDir(agentDir);
+		try {
+			for (const projectTrusted of [true, false]) {
+				const ours = loadMcpConfigFiles({ agentDir, cwd, projectTrusted });
+				const omp = await loadAllMCPConfigs(cwd, {
+					enableProjectConfig: projectTrusted,
+					filterExa: false,
+				});
+				const overridden = new Set(
+					ours.entries.filter((entry) => entry.override).map((entry) => entry.name),
+				);
+				const admitted = ours.servers.filter(
+					(server) => server.config.enabled !== false && !overridden.has(server.name),
+				);
+				for (const server of admitted) {
+					const loaded = omp.configs[server.name];
+					expect(loaded && transportOf(loaded)).toEqual(
+						transportOf(expandEnvVarsDeep(ompServerConfig(server.config))),
+					);
+					expect(omp.sources[server.name]?.path).toBe(server.source);
+				}
+				for (const loaded of Object.keys(omp.configs)) {
+					if (overridden.has(loaded) || admitted.some((server) => server.name === loaded)) continue;
+					expect(ours.errors.some((error) => error.includes(`"${loaded}"`))).toBe(true);
+				}
+			}
+		} finally {
+			isolated.restore();
 		}
 	});
 }
@@ -195,7 +232,7 @@ test("entries keep every named entry as written, including override-only, invali
 	expect(loaded.fileErrors).toEqual([]);
 	expect(loaded.servers.find((s) => s.name === "linear")).toMatchObject({
 		scope: "global",
-		override: join(cwd, ".pi", "mcp.json"),
+		override: join(cwd, ".omp", "mcp.json"),
 	});
 });
 
@@ -204,7 +241,7 @@ test("file-level problems are listed per file, apart from entry errors, and neve
 	const broken = loadMcpConfigFiles({ ...malformed, projectTrusted: true });
 	expect(broken.fileErrors.map((error) => error.path)).toEqual([
 		join(malformed.agentDir, "mcp.json"),
-		join(malformed.cwd, ".pi", "mcp.json"),
+		join(malformed.cwd, ".omp", "mcp.json"),
 	]);
 	expect(broken.fileErrors[1]?.message).toBe('expected an object with an "mcpServers" object');
 	expect(broken.errors).toEqual(
@@ -214,11 +251,14 @@ test("file-level problems are listed per file, apart from entry errors, and neve
 
 	const typo = fixture({
 		mcpServers: { docs: { url: "https://docs.example/mcp" }, bad: null },
-		autoEnableCodemode: "yes",
+		disabledServers: "yes",
 	});
 	const loaded = loadMcpConfigFiles({ ...typo, projectTrusted: false });
 	expect(loaded.fileErrors).toEqual([
-		{ path: join(typo.agentDir, "mcp.json"), message: "autoEnableCodemode must be a boolean" },
+		{
+			path: join(typo.agentDir, "mcp.json"),
+			message: "disabledServers must be an array of server names",
+		},
 	]);
 	expect(loaded.servers.map((server) => server.name)).toEqual(["docs"]);
 	expect(loaded.errors).toHaveLength(2);
@@ -334,7 +374,7 @@ test("writers keep unknown keys and indentation, drop global defaults, and repla
 	expect(addMcpServerConfig(path, "a", { url: "https://a/mcp" })).toBe(false);
 	expect(addMcpServerConfig(path, "a", { url: "https://a2/mcp" })).toBe(true);
 	updateMcpServerConfig(path, "a", { enabled: false, exposure: "direct" });
-	updateMcpServerConfig(path, "a", { enabled: true, exposure: "codemode" });
+	updateMcpServerConfig(path, "a", { enabled: true, exposure: "deferred" });
 	const text = readFileSync(path, "utf8");
 	expect(text.startsWith('{\n    "extra": true,')).toBe(true);
 	expect(JSON.parse(text)).toEqual({ extra: true, mcpServers: { a: { url: "https://a2/mcp" } } });
@@ -384,7 +424,7 @@ test("BOM-prefixed files load and edit without losing permissions, indentation o
 });
 
 test("an override entry keeps explicit values instead of dropping defaults", () => {
-	const path = join(root, "override", ".pi", "mcp.json");
+	const path = join(root, "override", ".omp", "mcp.json");
 	updateMcpServerConfig(
 		path,
 		"linear",
@@ -396,28 +436,28 @@ test("an override entry keeps explicit values instead of dropping defaults", () 
 	});
 });
 
-test("project config writes refuse symlinked .pi directories and files, and paths outside the worktree", () => {
+test("project config writes refuse symlinked .omp directories and files, and paths outside the worktree", () => {
 	const worktree = join(root, "containment", "wt");
 	const elsewhere = join(root, "containment", "elsewhere");
 	mkdirSync(join(elsewhere, "pi"), { recursive: true });
 	mkdirSync(worktree, { recursive: true });
-	symlinkSync(join(elsewhere, "pi"), join(worktree, ".pi"));
-	expect(() => assertProjectMcpConfigWritable(worktree, join(worktree, ".pi", "mcp.json"))).toThrow(
-		McpConfigPathUnsafeError,
-	);
-	rmSync(join(worktree, ".pi"));
-	mkdirSync(join(worktree, ".pi"));
+	symlinkSync(join(elsewhere, "pi"), join(worktree, ".omp"));
+	expect(() =>
+		assertProjectMcpConfigWritable(worktree, join(worktree, ".omp", "mcp.json")),
+	).toThrow(McpConfigPathUnsafeError);
+	rmSync(join(worktree, ".omp"));
+	mkdirSync(join(worktree, ".omp"));
 	writeFileSync(join(elsewhere, "secrets.json"), "{}");
-	symlinkSync(join(elsewhere, "secrets.json"), join(worktree, ".pi", "mcp.json"));
-	expect(() => assertProjectMcpConfigWritable(worktree, join(worktree, ".pi", "mcp.json"))).toThrow(
-		/non-regular/,
-	);
+	symlinkSync(join(elsewhere, "secrets.json"), join(worktree, ".omp", "mcp.json"));
+	expect(() =>
+		assertProjectMcpConfigWritable(worktree, join(worktree, ".omp", "mcp.json")),
+	).toThrow(/non-regular/);
 	expect(() => assertProjectMcpConfigWritable(worktree, join(elsewhere, "mcp.json"))).toThrow(
 		/outside the worktree/,
 	);
-	rmSync(join(worktree, ".pi", "mcp.json"));
+	rmSync(join(worktree, ".omp", "mcp.json"));
 	expect(() =>
-		assertProjectMcpConfigWritable(worktree, join(worktree, ".pi", "mcp.json")),
+		assertProjectMcpConfigWritable(worktree, join(worktree, ".omp", "mcp.json")),
 	).not.toThrow();
 });
 
@@ -512,10 +552,10 @@ test("an approved invalid project entry cannot replace the valid effective user 
 			name: "docs",
 			source: join(agentDir, "mcp.json"),
 			scope: "global",
-			config: { command: "unused-test-server", exposure: "direct" },
+			config: { type: "stdio", command: "unused-test-server", exposure: "direct" },
 		},
 	]);
 	expect(loaded.errors).toEqual([
-		`${join(cwd, ".pi", "mcp.json")}: server "docs": enabled must be a boolean`,
+		`${join(cwd, ".omp", "mcp.json")}: server "docs": enabled must be a boolean`,
 	]);
 });

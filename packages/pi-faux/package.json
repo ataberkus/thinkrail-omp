@@ -1,0 +1,28 @@
+{
+	"name": "pi-faux",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./index.ts",
+		"./index.ts": "./index.ts",
+		"./package.json": "./package.json"
+	},
+	"description": "A scripted, deterministic fake provider for testing pi (oh-my-pi) agent sessions without a network.",
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"test": "bun test"
+	},
+	"peerDependencies": {
+		"@oh-my-pi/pi-ai": "*",
+		"@oh-my-pi/pi-coding-agent": "*",
+		"@oh-my-pi/pi-utils": "*"
+	},
+	"devDependencies": {
+		"@oh-my-pi/pi-ai": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-utils": "catalog:",
+		"@types/bun": "catalog:",
+		"typescript": "catalog:"
+	}
+}

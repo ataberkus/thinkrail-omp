@@ -1,5 +1,10 @@
 # ThinkRail
 
+> **Modified from [JetBrains/thinkrail](https://github.com/JetBrains/thinkrail): engine replaced with
+> [oh-my-pi](https://github.com/can1357/oh-my-pi).** This fork runs the `omp` engine
+> (`@oh-my-pi/pi-coding-agent`) in place of the `pi` engine it was built on. The original work
+> is licensed under the Apache License 2.0, and so are the modifications.
+
 [![JetBrains incubator project](https://jb.gg/badges/incubator-plastic.svg)](https://confluence.jetbrains.com/display/ALL/JetBrains+on+GitHub)
 [![GitHub stars](https://img.shields.io/github/stars/JetBrains/thinkrail?style=social)](https://star-history.com/#JetBrains/thinkrail&Date)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20chat-5865F2?logo=discord&logoColor=white)](https://thinkrail.ai/discord)
@@ -7,8 +12,8 @@
 ThinkRail is the agentic IDE that gets better every time you use it — learning your project through
 living specs today, and building its own capabilities tomorrow.
 
-We built a rich interface around the [`pi`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
-coding agent, isolated work into separate workspaces, and gave the agent durable project knowledge
+We built a rich interface around the [`omp`](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent)
+coding agent (oh-my-pi, a fork of `pi`), isolated work into separate workspaces, and gave the agent durable project knowledge
 through living specs and reusable skills. Next, we're adding full extension support, so ThinkRail can
 create the tools it needs based on how you actually work.
 
@@ -25,10 +30,10 @@ create the tools it needs based on how you actually work.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/workbench-dark.png">
-  <img src=".github/readme-assets/workbench-light.png" alt="ThinkRail workbench: the Projects pane beside the left tool rail listing worktree workspaces and their Settled shelf, a finished pi conversation with its tool steps in the center, the resulting diff beside it, and the Specs tree above the Changes list on the right with their tools on the edge rail" width="900">
+  <img src=".github/readme-assets/workbench-light.png" alt="ThinkRail workbench: the Projects pane beside the left tool rail listing worktree workspaces and their Settled shelf, a finished omp conversation with its tool steps in the center, the resulting diff beside it, and the Specs tree above the Changes list on the right with their tools on the edge rail" width="900">
 </picture>
 
-*A `pi` session and the change it made, scoped to an isolated git-worktree workspace.*
+*An `omp` session and the change it made, scoped to an isolated git-worktree workspace.*
 
 ## What you get
 
@@ -46,7 +51,7 @@ create the tools it needs based on how you actually work.
   change marks and a Changed view, terminals, and documents — all scoped to the active workspace. Leave
   anchored review comments on files and diffs and send them to a chat as structured context, or open the
   worktree in your installed IDE.
-- **Chats that stream like the engine thinks.** Several concurrent `pi` sessions per workspace, each with
+- **Chats that stream like the engine thinks.** Several concurrent `omp` sessions per workspace, each with
   its own model and live token and cost readout. Steer a running turn or queue a follow-up, delegate to
   subagents, and work a shared plan the agent updates and you edit — each completed step can be committed
   and reviewed on its own.
@@ -61,17 +66,19 @@ create the tools it needs based on how you actually work.
   in the chat — when the agent proposes a UI change it shows a before/after mockup you can comment on like
   a diff. Settings → Extensions lists the ThinkRail extensions the agent gets and lets you switch each one
   off.
-- **MCP servers.** Connect the MCP servers in your `pi` `mcp.json` (or add them, and a few presets, from
+- **MCP servers.** Connect the MCP servers in your `omp` `mcp.json` (or add them, and a few presets, from
   Settings): ThinkRail asks in the chat before calls the server does not mark read-only (or always allows
   the tools you trust in a project), keeps servers a repository
   defines off until you approve them, signs you in to OAuth servers from Settings, and shows each chat's
   servers next to its background commands and subagents.
 - **Your providers, your credentials.** Sign in with [JetBrains AI](https://www.jetbrains.com/ai/) or
-  connect any provider through `pi`'s own auth. ThinkRail has no accounts of its own.
-- **Your pi setup.** ThinkRail reads your existing `pi` configuration (`~/.pi/agent`). To use another one
-  — say a personal `~/.pi/agent-personal` — or to pass extra environment variables to the agent, terminals
-  and MCP servers, set them in Settings → Environment; they apply on the next start. A variable you set
-  when launching (`PI_CODING_AGENT_DIR=… thinkrail`) still wins.
+  connect any provider through `omp`'s own auth. ThinkRail has no accounts of its own.
+- **Your omp setup.** ThinkRail reads your existing `omp` configuration (`~/.omp/agent`). On its first start
+  it copies the chats, provider logins and MCP servers of an existing `pi` installation (`~/.pi/agent`)
+  into it once, converting `pi`'s transcript entries; `pi`'s own files are only read, never changed. To use
+  another agent directory — say a personal `~/.omp/agent-personal` — or to pass extra environment
+  variables to the agent, terminals and MCP servers, set them in Settings → Environment; they apply on
+  the next start. A variable you set when launching (`PI_CODING_AGENT_DIR=… thinkrail`) still wins.
 - **Desktop app or browser.** A native desktop app, or the `thinkrail` CLI that opens the same app in your
   browser. Both embed the same engine host; app state lives under `~/.thinkrail`.
 - **Your language.** Settings → Language follows your system language or a language you pick; English,
@@ -206,12 +213,12 @@ website or no consent is required — and that link expires after 30 days.
 
 ## Under the hood
 
-ThinkRail is a thin host that runs `pi` in-process and bridges it to a rich web UI. `pi` owns models,
+ThinkRail is a thin host that runs `omp` in-process and bridges it to a rich web UI. `omp` owns models,
 skills, compaction, cost, and session state; the app owns the workspace, the editor, and the wire — it
 never assembles prompts behind your back. Three rings:
 
 - **Engine host** — `packages/server` (+ `packages/shared`): a `Bun.serve` HTTP+WS host with one in-process
-  `pi` session per chat, launched by `apps/cli` or `apps/desktop`.
+  `omp` session per chat, launched by `apps/cli` or `apps/desktop`.
 - **The wire** — `packages/contracts`: the typed, versioned protocol between host and UI.
 - **UI client** — `apps/web`: React 19 + Zustand + Tailwind v4, shipped independently; it dials a host over
   the wire and depends on the contracts only.
@@ -222,8 +229,8 @@ module, and a change that moves a boundary, contract, or decision updates the sp
 
 ## Developing ThinkRail
 
-You need **Bun** 1.4.4 (the pinned package manager and runtime), **Node.js** ≥ 22.19 (required by the
-in-process `pi` engine), and an authenticated `pi` provider for agent work.
+You need **Bun** 1.4.4 (the pinned package manager and runtime; the in-process `omp` engine itself
+requires Bun ≥ 1.3.14 and does not run on Node.js) and an authenticated `omp` provider for agent work.
 
 ```bash
 git clone https://github.com/JetBrains/thinkrail.git
@@ -254,4 +261,6 @@ talk to the team. Bugs and feature requests go to [GitHub issues](https://github
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE). This is a modified version of
+[JetBrains/thinkrail](https://github.com/JetBrains/thinkrail): the `pi` engine was replaced with
+[oh-my-pi](https://github.com/can1357/oh-my-pi) (`@oh-my-pi/*`, MIT).

@@ -1,21 +1,19 @@
-import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { type GraphSlice, graphSlice, LINK_KINDS, SLICE_DIRECTIONS } from "../core/index.ts";
 import { errorResult, getIndex, textResult } from "./shared.ts";
 
-const parameters = Type.Object({
-	root: Type.String({ description: "Id of the node to start from." }),
-	direction: StringEnum(SLICE_DIRECTIONS, {
-		description:
+const parameters = z.object({
+	root: z.string().describe("Id of the node to start from."),
+	direction: z
+		.enum(SLICE_DIRECTIONS)
+		.describe(
 			"subtree = down the parent tree; ancestors = up the parent chain; neighbors = across an edge and its reverse.",
-	}),
-	depth: Type.Optional(Type.Number({ description: "How many hops to expand (default: 1)." })),
-	edge: Type.Optional(
-		StringEnum(LINK_KINDS, {
-			description: "For direction=neighbors: which edge kind to traverse (default: depends-on).",
-		}),
-	),
+		),
+	depth: z.number().optional().describe("How many hops to expand (default: 1)."),
+	edge: z
+		.enum(LINK_KINDS)
+		.optional()
+		.describe("For direction=neighbors: which edge kind to traverse (default: depends-on)."),
 });
 
 export function registerSpecGraph(pi: ExtensionAPI): void {
@@ -24,8 +22,7 @@ export function registerSpecGraph(pi: ExtensionAPI): void {
 		label: "Spec Graph",
 		description:
 			"Return a bounded slice of the spec-graph rooted at a node: `subtree` (down the parent tree), `ancestors` (up to the tree root), or `neighbors` (across a chosen edge and its reverse). Bounded by `depth` (default 1).",
-		promptSnippet:
-			"spec_graph — walk a bounded slice of the spec-graph (subtree / ancestors / neighbors) from a node.",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const graph = getIndex(ctx.cwd).graph();

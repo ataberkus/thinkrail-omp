@@ -10,6 +10,7 @@ const modules = {
 	"packages/artifact-tests": "@thinkrail/artifact-tests",
 	"packages/contracts": "@thinkrail/contracts",
 	"packages/shared": "@thinkrail/shared",
+	"packages/pi-faux": "pi-faux",
 	"packages/pi-delegation": "pi-delegation",
 	"packages/pi-background-commands": "pi-background-commands",
 	"packages/pi-subagents": "pi-subagents",
@@ -97,6 +98,32 @@ test("accepts the declared package rings and thin launcher edges", () => {
 	);
 
 	expect(moduleBoundaryViolations(root)).toEqual([]);
+});
+
+test("lets engine packages test through pi-faux while pi-faux stays engine-only", () => {
+	const root = fixture();
+	write(
+		root,
+		"packages/pi-delegation/src/service.test.ts",
+		'import { createFauxCore } from "pi-faux";',
+	);
+	write(
+		root,
+		"pi-extensions/visualize/src/session.test.ts",
+		'import { createFauxCore } from "pi-faux";',
+	);
+	write(
+		root,
+		"packages/server/src/agent/session.test.ts",
+		'import { createFauxCore } from "pi-faux";',
+	);
+	expect(moduleBoundaryViolations(root)).toEqual([]);
+	write(root, "packages/pi-faux/src/leak.ts", 'import "pi-delegation";');
+	write(root, "apps/web/src/fauxLeak.ts", 'import "pi-faux";');
+	expect(moduleBoundaryViolations(root)).toEqual([
+		'apps/web/src/fauxLeak.ts: import "pi-faux" creates forbidden apps/web -> packages/pi-faux edge',
+		'packages/pi-faux/src/leak.ts: import "pi-delegation" creates forbidden packages/pi-faux -> packages/pi-delegation edge',
+	]);
 });
 
 test("keeps DAG orchestration portable and out of delegation and the unbundled host", () => {
@@ -387,16 +414,16 @@ test.each([
 });
 
 const runtimePiImports = [
-	'import { value } from "@earendil-works/pi-ai";',
-	'import { type Value, value } from "@earendil-works/pi-ai";',
-	'import value, { type Value } from "@earendil-works/pi-ai";',
-	'export { type Value, value } from "@earendil-works/pi-ai";',
-	'export * from "@earendil-works/pi-coding-agent";',
-	'export * as pi from "@earendil-works/pi-ai";',
-	'import "@earendil-works/pi-agent-core";',
-	'void import("@earendil-works/pi-ai");',
-	'require("@earendil-works/pi-coding-agent");',
-	'import pi = require("@earendil-works/pi-ai");',
+	'import { value } from "@oh-my-pi/pi-ai";',
+	'import { type Value, value } from "@oh-my-pi/pi-ai";',
+	'import value, { type Value } from "@oh-my-pi/pi-ai";',
+	'export { type Value, value } from "@oh-my-pi/pi-ai";',
+	'export * from "@oh-my-pi/pi-coding-agent";',
+	'export * as pi from "@oh-my-pi/pi-ai";',
+	'import "@oh-my-pi/pi-agent-core";',
+	'void import("@oh-my-pi/pi-ai");',
+	'require("@oh-my-pi/pi-coding-agent");',
+	'import pi = require("@oh-my-pi/pi-ai");',
 	'import "@mariozechner/pi-ai";',
 	'import "pi-web-access";',
 ];
@@ -418,14 +445,14 @@ test.each([
 		root,
 		file,
 		[
-			'import type { Value } from "@earendil-works/pi-ai";',
-			'import { type Value } from "@earendil-works/pi-ai";',
-			'export type { Value } from "@earendil-works/pi-ai";',
-			'export { type Value } from "@earendil-works/pi-ai";',
-			'export type * from "@earendil-works/pi-ai";',
-			'import type Value = require("@earendil-works/pi-ai");',
-			'type Value = import("@earendil-works/pi-ai").Value;',
-			'type Value = typeof import("@earendil-works/pi-ai");',
+			'import type { Value } from "@oh-my-pi/pi-ai";',
+			'import { type Value } from "@oh-my-pi/pi-ai";',
+			'export type { Value } from "@oh-my-pi/pi-ai";',
+			'export { type Value } from "@oh-my-pi/pi-ai";',
+			'export type * from "@oh-my-pi/pi-ai";',
+			'import type Value = require("@oh-my-pi/pi-ai");',
+			'type Value = import("@oh-my-pi/pi-ai").Value;',
+			'type Value = typeof import("@oh-my-pi/pi-ai");',
 		].join("\n"),
 	);
 	expect(moduleBoundaryViolations(root)).toEqual([]);
@@ -471,7 +498,7 @@ test("accepts SDK edges, extension manifest unions, same-half sources, and publi
 	write(
 		root,
 		"packages/extension-api/src/server.ts",
-		'import type { Value } from "@earendil-works/pi-coding-agent";',
+		'import type { Value } from "@oh-my-pi/pi-coding-agent";',
 	);
 	write(
 		root,
@@ -486,7 +513,7 @@ test("accepts SDK edges, extension manifest unions, same-half sources, and publi
 	write(
 		root,
 		"thinkrail-extensions/future/server/index.ts",
-		'import "@thinkrail/extension-api/server"; import "@thinkrail/pi-future"; import "@earendil-works/pi-coding-agent"; import "./helpers";',
+		'import "@thinkrail/extension-api/server"; import "@thinkrail/pi-future"; import "@oh-my-pi/pi-coding-agent"; import "./helpers";',
 	);
 	write(
 		root,

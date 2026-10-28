@@ -12,21 +12,24 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxProvider,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
+import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
+import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import {
 	createAgentSession,
 	type ExtensionFactory,
-	ModelRegistry,
-	ModelRuntime,
+	type ModelRegistry,
 	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	fauxAssistantMessage,
+	fauxProvider,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	type CapturedHistory,
 	createDelegationService,
@@ -55,8 +58,8 @@ const faux = createFauxCore({
 		},
 	],
 });
-let runtime: ModelRuntime;
-let priorAgentDir: string | undefined;
+let runtime: ModelRegistry;
+let agentDir: IsolatedAgentDir | undefined;
 let priorOffline: string | undefined;
 const model = { provider: "resource-faux", id: "worker" };
 const sessionOptions: SessionOptions = {
@@ -76,7 +79,7 @@ function service() {
 	return createDelegationService({ delegationRoot: root, scope: `scope-${serial++}` });
 }
 function context() {
-	return { kind: "runtime" as const, modelRuntime: runtime, cwd, model };
+	return { modelRegistry: runtime, cwd, model };
 }
 function gate() {
 	let resolve = () => {};
@@ -89,34 +92,22 @@ async function code(promise: Promise<unknown>, expected: DelegationErrorCode) {
 	await expect(promise).rejects.toBeInstanceOf(DelegationError);
 	await expect(promise).rejects.toHaveProperty("code", expected);
 }
-function isolatedRuntime() {
-	return ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
+async function isolatedRuntime(): Promise<ModelRegistry> {
+	return (await createFauxModelRegistry(Settings.isolated({}))).modelRegistry;
 }
-function register(target: ModelRuntime) {
-	target.registerProvider(model.provider, {
-		api: faux.api,
-		baseUrl: "http://faux.local",
-		apiKey: "synthetic",
-		streamSimple: faux.streamSimple,
-		models: faux.models,
-	});
+function register(target: ModelRegistry, overrides: { apiKey?: string } = {}) {
+	target.registerProvider(model.provider, faux.providerConfig(overrides));
 }
 
 beforeAll(async () => {
-	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
 	priorOffline = process.env.PI_OFFLINE;
-	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+	agentDir = isolateAgentDir(join(root, "agent"));
 	process.env.PI_OFFLINE = "1";
 	runtime = await isolatedRuntime();
 	register(runtime);
 });
 afterAll(() => {
-	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+	agentDir?.restore();
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
 	rmSync(root, { recursive: true, force: true });
@@ -148,7 +139,7 @@ test("resource-only zero-worker retention, duplicate admission, validation and r
 	await code(resource.createChild(spec), "disposed");
 	const replacement = await core.registerResource("graph", context());
 	await replacement.release();
-	expect(runtime.getModel(model.provider, model.id)).toBeDefined();
+	expect(runtime.find(model.provider, model.id)).toBeDefined();
 });
 
 test("resource child admission snapshots create and reopen inputs before awaiting", async () => {
@@ -193,19 +184,28 @@ test("resource child admission snapshots create and reopen inputs before awaitin
 	await owner.release();
 });
 
-test("retains exact borrowed runtime after source chat disposal, isolated from parent APIs", async () => {
+test("retains the borrowed registry after source chat disposal, isolated from parent APIs", async () => {
 	const core = service();
-	const selected = runtime.getModel(model.provider, model.id);
+	const selected = runtime.find(model.provider, model.id);
 	if (!selected) throw new Error("Missing synthetic model");
 	const source = await createAgentSession({
 		cwd,
-		modelRuntime: runtime,
+		agentDir: join(root, "agent"),
+		settings: Settings.isolated({}),
+		modelRegistry: runtime,
 		sessionManager: SessionManager.inMemory(cwd),
-		settingsManager: SettingsManager.inMemory({}),
 		model: selected,
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
 	});
 	const resource = await core.registerResource("retained", context());
-	source.session.dispose();
+	await source.session.dispose();
 	const events: unknown[] = [];
 	core.onLifecycle((event) => events.push(event));
 	const child = await resource.createChild(spec);
@@ -224,46 +224,47 @@ test("retains exact borrowed runtime after source chat disposal, isolated from p
 	await resource.release();
 });
 
-test("registry replay is eager and one-time, survives source provider removal without reloading extensions", async () => {
+test("registry borrowing is live: a provider later removed from the source fails explicitly, never by substitution", async () => {
 	const sourceRuntime = await isolatedRuntime();
 	register(sourceRuntime);
 	const core = service();
 	const resource = await core.registerResource("registry", {
-		kind: "registry",
-		modelRegistry: new ModelRegistry(sourceRuntime),
+		modelRegistry: sourceRuntime,
 		cwd,
 		model,
 	});
-	sourceRuntime.unregisterProvider(model.provider);
 	await resource.validateModels([model]);
-	faux.setResponses([fauxAssistantMessage("OPAQUE_REPLAY")]);
+	faux.setResponses([fauxAssistantMessage("SHARED_REGISTRY")]);
 	const child = await resource.createChild(spec);
-	expect((await child.runQueued("run later")).finalText).toBe("OPAQUE_REPLAY");
+	expect((await child.runQueued("run")).finalText).toBe("SHARED_REGISTRY");
+	sourceRuntime.unregisterProvider(model.provider);
+	await code(resource.validateModels([model]), "model-unavailable");
+	await code(resource.createChild(spec), "model-unavailable");
 	await resource.release();
 });
 
-test("registry-only runtime credentials reject statically, but exact runtime borrowing is supported", async () => {
+test("runtime-only credentials held by the borrowed registry serve resource children", async () => {
 	const sourceRuntime = await isolatedRuntime();
 	register(sourceRuntime);
-	await sourceRuntime.setRuntimeApiKey(model.provider, "runtime-only");
+	sourceRuntime.authStorage.keys.setRuntime(model.provider, "runtime-only");
 	const core = service();
-	await code(
-		core.registerResource("unsupported", {
-			kind: "registry",
-			modelRegistry: new ModelRegistry(sourceRuntime),
-			cwd,
-			model,
-		}),
-		"unsupported-auth",
-	);
-	const exact = await core.registerResource("unsupported", {
-		kind: "runtime",
-		modelRuntime: sourceRuntime,
+	const resource = await core.registerResource("runtime-credentials", {
+		modelRegistry: sourceRuntime,
 		cwd,
 		model,
 	});
-	await exact.validateModels([model]);
-	await exact.release();
+	await resource.validateModels([model]);
+	let requestKey: string | undefined;
+	faux.setResponses([
+		(_context, options) => {
+			requestKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
+			return fauxAssistantMessage("RUNTIME_KEY");
+		},
+	]);
+	const child = await resource.createChild(spec);
+	expect((await child.runQueued("run")).finalText).toBe("RUNTIME_KEY");
+	expect(requestKey).toBe("runtime-only");
+	await resource.release();
 });
 
 test("capture fork fan-out is source-independent and persists independent effective model/thinking metadata", async () => {
@@ -284,7 +285,7 @@ test("capture fork fan-out is source-independent and persists independent effect
 	await source.dispose();
 	rmSync(source.record.sessionFile);
 	const sourceManager = SessionManager.inMemory(cwd);
-	sourceManager.appendModelChange("old", "old");
+	sourceManager.appendModelChange("old/old");
 	sourceManager.appendThinkingLevelChange("xhigh");
 	const sourceCut = sourceManager.appendMessage({
 		role: "user",
@@ -304,11 +305,8 @@ test("capture fork fan-out is source-independent and persists independent effect
 		});
 		expect(child.record.originKind).toBe("fork");
 		expect(child.record.entryId).toBe(seed.entryId ?? undefined);
-		const manager = SessionManager.open(child.record.sessionFile);
-		expect(manager.buildSessionContext().model).toEqual({
-			provider: model.provider,
-			modelId: model.id,
-		});
+		const manager = await SessionManager.open(child.record.sessionFile);
+		expect(manager.buildSessionContext().models.default).toBe(`${model.provider}/${model.id}`);
 		expect(manager.buildSessionContext().thinkingLevel).toBe("off");
 		const seedFile = manager.getHeader()?.parentSession;
 		expect(seedFile).toBeDefined();
@@ -320,22 +318,23 @@ test("capture fork fan-out is source-independent and persists independent effect
 	await owner.release();
 });
 
-test("captured forks hide Anthropic-bound thinking while retaining immutable source evidence", async () => {
+test("captured forks keep Anthropic-bound thinking verbatim; omp replay drops foreign signatures for a signing target", async () => {
 	const core = service();
 	const source = SessionManager.inMemory(cwd);
 	source.appendMessage({ role: "user", content: "source", timestamp: Date.now() });
-	source.appendMessage({
+	const signed: AssistantMessage = {
 		...fauxAssistantMessage("unused"),
 		api: "anthropic-messages",
 		provider: "anthropic",
 		model: "claude-sonnet-4-5",
 		content: [
 			{ type: "thinking", thinking: "bound", thinkingSignature: "signed-anthropic" },
-			{ type: "thinking", thinking: "redacted", thinkingSignature: "encrypted", redacted: true },
+			{ type: "redactedThinking", data: "encrypted" },
 			{ type: "thinking", thinking: "portable" },
 			{ type: "text", text: "answer" },
 		],
-	});
+	};
+	source.appendMessage(signed);
 	source.appendMessage({ role: "user", content: "next", timestamp: Date.now() });
 	source.appendMessage({
 		...fauxAssistantMessage("unused"),
@@ -358,23 +357,26 @@ test("captured forks hide Anthropic-bound thinking while retaining immutable sou
 		...spec,
 		origin: { kind: "fork-captured", history },
 	});
-	const manager = SessionManager.open(child.record.sessionFile);
-	const messages = JSON.stringify(manager.buildSessionContext().messages);
-	expect(messages).not.toContain("signed-anthropic");
-	expect(messages).not.toContain("encrypted");
-	expect(messages).toContain("portable");
-	expect(messages).toContain("signed-openai");
 	const stored = readFileSync(child.record.sessionFile, "utf8");
 	expect(stored).toContain("signed-anthropic");
-	expect(stored).toContain('"type":"context_edit"');
-	faux.setResponses([
-		(providerContext) => {
-			const replay = JSON.stringify(providerContext.messages);
-			expect(replay).not.toContain("signed-anthropic");
-			expect(replay).toContain("signed-openai");
-			return fauxAssistantMessage("SAFE_FORK");
-		},
-	]);
+	expect(stored).toContain("encrypted");
+	const manager = await SessionManager.open(child.record.sessionFile);
+	const replay = manager
+		.buildSessionContext()
+		.messages.filter(
+			(message): message is Message =>
+				message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+		);
+	expect(JSON.stringify(replay)).toContain("signed-anthropic");
+	const official = runtime.find("anthropic", "claude-opus-5-5");
+	const otherDeployment = runtime.find("github-copilot", "claude-opus-5.5");
+	if (!official || !otherDeployment) throw new Error("Missing bundled Anthropic catalog models");
+	expect(official.thinking?.prefixBinding).toBe(true);
+	const anthropicReplay = JSON.stringify(transformMessages(replay, otherDeployment));
+	expect(anthropicReplay).not.toContain("signed-anthropic");
+	expect(anthropicReplay).not.toContain("encrypted");
+	expect(anthropicReplay).toContain("portable");
+	faux.setResponses([fauxAssistantMessage("SAFE_FORK")]);
 	expect((await child.runQueued("continue safely")).finalText).toBe("SAFE_FORK");
 	await owner.release();
 });
@@ -396,10 +398,10 @@ test("faithful reopen retains birth authority, reloads factories at current cwd 
 	const outcome = await child.runQueued("run");
 	expect(outcome.status).toBe("completed");
 	const { sessionFile, ...birth } = child.record;
-	expect(SessionManager.open(sessionFile).buildSessionContext().thinkingLevel).toBe("off");
-	const before = readFileSync(sessionFile, "utf8");
+	expect((await SessionManager.open(sessionFile)).buildSessionContext().thinkingLevel).toBe("off");
 	await code(resource.reopenChild({ birth, session: options }), "invalid-child-record");
 	await resource.release();
+	const before = readFileSync(sessionFile, "utf8");
 	const offline = createDelegationService({ delegationRoot: root, scope: birth.scope });
 	const captured = await offline.captureHistory({
 		kind: "resource-child",
@@ -433,11 +435,11 @@ test("faithful reopen retains birth authority, reloads factories at current cwd 
 		status: "completed",
 		finalText: "SECOND",
 	});
-	expect(SessionManager.open(sessionFile).buildSessionContext().thinkingLevel).toBe("off");
+	expect((await SessionManager.open(sessionFile)).buildSessionContext().thinkingLevel).toBe("off");
 	await resource.release();
 });
 
-test("reopen repairs a crash-dangling tool batch before provider replay", async () => {
+test("reopen of a crash-dangling tool batch replays without the unpaired call", async () => {
 	const core = service();
 	let owner = await core.registerResource("repair", context());
 	const child = await owner.createChild(spec);
@@ -445,25 +447,27 @@ test("reopen repairs a crash-dangling tool batch before provider replay", async 
 	await child.runQueued("persist a transcript");
 	const { sessionFile, ...birth } = child.record;
 	await child.dispose();
-	const dangling = SessionManager.open(sessionFile);
+	const dangling = await SessionManager.open(sessionFile);
 	dangling.appendMessage(fauxAssistantMessage(fauxToolCall("dag_submit_result", { outputs: {} })));
-	expect(scanReplayTools(dangling.buildSessionContext().messages).danglingTail).toHaveLength(1);
+	await dangling.flush();
+	expect(readFileSync(sessionFile, "utf8")).toContain("dag_submit_result");
 	await owner.release();
 	owner = await core.registerResource("repair", context());
 	const reopened = await owner.reopenChild({ birth, session: sessionOptions });
-	const replay = SessionManager.open(sessionFile).buildSessionContext().messages;
-	expect(scanReplayTools(replay).issues).toEqual([]);
-	expect(replay.at(-1)).toMatchObject({
-		role: "toolResult",
-		toolName: "dag_submit_result",
-		isError: true,
-	});
-	faux.setResponses([fauxAssistantMessage("AFTER_REPAIR")]);
+	const replay = (await SessionManager.open(sessionFile)).buildSessionContext().messages;
+	expect(scanReplayTools(replay)).toEqual({ issues: [], danglingTail: [] });
+	expect(JSON.stringify(replay)).not.toContain("dag_submit_result");
+	faux.setResponses([
+		(providerContext) => {
+			expect(JSON.stringify(providerContext.messages)).not.toContain("dag_submit_result");
+			return fauxAssistantMessage("AFTER_REPAIR");
+		},
+	]);
 	expect((await reopened.runQueued("continue")).finalText).toBe("AFTER_REPAIR");
 	await owner.release();
 });
 
-test("reopen rejects a non-tail replay gap that cannot be repaired positionally", async () => {
+test("reopen rejects a malformed replay omp cannot heal, while a non-tail unpaired call heals", async () => {
 	const core = service();
 	let owner = await core.registerResource("replay-gap", context());
 	const child = await owner.createChild(spec);
@@ -471,11 +475,24 @@ test("reopen rejects a non-tail replay gap that cannot be repaired positionally"
 	await child.runQueued("persist");
 	const { sessionFile, ...birth } = child.record;
 	await child.dispose();
-	const manager = SessionManager.open(sessionFile);
+	const manager = await SessionManager.open(sessionFile);
 	manager.appendMessage(fauxAssistantMessage(fauxToolCall("read", { path: "missing" })));
 	manager.appendMessage({ role: "user", content: "later message", timestamp: Date.now() });
+	await manager.flush();
 	await owner.release();
 	owner = await core.registerResource("replay-gap", context());
+	const healed = await owner.reopenChild({ birth, session: sessionOptions });
+	await healed.dispose();
+	const orphaned = await SessionManager.open(sessionFile);
+	orphaned.appendMessage({
+		role: "toolResult",
+		toolCallId: "never-called",
+		toolName: "read",
+		content: [{ type: "text", text: "orphan" }],
+		isError: false,
+		timestamp: Date.now(),
+	});
+	await orphaned.flush();
 	await code(owner.reopenChild({ birth, session: sessionOptions }), "invalid-child-transcript");
 	await owner.release();
 });
@@ -720,12 +737,63 @@ test("resource-local pacing and factories do not contaminate other resource owne
 	await second.release();
 });
 
+test("a successful terminal tool ends the invocation before another provider call; a failed one does not", async () => {
+	const core = service();
+	const resource = await core.registerResource("terminal", context(), {
+		terminalTools: ["finish"],
+		childExtensionFactories: [
+			(pi) => {
+				pi.registerTool({
+					name: "finish",
+					label: "Finish",
+					description: "Finish the invocation",
+					parameters: {
+						type: "object",
+						properties: { ok: { type: "boolean" } },
+						required: ["ok"],
+						additionalProperties: false,
+					},
+					loadMode: "essential",
+					async execute(_id, params: unknown) {
+						if (typeof params !== "object" || params === null || !("ok" in params) || !params.ok)
+							throw new Error("not finished");
+						return { content: [{ type: "text", text: "done" }], details: undefined };
+					},
+				});
+			},
+		],
+	});
+	const child = await resource.createChild({
+		...extensionSpec,
+		session: { ...extensionSpec.session, tools: ["finish"] },
+	});
+	faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("finish", { ok: true })),
+		fauxAssistantMessage("AFTER_TERMINAL"),
+	]);
+	const calls = faux.state.callCount;
+	const finished = await child.runQueued("finish now");
+	expect(finished.status).toBe("completed");
+	expect(finished.finalText ?? "").not.toContain("AFTER_TERMINAL");
+	expect(faux.state.callCount).toBe(calls + 1);
+	expect(faux.getPendingResponseCount()).toBe(1);
+	faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("finish", { ok: false })),
+		fauxAssistantMessage("RECOVERED"),
+	]);
+	const recovered = await child.runQueued("fail first");
+	expect(recovered.status).toBe("completed");
+	expect(recovered.finalText).toBe("RECOVERED");
+	expect(faux.getPendingResponseCount()).toBe(0);
+	await resource.release();
+});
+
 test("finalized invocation evidence survives a shrinking compaction context and usage stays a pi-stat delta", async () => {
 	const compactCwd = join(root, "compaction-cwd");
-	mkdirSync(join(compactCwd, ".pi"), { recursive: true });
+	mkdirSync(join(compactCwd, ".omp"), { recursive: true });
 	writeFileSync(
-		join(compactCwd, ".pi", "settings.json"),
-		JSON.stringify({ compaction: { enabled: true, reserveTokens: 99_999, keepRecentTokens: 1 } }),
+		join(compactCwd, ".omp", "config.yml"),
+		"compaction:\n  enabled: true\n  reserveTokens: 99999\n  keepRecentTokens: 1\n",
 	);
 	const core = service();
 	const source = SessionManager.inMemory(compactCwd);
@@ -747,6 +815,8 @@ test("finalized invocation evidence survives a shrinking compaction context and 
 					pi.on("session_before_compact", (event) => {
 						const last = event.branchEntries.at(-1);
 						if (!last) throw new Error("Missing compaction cut");
+						if (last.type !== "message" || last.message.role !== "assistant")
+							return { cancel: true };
 						return {
 							compaction: {
 								summary: "locally compacted",
@@ -771,7 +841,7 @@ test("finalized invocation evidence survives a shrinking compaction context and 
 	expect(compacted).toBe(1);
 	expect(outcome.finalText).toBe("AFTER_COMPACTION");
 	expect(outcome.stopReason).toBe("stop");
-	const manager = SessionManager.open(child.record.sessionFile);
+	const manager = await SessionManager.open(child.record.sessionFile);
 	expect(manager.buildSessionContext().messages.length).toBeLessThan(20);
 	expect(manager.getLeafId()).toBe(outcome.historyEntryId);
 	expect(manager.getLeafEntry()?.type).toBe("compaction");
@@ -882,9 +952,14 @@ test("fork admission revalidates canonical bytes, identity, boundary, digest and
 	]) {
 		await code(fork(invalid), "invalid-history");
 	}
-	manager.appendMessage(
-		fauxAssistantMessage([{ type: "toolCall", id: "call", name: "read", arguments: {} }]),
-	);
+	manager.appendMessage({
+		role: "toolResult",
+		toolCallId: "never-called",
+		toolName: "read",
+		content: [{ type: "text", text: "orphan" }],
+		isError: false,
+		timestamp: Date.now(),
+	});
 	const header = JSON.stringify(manager.getHeader());
 	for (const [jsonl, entryId, expected] of [
 		[history.jsonl.slice(0, -1), history.entryId, "invalid-history"],
@@ -921,29 +996,27 @@ test("fork admission revalidates canonical bytes, identity, boundary, digest and
 	await owner.release();
 });
 
-test("native extension providers are replayed opaquely without an extension-provider ban", async () => {
+test("extension-registered providers on the borrowed registry serve children without a provider ban or pruning", async () => {
 	const native = fauxProvider({
 		provider: "native-local",
 		api: "native-local",
-		models: faux.models,
+		models: [{ id: model.id, reasoning: false, input: ["text"] }],
 	});
 	const sourceRuntime = await isolatedRuntime();
-	sourceRuntime.registerNativeProvider(native.provider);
-	await sourceRuntime.getAvailable(native.provider.id);
+	sourceRuntime.registerProvider(native.provider.id, native.provider.config, "<inline-0>");
 	const reference = { provider: native.provider.id, id: model.id };
 	const core = service();
-	const resource = await core.registerResource("native", {
-		kind: "registry",
-		modelRegistry: new ModelRegistry(sourceRuntime),
-		cwd,
-		model: reference,
-	});
-	sourceRuntime.unregisterProvider(native.provider.id);
+	const resource = await core.registerResource(
+		"native",
+		{ modelRegistry: sourceRuntime, cwd, model: reference },
+		{ childExtensionFactories: [() => {}] },
+	);
 	await resource.validateModels([reference]);
 	const child = await resource.createChild({
 		...spec,
-		session: { ...sessionOptions, model: reference },
+		session: { ...sessionOptions, model: reference, extensions: true },
 	});
+	expect(sourceRuntime.find(reference.provider, reference.id)).toBeDefined();
 	native.setResponses([fauxAssistantMessage("NATIVE_REPLAY")]);
 	expect((await child.runQueued("later native")).finalText).toBe("NATIVE_REPLAY");
 	await resource.release();

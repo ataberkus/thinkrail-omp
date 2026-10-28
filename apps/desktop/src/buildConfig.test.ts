@@ -34,7 +34,11 @@ test("selects real Bun and preserves the physical runtime resources without reti
 		mainProcess: "bun",
 		bun: { entrypoint: "src/index.ts", version: rootManifest.packageManager.replace(/^bun@/, "") },
 		views: { preload: { entrypoint: "src/preload.ts", format: "iife" } },
-		copy: { "../web/dist": "views/web", ".stage/runtime": "runtime" },
+		copy: {
+			"../web/dist": "views/web",
+			".stage/runtime": "runtime",
+			".stage/native": "native",
+		},
 		mac: { bundleCEF: false, icons: "../../packages/shared/assets/icon.iconset" },
 		linux: { bundleCEF: false, icon: "../../packages/shared/assets/icon.png" },
 		win: { bundleCEF: false, icon: "../../packages/shared/assets/icon.ico" },

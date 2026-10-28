@@ -104,7 +104,7 @@ describe("buildProviderReport", () => {
 		]);
 	});
 
-	test("environment and models.json sources remain generic provider auth", () => {
+	test("environment and models.yml sources remain generic provider auth", () => {
 		const report = buildProviderReport(
 			sources({
 				modelProviderIds: new Set(["custom", "groq"]),
@@ -121,7 +121,7 @@ describe("buildProviderReport", () => {
 				name: "custom",
 				configured: true,
 				kind: "api-key",
-				detail: "models.json",
+				detail: "models.yml",
 				canApiKey: true,
 			},
 			{

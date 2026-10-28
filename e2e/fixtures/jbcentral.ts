@@ -87,8 +87,10 @@ export async function waitForVersionProbe(after: number): Promise<void> {
 export async function reprobeCentralStatus(page: Page): Promise<void> {
 	const probes = centralInvocationCount("status");
 	await page.waitForTimeout(JBCENTRAL_STATUS_TTL_MS + 250);
-	await page.getByTestId("providers-refresh").click();
-	await expect
-		.poll(() => centralInvocationCount("status"), { timeout: 15_000 })
-		.toBeGreaterThan(probes);
+	await expect(async () => {
+		await page.getByTestId("providers-refresh").click();
+		await expect
+			.poll(() => centralInvocationCount("status"), { timeout: 1_000 })
+			.toBeGreaterThan(probes);
+	}).toPass({ timeout: 15_000 });
 }

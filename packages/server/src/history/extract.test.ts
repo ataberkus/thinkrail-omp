@@ -73,7 +73,55 @@ describe("extractSession", () => {
 		]);
 	});
 
-	test("carries the header's identity and the latest session_info name (a clear wins too)", () => {
+	test("carries the header's identity and omp's header title, folded from the title slot (a clear wins too)", () => {
+		const titled = [
+			line({
+				type: "title",
+				v: 1,
+				title: "Slot title",
+				updatedAt: "2026-01-02T00:00:00.000Z",
+				pad: "",
+			}),
+			line({
+				type: "session",
+				version: 3,
+				id: "sess-41",
+				title: "Header title",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: "/repo/a",
+			}),
+		].join("\n");
+		expect(extractSession(titled)).toMatchObject({
+			id: "sess-41",
+			cwd: "/repo/a",
+			title: "Slot title",
+		});
+		const headerOnly = [
+			line({
+				type: "session",
+				version: 3,
+				id: "sess-40",
+				title: "Header title",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: "/repo/a",
+			}),
+		].join("\n");
+		expect(extractSession(headerOnly)?.title).toBe("Header title");
+		const slotCleared = [
+			line({ type: "title", v: 1, title: "", updatedAt: "2026-01-02T00:00:00.000Z", pad: "" }),
+			line({
+				type: "session",
+				version: 3,
+				id: "sess-39",
+				title: "Header title",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: "/repo/a",
+			}),
+		].join("\n");
+		expect(extractSession(slotCleared)?.title).toBeUndefined();
+	});
+
+	test("a pi 1.x transcript still yields its latest session_info name (a clear wins too)", () => {
 		const jsonl = [
 			line({
 				type: "session",
@@ -305,7 +353,7 @@ describe("extractSession", () => {
 			}),
 		].join("\n");
 		expect(entriesOf(jsonl)).toEqual([
-			{ text: "kept question", role: "user", timestamp: 300, messageIndex: 1 },
+			{ text: "kept question", role: "user", timestamp: 300, messageIndex: 0 },
 			{ text: "post-compaction answer", role: "assistant", timestamp: 400, messageIndex: 2 },
 		]);
 	});

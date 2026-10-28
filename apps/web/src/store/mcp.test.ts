@@ -74,7 +74,6 @@ test("a list replaces the live-chat set but keeps newer pushes and pushes that l
 	const projection = {
 		servers: null,
 		configErrors: [],
-		handledElsewhere: null,
 		sessions: {
 			gone: held(snapshot("gone", 2), 1, 3),
 			ahead: held(snapshot("ahead", 9), 1, 3),
@@ -92,7 +91,6 @@ test("a list replaces the live-chat set but keeps newer pushes and pushes that l
 				snapshot("fresh", 1),
 				{ ...snapshot("other", 1), workspaceId: "elsewhere" },
 			],
-			handledElsewhere: { by: "custom-mcp" },
 			configErrors: [{ source: "/agent/mcp.json", message: "bad JSON" }],
 		},
 		read,
@@ -101,7 +99,6 @@ test("a list replaces the live-chat set but keeps newer pushes and pushes that l
 	expect(next.sessions.ahead?.snapshot.generation).toBe(9);
 	expect(next.sessions.stale?.snapshot.generation).toBe(2);
 	expect(next.sessions.fresh?.revision).toBe(4);
-	expect(next.handledElsewhere).toEqual({ by: "custom-mcp" });
 	expect(next.configErrors).toEqual([{ source: "/agent/mcp.json", message: "bad JSON" }]);
 	expect(foldMcpList(next, list([]), read).configErrors).toEqual([]);
 });

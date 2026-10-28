@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { boundedError, OutputTail } from "./output";
-import { shellEnvironment } from "./shell-context";
+import { createEngineOperations, shellEnvironment } from "./shell-context";
 import type {
 	BackgroundCommandCompletion,
 	BackgroundCommandCompletionBinding,
@@ -151,9 +150,7 @@ export function createBackgroundCommands(
 					controller.signal.throwIfAborted();
 					const context = binding.getContext();
 					controller.signal.throwIfAborted();
-					const operations = (options.createOperations ?? createLocalBashOperations)(
-						context.shellPath ? { shellPath: context.shellPath } : {},
-					);
+					const operations = (options.createOperations ?? createEngineOperations)();
 					const resolvedCommand = context.commandPrefix
 						? `${context.commandPrefix}\n${command}`
 						: command;

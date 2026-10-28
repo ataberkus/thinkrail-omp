@@ -81,7 +81,6 @@ import {
 	mcpChatFailureText,
 	mcpEntryUpdate,
 	mcpExposureLabel,
-	mcpHandledElsewhereText,
 	mcpRenderedTarget,
 	mcpRowView,
 	mcpSaveFeedback,
@@ -149,7 +148,7 @@ async function settle<T>(work: () => Promise<T>): Promise<Settled<T>> {
 async function readProjectEntry(workspaceId: string, name: string): Promise<McpServerEntryInput> {
 	const { content } = await getTransport().request("fs.readFile", {
 		workspaceId,
-		path: ".pi/mcp.json",
+		path: ".omp/mcp.json",
 	});
 	return projectEntryFrom(content, name);
 }
@@ -219,10 +218,7 @@ type McpRowCommand =
 
 function lockedSettings(row: McpServerRow): boolean {
 	return (
-		row.state === "pending-approval" ||
-		row.state === "invalid-config" ||
-		row.state === "replaced" ||
-		row.state === "handled-elsewhere"
+		row.state === "pending-approval" || row.state === "invalid-config" || row.state === "replaced"
 	);
 }
 
@@ -398,7 +394,7 @@ export function McpServerRowView({
 							) : (
 								<DropdownMenuItem
 									data-testid="mcp-menu-edit"
-									disabled={inert || row.state === "handled-elsewhere"}
+									disabled={inert}
 									onSelect={() => onCommand({ kind: "edit" })}
 								>
 									{t("common.edit")}
@@ -733,8 +729,7 @@ function McpWorkspaceSettings({ workspace }: { workspace: Workspace }) {
 		setRemoving((current) => (current?.summary.scope === "project" ? null : current));
 	}, [trusted]);
 
-	const handledElsewhere = projection?.handledElsewhere ?? null;
-	const readOnly = !connected || handledElsewhere !== null;
+	const readOnly = !connected;
 	const servers = projection?.servers ?? null;
 	const configErrors = projection?.configErrors ?? [];
 	const mcpLogin =
@@ -937,15 +932,6 @@ function McpWorkspaceSettings({ workspace }: { workspace: Workspace }) {
 				) : null}
 			</div>
 			<McpConfirmBanner />
-			{handledElsewhere ? (
-				<p
-					data-testid="mcp-handled-elsewhere"
-					className="flex items-start gap-8 rounded-sm border border-border-default border-l-[3px] border-l-feedback-warning bg-feedback-warning-subtle px-12 py-8 text-text-default tr-text-metadata"
-				>
-					<TriangleAlert className="mt-2 size-14 shrink-0 text-feedback-warning" />
-					{mcpHandledElsewhereText(t, handledElsewhere.by)}
-				</p>
-			) : null}
 			{!trusted ? (
 				<p data-testid="mcp-untrusted" className="text-text-muted tr-text-metadata">
 					{t("mcp.settings.untrusted")}

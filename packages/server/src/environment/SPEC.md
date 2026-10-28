@@ -23,7 +23,7 @@ ThinkRail terminal uses the same config folder.
   section reads.
 - **Public surface (barrel):** `applyHostEnvironment`, `hostEnvironmentStatus`, `updateHostEnvironment`.
 - **Allowed deps:** `persistence` (`loadHostEnvironment` / `saveHostEnvironment`), `log`, `contracts`
-  (types), `@thinkrail/shared/shellEnv` (`launchEnvKeys`), `@earendil-works/pi-coding-agent`
+  (types), `@thinkrail/shared/shellEnv` (`launchEnvKeys`), `@oh-my-pi/pi-coding-agent`
   (`getAgentDir`, for the folder in use).
 - **Forbidden:** `settings` / `AppConfig` (values may be secrets and `AppConfig` is broadcast to every
   frontend and seeded in `server.welcome`); publishing on any channel; logging or reporting variable

@@ -72,14 +72,6 @@ function ensureSlugs(projects: Project[]): boolean {
 	return changed;
 }
 
-/** Whether pi itself already trusts a path; seeds a newly added project's pi-level trust. */
-export type PiTrustSeed = (path: string) => boolean;
-let piTrustSeed: PiTrustSeed | null = null;
-
-export function setPiTrustSeed(seed: PiTrustSeed | null): void {
-	piTrustSeed = seed;
-}
-
 export function getProjects(): Project[] {
 	const projects = loadProjects();
 	if (ensureSlugs(projects)) saveProjects(projects);
@@ -115,7 +107,7 @@ export function openProject(inputPath: string): Project {
 		path: root,
 		slug: uniqueSlug(slugify(basename(root)), taken),
 		lastOpened: Date.now(),
-		piResourceTrust: piTrustSeed?.(root) ? "granted" : "untrusted",
+		piResourceTrust: "untrusted",
 	};
 	projects.push(project);
 	saveProjects(projects);

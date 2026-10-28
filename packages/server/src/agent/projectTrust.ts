@@ -1,32 +1,26 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { getAgentDir, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import type { ProjectResourceKind, ProjectTrustSummary } from "@thinkrail/contracts";
 import { discoverAgentDefinitions } from "pi-subagents";
 import { listProjectAliasSkillNames } from "./extensions";
 import { loadMcpConfigFiles } from "./mcp";
 
-export function piTrustsProjectPath(path: string): boolean {
-	const agentDir = getAgentDir();
-	try {
-		const decision = new ProjectTrustStore(agentDir).get(path);
-		if (decision !== null) return decision;
-		const settings = SettingsManager.create(path, agentDir, { projectTrusted: false });
-		return settings.getDefaultProjectTrust() === "always";
-	} catch {
-		return false;
-	}
-}
+const PROJECT_CONFIG_DIR = ".omp";
 
 const PI_DIR_RESOURCES: ReadonlyArray<[ProjectResourceKind, string]> = [
 	["extensions", "extensions"],
+	["extensions", "hooks"],
+	["extensions", "tools"],
 	["settings", "settings.json"],
+	["settings", "config.yml"],
 	["skills", "skills"],
 	["prompts", "prompts"],
-	["themes", "themes"],
 	["systemPrompt", "SYSTEM.md"],
-	["systemPrompt", "APPEND_SYSTEM.md"],
+	["systemPrompt", "SYSTEM_TEMPLATE.md"],
+	["systemPrompt", "RULES.md"],
+	["systemPrompt", "rules"],
 ];
 
 function canonical(path: string): string {
@@ -37,20 +31,20 @@ function canonical(path: string): string {
 	}
 }
 
-function hasAncestorAgentsSkills(cwd: string): boolean {
-	const personal = join(canonical(process.env.HOME || homedir()), ".agents", "skills");
+function hasAncestorProjectSkills(cwd: string): boolean {
+	const home = canonical(process.env.HOME || homedir());
 	for (let dir = canonical(cwd); ; dir = dirname(dir)) {
-		const candidate = join(dir, ".agents", "skills");
-		if (candidate !== personal && existsSync(candidate)) return true;
+		const skills = [join(dir, ".agents", "skills"), join(dir, PROJECT_CONFIG_DIR, "skills")];
+		if (dir !== home && skills.some((candidate) => existsSync(candidate))) return true;
 		if (dirname(dir) === dir) return false;
 	}
 }
 
 function piResourceKinds(cwd: string): ProjectResourceKind[] {
-	const piDir = join(canonical(cwd), ".pi");
+	const piDir = join(canonical(cwd), PROJECT_CONFIG_DIR);
 	const kinds = new Set<ProjectResourceKind>();
 	for (const [kind, entry] of PI_DIR_RESOURCES) if (existsSync(join(piDir, entry))) kinds.add(kind);
-	if (hasAncestorAgentsSkills(cwd)) kinds.add("skills");
+	if (hasAncestorProjectSkills(cwd)) kinds.add("skills");
 	const definitions = discoverAgentDefinitions({
 		cwd,
 		agentDir: getAgentDir(),

@@ -76,18 +76,11 @@ const TOOLS: ToolFixture[] = [
 		details: { path: "removed/SPEC.md", id: "removed" },
 	},
 	{
-		id: "fetch-local-video",
-		name: "fetch_content",
-		args: { url: "/tmp/video.mp4" },
-		text: "# Fetched content\n\nRead the [external source](https://example.com/source).",
-		details: { urls: ["/tmp/video.mp4"], responseId: "response-123" },
-	},
-	{
-		id: "stored-content",
-		name: "get_search_content",
-		args: { responseId: "response-123", urlIndex: 0 },
-		text: "# Stored content\n\nRecovered the complete document.",
-		details: { url: "https://example.com/docs", title: "Stored content" },
+		id: "read-url",
+		name: "read",
+		args: { path: "https://www.example.com/docs" },
+		text: "URL: https://www.example.com/docs\nContent-Type: text/html\nMethod: readability\n---\n\n# Fetched content\n\nRead the [external source](https://example.com/source).",
+		details: { kind: "url", finalUrl: "https://www.example.com/docs" },
 	},
 ];
 
@@ -261,16 +254,16 @@ test("structured tool paths reuse the preview tab while rich tool results stay i
 	await expect(specDelete).toContainText("removed/SPEC.md");
 	await expect(specDelete.getByTestId("tool-file-link")).toHaveCount(0);
 
-	const fetch = await toolStep(page, "fetch_content");
-	await expect(fetch).toContainText("/tmp/video.mp4");
-	await expect(fetch.getByTestId("tool-file-link")).toHaveCount(0);
-	await expect(fetch.getByRole("heading", { name: "Fetched content" })).toBeVisible();
-	await expect(fetch.getByRole("link", { name: "external source" })).toHaveAttribute(
+	const urlRead = await toolStep(page, "read", 2);
+	await expect(urlRead.getByTestId("tool-file-link")).toHaveCount(0);
+	await expect(urlRead.getByRole("link", { name: "example.com" })).toHaveAttribute(
+		"href",
+		"https://www.example.com/docs",
+	);
+	await expect(urlRead.getByRole("heading", { name: "Fetched content" })).toBeVisible();
+	await expect(urlRead.getByRole("link", { name: "external source" })).toHaveAttribute(
 		"href",
 		"https://example.com/source",
 	);
-
-	const stored = await toolStep(page, "get_search_content");
-	await expect(stored.getByRole("heading", { name: "Stored content" })).toBeVisible();
-	await expect(stored).not.toContainText('"responseId"');
+	await expect(urlRead).not.toContainText("Content-Type:");
 });

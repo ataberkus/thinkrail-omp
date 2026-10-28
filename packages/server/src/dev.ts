@@ -1,20 +1,11 @@
-import type { Provider } from "@earendil-works/pi-ai";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai/oauth";
-import { configurePiRuntimeGenerationInitializer } from "./agent";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai";
+import { configurePiRuntimeGenerationInitializer, type NativeProvider } from "./agent";
 import { bootHost } from "./host";
 
 if (process.env.THINKRAIL_E2E_FAKE_OAUTH === "1") {
-	const fakeOauth = {
-		name: "E2E Test Provider",
+	const fakeOauth = (choice: "subscription" | "api", name: string) => ({
+		name,
 		async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-			const choice = await callbacks.onSelect({
-				message: "How do you want to sign in?",
-				options: [
-					{ id: "subscription", label: "Subscription" },
-					{ id: "api", label: "API console" },
-				],
-			});
-			if (!choice) throw new Error("Login cancelled");
 			let code: string;
 			if (choice === "api") {
 				callbacks.onAuth({
@@ -26,7 +17,7 @@ if (process.env.THINKRAIL_E2E_FAKE_OAUTH === "1") {
 				callbacks.onAuth({
 					url: "https://e2e.test/authorize?probe=1&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fcallback",
 				});
-				code = (await callbacks.onManualCodeInput?.()) ?? "";
+				code = (await callbacks.onManualCodeInput?.(callbacks.signal)) ?? "";
 			}
 			callbacks.onProgress?.("Exchanging authorization code…");
 			return {
@@ -41,51 +32,46 @@ if (process.env.THINKRAIL_E2E_FAKE_OAUTH === "1") {
 		getApiKey(credentials: OAuthCredentials): string {
 			return String(credentials.access);
 		},
-	};
-	const dummyStream = (): never => {
-		throw new Error("e2e-apikey is a login fixture — it never streams");
-	};
-	const fakeApiKeyProvider: Provider = {
+	});
+	const fakeApiKeyProvider: NativeProvider = {
 		id: "e2e-apikey",
 		name: "E2E Key Provider",
-		baseUrl: "http://e2e-apikey.test",
-		auth: {
-			apiKey: {
-				name: "E2E Key Provider API key",
-				async login(interaction) {
-					const key = await interaction.prompt({
-						type: "secret",
-						message: "Enter your E2E Key Provider API key",
-						placeholder: "e2e-...",
-					});
-					if (!key.trim()) throw new Error("API key must not be empty");
-					return { type: "api_key", key: key.trim() };
+		config: {
+			baseUrl: "http://e2e-apikey.test",
+			api: "openai-completions",
+			models: [
+				{
+					id: "e2e-key-model",
+					name: "E2E Key Model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 100_000,
+					maxTokens: 4096,
 				},
-				async resolve({ credential }) {
-					if (!credential?.key) return undefined;
-					return { auth: { apiKey: credential.key }, source: "E2E API key" };
-				},
+			],
+		},
+		apiKeyLogin: {
+			async login(interaction) {
+				const key = await interaction.prompt({
+					type: "secret",
+					message: "Enter your E2E Key Provider API key",
+					placeholder: "e2e-...",
+				});
+				if (!key.trim()) throw new Error("API key must not be empty");
+				return { type: "api_key", key: key.trim() };
 			},
 		},
-		getModels: () => [
-			{
-				id: "e2e-key-model",
-				name: "E2E Key Model",
-				provider: "e2e-apikey",
-				api: "openai-completions",
-				baseUrl: "http://e2e-apikey.test",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 100_000,
-				maxTokens: 4096,
-			},
-		],
-		stream: dummyStream,
-		streamSimple: dummyStream,
 	};
 	configurePiRuntimeGenerationInitializer((runtime) => {
-		runtime.registerProvider("e2e-oauth", { oauth: fakeOauth });
+		runtime.registerProvider("e2e-oauth", {
+			name: "E2E Test Provider",
+			oauth: fakeOauth("subscription", "E2E Test Provider"),
+		});
+		runtime.registerProvider("e2e-oauth-code", {
+			name: "E2E Code Provider",
+			oauth: fakeOauth("api", "E2E Code Provider"),
+		});
 		runtime.registerNativeProvider(fakeApiKeyProvider);
 	});
 }

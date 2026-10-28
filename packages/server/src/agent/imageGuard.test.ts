@@ -1,5 +1,18 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
+import { createAgentSession, SessionManager, Settings } from "@oh-my-pi/pi-coding-agent";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import type { AgentMessage, ImageContent } from "@thinkrail/contracts";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+	registerFaux,
+} from "pi-faux";
 import {
 	guardOversizedImages,
 	imageDimensions,
@@ -371,46 +384,88 @@ describe("isAnthropicFamilyModel", () => {
 	});
 });
 
-type ContextHandler = (
-	event: { type: "context"; messages: AgentMessage[] },
-	ctx: { model: { api?: string; provider?: string; id?: string } | undefined },
-) => unknown;
+const guardRoot = mkdtempSync(join(tmpdir(), "image-guard-"));
+let guardAgentDir: IsolatedAgentDir | undefined;
 
-function registeredHandler(): ContextHandler {
-	let handler: ContextHandler | undefined;
-	const pi = {
-		on: (event: string, h: ContextHandler) => {
-			if (event === "context") handler = h;
-		},
-	};
-	oversizedImageGuard(pi as never);
-	if (!handler) throw new Error("no context handler registered");
-	return handler;
+beforeAll(() => {
+	guardAgentDir = isolateAgentDir(join(guardRoot, "agent"));
+});
+
+afterAll(() => {
+	guardAgentDir?.restore();
+	rmSync(guardRoot, { recursive: true, force: true });
+});
+
+async function contextThroughGuard(modelId: string, messages: UserMessage[]): Promise<unknown[]> {
+	const settings = Settings.isolated({});
+	const { authStorage, modelRegistry } = await createFauxModelRegistry(settings);
+	const model = registerFaux(
+		modelRegistry,
+		createFauxCore({ provider: `guard-${modelId}`, models: [{ id: modelId }] }),
+	);
+	const { session } = await createAgentSession({
+		cwd: guardRoot,
+		agentDir: join(guardRoot, "agent"),
+		settings,
+		authStorage,
+		modelRegistry,
+		model,
+		sessionManager: SessionManager.inMemory(guardRoot),
+		extensions: [oversizedImageGuard],
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
+	});
+	try {
+		await initializeExtensions(session, {
+			mode: "rpc",
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: (error) => {
+				throw new Error(error.error);
+			},
+		});
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("the session has no extension runner");
+		return await runner.emitContext(messages);
+	} finally {
+		await session.dispose();
+	}
 }
 
-const anthropicCtx = { model: { provider: "anthropic", api: "anthropic-messages", id: "claude" } };
+const promptWithImage = (bytes: Buffer): UserMessage => ({
+	role: "user",
+	content: [{ type: "image", data: bytes.toString("base64"), mimeType: "image/png" }],
+	timestamp: 1,
+});
 
-test("oversizedImageGuard registers a context handler that returns replaced messages", async () => {
-	const handler = registeredHandler();
+const promptText = (text: string): UserMessage => ({ role: "user", content: text, timestamp: 1 });
 
-	const clean = await handler({ type: "context", messages: [user("hello")] }, anthropicCtx);
-	expect(clean).toBeUndefined();
+test("oversizedImageGuard registers a context handler that replaces an oversized image for a Claude model", async () => {
+	const clean = [promptText("hello")];
+	expect(await contextThroughGuard("claude-faux", clean)).toEqual(clean);
 
-	const dirty = (await handler(
-		{ type: "context", messages: [user([image(pngBytes(9000, 100))])] },
-		anthropicCtx,
-	)) as { messages: AgentMessage[] };
-	expect(dirty?.messages).toBeDefined();
+	const dirty = await contextThroughGuard("claude-faux", [promptWithImage(pngBytes(9000, 100))]);
+	expect(dirty).toEqual([
+		expect.objectContaining({
+			role: "user",
+			content: [
+				expect.objectContaining({
+					type: "text",
+					text: expect.stringContaining("[image removed: 9000×100"),
+				}),
+			],
+		}),
+	]);
 });
 
 test("the guard is a no-op for a non-Anthropic model — the caps are Anthropic's, not the provider's", async () => {
-	const handler = registeredHandler();
-	const oversized = { type: "context" as const, messages: [user([image(pngBytes(9000, 100))])] };
-
-	expect(
-		await handler(oversized, {
-			model: { provider: "openai", api: "openai-responses", id: "gpt-5" },
-		}),
-	).toBeUndefined();
-	expect(await handler(oversized, { model: undefined })).toBeUndefined();
+	const oversized = [promptWithImage(pngBytes(9000, 100))];
+	expect(await contextThroughGuard("gpt-faux", oversized)).toEqual(oversized);
 });

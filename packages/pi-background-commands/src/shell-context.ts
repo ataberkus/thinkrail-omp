@@ -1,49 +1,49 @@
-import { delimiter, join } from "node:path";
-import {
-	type ExtensionContext,
-	getAgentDir,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import type { BackgroundCommandContext } from "./types";
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import type { BackgroundCommandContext, BackgroundCommandOperations } from "./types";
 
 export function shellEnvironment(
 	sessionId: string,
 	context: BackgroundCommandContext,
-): NodeJS.ProcessEnv {
-	const env = { ...process.env };
-	const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-	const currentPath = env[pathKey] ?? "";
-	const binDir = join(getAgentDir(), "bin");
-	if (!currentPath.split(delimiter).includes(binDir)) {
-		env[pathKey] = [binDir, currentPath].filter(Boolean).join(delimiter);
-	}
-	delete env.PI_SESSION_ID;
-	delete env.PI_SESSION_FILE;
-	delete env.PI_PROVIDER;
-	delete env.PI_MODEL;
-	delete env.PI_REASONING_LEVEL;
-	if (context.exposeSessionEnvironment !== false) {
-		env.PI_SESSION_ID = sessionId;
-		if (context.sessionFile) env.PI_SESSION_FILE = context.sessionFile;
-		if (context.model) {
-			env.PI_PROVIDER = context.model.provider;
-			env.PI_MODEL = context.model.id;
-		}
-		if (context.thinkingLevel) env.PI_REASONING_LEVEL = context.thinkingLevel;
-	}
-	return env;
+): Record<string, string> {
+	const expose = context.exposeSessionEnvironment !== false;
+	return {
+		PI_SESSION_ID: expose ? sessionId : "",
+		PI_SESSION_FILE: (expose && context.sessionFile) || "",
+		PI_PROVIDER: (expose && context.model?.provider) || "",
+		PI_MODEL: (expose && context.model?.id) || "",
+		PI_REASONING_LEVEL: (expose && context.thinkingLevel) || "",
+	};
 }
 
-export function standaloneContext(ctx: ExtensionContext): BackgroundCommandContext {
-	const settings = SettingsManager.create(ctx.cwd, getAgentDir(), {
-		projectTrusted: ctx.isProjectTrusted(),
-	});
+export function standaloneContext(
+	ctx: ExtensionContext,
+	pi: Pick<ExtensionAPI, "getThinkingLevel">,
+): BackgroundCommandContext {
 	return {
 		cwd: ctx.cwd,
 		sessionFile: ctx.sessionManager.getSessionFile(),
 		model: ctx.model,
-		thinkingLevel: ctx.thinkingLevel,
-		shellPath: settings.getShellPath(),
-		commandPrefix: settings.getShellCommandPrefix(),
+		thinkingLevel: pi.getThinkingLevel(),
+	};
+}
+
+export function createEngineOperations(): BackgroundCommandOperations {
+	return {
+		async exec(command, cwd, { onData, signal, timeout, env }) {
+			const result = await executeBash(command, {
+				cwd,
+				env,
+				signal,
+				timeout: timeout === undefined ? 0 : Math.max(1, Math.round(timeout * 1000)),
+				chunkThrottleMs: 0,
+				onChunk: (chunk) => onData(Buffer.from(chunk, "utf8")),
+				sessionKey: `background-command:async:${randomUUID()}`,
+			});
+			if (result.timedOut) throw new Error(`Command timed out after ${timeout} seconds`);
+			if (result.cancelled) throw new Error("Command cancelled");
+			return { exitCode: result.exitCode ?? null };
+		},
 	};
 }

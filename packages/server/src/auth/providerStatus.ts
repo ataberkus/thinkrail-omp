@@ -80,7 +80,7 @@ export async function getProviderStatus(): Promise<ProviderStatusReport> {
 	return usePiRuntime(async (runtime, generation) => {
 		const providerStatusIds = [...generation.providerStatusIds];
 		try {
-			await runtime.refresh({ providers: providerStatusIds });
+			await runtime.refresh();
 		} catch {
 			throw new Error("Provider status refresh failed");
 		}

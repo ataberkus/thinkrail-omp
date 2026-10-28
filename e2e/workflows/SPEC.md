@@ -97,7 +97,7 @@ Dependency direction is one-way: `scenario` → everything; `dialog`/`signals`/`
 
 - **Allowed deps:** `@thinkrail/server/agent` (the subpath export added for this harness — recorded
   in [[module-server]]; the barrel's behavior is [[submodule-server-agent]]),
-  `@earendil-works/pi-coding-agent` (`SessionManager`),
+  `@oh-my-pi/pi-coding-agent` (`SessionManager`),
   `@thinkrail/contracts` (types), `@playwright/test`, `../fixtures/paths`, Node.
 - **Forbidden:** `@thinkrail/server`'s root export (evaluates the Bun-only `host`), `apps/*`, any
   browser/page fixture, model selection (`setModel` would persist a default into the shared isolated

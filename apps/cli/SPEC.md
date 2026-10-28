@@ -177,6 +177,13 @@ entrypoint honors it for additional data (including `packages/server/src/dev.ts`
 Neither spelling suppresses basic events; both help entries disclose that scope rather than promising
 zero analytics traffic. CI/test suppression remains host-owned and covers both tiers.
 
+## Bundle (`build`)
+
+`build` bundles `src/index.ts` to `dist/` through `scripts/build-bundle.ts` with the engine's bundled build
+configuration (`engineBundledBuildConfig` from `@thinkrail/server/build-support`), because omp's extension
+loader imports the build-supplied `omp-legacy-pi-modules` virtual module that a plain `bun build` cannot
+resolve.
+
 ## Single-file binary (`build:binary`)
 
 The binary embeds its source map (`--sourcemap`, ~+17 MB on top of the bytecode build; Bun's `--compile`
@@ -186,47 +193,84 @@ on-device, bytecode included; the build deletes the external `.map` it also writ
 analytics `remapBase` for binary builds because remapped frames are relative to that directory.
 
 `bun run build:binary` produces a **standalone `thinkrail` executable** — one self-contained file per
-platform — via `bun build --compile`. Bun bundles the host *and* transparently embeds the `bun-pty` native
+platform — via `Bun.build({ compile })`. Bun bundles the host *and* transparently embeds the `bun-pty` native
 lib; the extra steps are the **web UI** (a directory the host normally serves), the **bundled pi
 extensions** (which the server path-loads out of `node_modules` in dev — impossible inside a binary),
-and `trash`'s **native helper sidecars** (which macOS/Windows must execute from real filesystem paths):
+`trash`'s **native helper sidecars** (which macOS/Windows must execute from real filesystem paths), and
+the **omp engine's artifact seams** (below):
 
-- `scripts/build-binary.ts` consumes `@thinkrail/server/build-support`, writes three **transient** generated modules, runs
-  `bun build --compile --no-compile-autoload-bunfig --bytecode --format=esm --sourcemap --target=<host|--target>` on
-  `src/compiled-entry.ts`, then deletes them (so the artifact cannot execute a project-local
-  `bunfig.toml` preload before ThinkRail boots, and the working tree + `tsc` stay clean); each generated
-  module has a committed `.d.ts` type contract `tsc` resolves against
-  when the `.ts` is absent:
+- `scripts/build-binary.ts` consumes `@thinkrail/server/build-support` and calls `Bun.build` with
+  `compile: { autoloadBunfig: false, target? }`, `bytecode`, `format: "esm"` and `sourcemap: "linked"` on
+  `src/compiled-entry.ts` (the artifact cannot execute a project-local `bunfig.toml` preload before
+  ThinkRail boots). It supplies four generated modules **in memory** through `Bun.build`'s `files`, so no
+  generated source ever lands in the working tree (an in-process build also cannot see files written after
+  its resolver cached `src/`); `compiled-entry` imports them with their `.ts` extension, which in-memory files
+  require, and each has a committed `.d.ts` type contract `tsc` resolves instead:
   - `src/web-assets.generated.ts` — enumerates `apps/web/dist`: a Bun file-attribute import per asset +
     a `{ route, data }[]` manifest + a content-hash version.
-  - `src/bundled-extensions.generated.ts` — **value-imports the four bundled pi-package entries**
-    (`pi-web-access`, `pi-spec-graph`, `pi-thinkrail-workflow`, `pi-todos`), resolved from the
+  - `src/bundled-extensions.generated.ts` — **value-imports the three bundled pi-package entries**
+    (`pi-spec-graph`, `pi-thinkrail-workflow`, `pi-todos`), resolved from the
     *server package's* module context (absolute paths — they aren't deps of `cli`), so Bun compiles the
-    raw `.ts` and their real deps (`yaml`, `unpdf`, …) into the binary; the `pi-web-access` factory is named
-    by `BuildRuntimeSources.webAccessIndex`, not by position. ThinkRail extensions listed in the server
+    raw `.ts` and their real deps (`yaml`, …) into the binary. ThinkRail extensions listed in the server
     registry ([[submodule-server-extensions]]) get no generated entry — `@thinkrail/server` imports them
-    statically, so `bun build --compile` carries them (and their deps such as `linkedom`) through the normal
+    statically, so the compile carries them (and their deps such as `linkedom`) through the normal
     server graph. Plus every `BuildRuntimeSources.skillRoots` dir (`pi-spec-graph`/`pi-thinkrail-workflow`/
     `pi-todos` `skills/`, the server's own host skills in `packages/server/skills`, and any registry
     extension's `skillPackages` roots) embedded like web assets
     (matching what dev wires via `additionalSkillPaths` — parity, not a superset). Its `.d.ts` types the
     factories via the server's exported `BundledExtensionFactory`, so `cli` still never imports
-    `@earendil-works/pi-coding-agent`.
+    `@oh-my-pi/pi-coding-agent`.
   - `src/runtime-assets.generated.ts` — embeds `trash`'s `macos-trash` and `windows-trash.exe` helper
     binaries, resolved from the server package's dependency context, as a content-hashed manifest.
-- `src/compiled-entry.ts` is the binary's entry: on startup it stages the embedded web + skills +
+  - `src/engine-worker-host.generated.ts` — re-exports omp's `declareWorkerHostEntry` /
+    `isWorkerHostSelector` and lazily imports omp's own `src/cli.ts`, both by absolute path from
+    `engineWorkerHostSources()` (the engine is not a `cli` dependency).
+- **Engine artifact seams** (`engineCompiledBuildConfig(target)` in build-support, shared with the desktop
+  bundle's `engineBundledBuildConfig()`). omp (`@oh-my-pi/*`, Bun-only, exports pointing at `src/*.ts`)
+  builds its own binary with `scripts/compile-binary.ts`; a plain `bun build --compile` misses three
+  things it adds, so build-support reproduces them:
+  - **Extension host modules.** omp's runtime extension loader
+    (`extensibility/plugins/legacy-pi-compat.ts`, used for every user/plugin extension) switches to bundled
+    mode inside a compiled binary (`isCompiledBinary()`) or under `PI_BUNDLED`, and then imports the
+    build-supplied virtual module `omp-legacy-pi-modules` (`BUNDLED_PI_MODULE_LOADERS`): lazy loaders, keyed
+    by specifier, for every `@oh-my-pi/*` export an extension may import. Bun ≥ 1.3.14 exposes no `/$bunfs`
+    path to resolution, so without it the build fails to resolve the import (a bundle without the define
+    instead lets Bun auto-install a *second* omp for the extension). A build plugin renders the module from
+    the installed packages' export maps.
+  - **Native addons.** `@oh-my-pi/pi-natives` loads `pi_natives.<platform>-<arch>[-modern|-baseline].node`.
+    Its checked-in `native/embedded-addon.js` is `null`; the build replaces it in memory with a manifest of
+    zstd frames of the target's addons (read from the installed `@oh-my-pi/pi-natives-<tag>` package and
+    checked for the release's version stamp), which omp's loader extracts at first run into its versioned
+    natives dir (`PI_NATIVES_DIR`, default `~/.omp/natives/<version>`, shared with any omp of the same
+    release). Level 9 instead of omp's 19: 1.8 s instead of 84 s per 117 MB addon for +4 MB each, and
+    ThinkRail ships no binary patches that would gain from 19. A cross-compile needs the target's natives
+    package installed (`bun install --os=<os> --cpu=<cpu>`), else the build fails naming it.
+  - **Defines and externals.** `process.env.PI_COMPILED="true"` (omp's own compile define),
+    `PI_DOCS_EMBED` (the shipped `dist/docs-index.generated.txt`, serving `omp://` docs), and
+    `PI_TINY_TRANSFORMERS_VERSION` when `@huggingface/transformers` is installed; `fastembed` and
+    `onnxruntime-node` stay external, as in omp's build. omp's JSON-asset plugin (a size optimization) and
+    `--user-agent` exec argument are not mirrored.
+  - **Vendored, not imported.** omp ships its build scripts in `files` but not in `exports`, and they are
+    bound to its monorepo: `legacy-pi-virtual-module.ts` reads `packages/<dir>/package.json` relative to
+    its repo root and `compile-binary.ts` imports `../../natives/scripts/embed-native`, which is not
+    published. build-support therefore carries the minimal logic (registry collection and render, addon
+    manifest); `buildSupport.test.ts` pins it to the installed script — the same package table and a
+    byte-identical render through omp's own `__renderLegacyPiVirtualModule`.
+- `src/compiled-entry.ts` is the binary's entry. An omp **worker selector** (`__omp_worker_*` as the first
+  argument) goes straight to omp's own entry: in a compiled binary omp re-executes `process.execPath` with
+  that selector for subprocess workers, and re-enters the declared worker host for worker threads, so
+  without the dispatch a worker would boot a second ThinkRail host. Otherwise it declares itself the
+  engine's worker host, then on startup stages the embedded web + skills +
   runtime-helper files to per-build cache dirs (`$XDG_CACHE_HOME`/`~/.cache`/temp; files written straight into the versioned dir,
   then a sibling `<dir>.complete` marker written **last** — readiness is gated on the marker, so a killed
   first run leaves an incomplete cache that's re-extracted next launch. **No stage-then-rename**: Bun's
   `renameSync` of a fresh non-empty dir `EPERM`s on Windows, so the marker replaces the directory-rename
   publish), makes the macOS helper executable, sets `THINKRAIL_STATIC_DIR`, then **awaits** the server's
   **`registerBundledRuntime`** seam — which injects the factories + staged skills dir + real trash-helper
-  paths **and** performs pi's binary-only registrations (the
-  statically-bundled OAuth flows + the Bedrock provider module, replacing pi's binary-hostile dynamic
-  imports — see the server agent SPEC) — then hands off to `index.ts`. (`bun-pty` self-extracts
-  automatically; **no photon wasm** — the agent's read tool is set to send images raw, server-side.
-  Skills must be staged to the *real* filesystem: pi reads `SKILL.md` via plain fs and embeds the path in
-  the system prompt.)
+  paths — then hands off to `index.ts`. (`bun-pty` self-extracts automatically. omp's provider and OAuth
+  modules are reached through literal dynamic imports that the compile bundles, so no runtime
+  registration is needed; `check:seams` guards that. Skills must be staged to the *real* filesystem: omp
+  reads `SKILL.md` via plain fs and embeds the path in the system prompt.)
 - **Bytecode.** `--bytecode` embeds JSC bytecode next to the bundle, so a launch skips parsing the
   ~25MB host graph: `/health` is ready about 0.3s sooner on darwin-arm64 and about 0.7s sooner on
   linux-x64. `--format=esm` is required because `compiled-entry.ts` uses top-level `await`; without it
@@ -241,12 +285,12 @@ and `trash`'s **native helper sidecars** (which macOS/Windows must execute from 
   platform's matching `bun-pty` lib. The binary is platform-specific and self-extracts a few MB on first run.
 - **Windows identity.** A compiled exe otherwise inherits everything from `bun.exe`: Bun's icon and
   its VERSIONINFO ("Bun"/"Oven", Bun's version). So Explorer, Task Manager, Properties and the firewall
-  prompt would all name Bun. For a Windows target the build therefore passes Bun's `--windows-icon`,
-  `-title`, `-description`, `-publisher`, `-copyright` and `-version` flags.
+  prompt would all name Bun. For a Windows target the build therefore passes Bun's `compile.windows` `icon`,
+  `title`, `description`, `publisher`, `copyright` and `version` options.
   - The strings come from [[module-shared]]'s `windowsFileIdentity`. Task Manager shows the description,
     so it equals the product name.
   - The icon is [[module-shared]]'s `windowsIconPath`, from the native icon set both launchers ship.
-  - Bun applies these flags only on a Windows host. The release and CI Windows builds run on Windows; a
+  - Bun applies these options only on a Windows host. The release and CI Windows builds run on Windows; a
     cross-compile from macOS/Linux skips them with a warning and keeps Bun's identity.
   - Bun keeps its own named `IDI_MYICON` group, which the shell picks before numbered groups, and maps
     it to icon #1 only (oven-sh/bun#32428). The ICO must therefore list its 256 frame first; the shell
@@ -260,16 +304,19 @@ and `trash`'s **native helper sidecars** (which macOS/Windows must execute from 
   [[module-artifact-tests]]'s CLI smoke (root: `bun run smoke:binary`, after `build:binary`) boots the built binary
   against throwaway data/agent/cache dirs. Its CLI adapter runs the shared
   test workspace's shared host assertions also used by desktop; CLI-only assertions additionally
-  prove the staged-cache and command-line shape. Together they assert: a project-local `bunfig.toml` preload does **not**
+  prove the staged-cache and command-line shape, and that an omp worker selector reaches omp's worker host
+  (`unknown worker selector`, exit 1, nothing staged) instead of booting a host. Together they assert: a project-local `bunfig.toml` preload does **not**
   execute, `/health` answers, `/` serves the staged UI, the bundled skills staged to the cache dir,
-  **an external synthetic PI extension loads by absolute path** through the compiled artifact's public PI
-  loader with no `pi` executable on `PATH`, under both the default and a custom `PI_CODING_AGENT_DIR`
+  **an external synthetic extension loads by absolute path** through the compiled artifact's omp
+  extension loader with no `pi` or `omp` executable on `PATH`, under both the default and a custom `PI_CODING_AGENT_DIR`
   (test-owned source only; no Central-generated artifact is committed, copied, read, or snapshotted),
+  **a user extension in the agent dir registers a tool** a scripted turn calls, **an image `read`** returns
+  an image block,
   **an OAuth sign-in reaches its auth URL** (a WS
   `provider.loginStart` for the Codex provider must answer the method select and push an `authUrl`
-  frame — offline and credential-free, since pi's flow only does PKCE + a local callback server before
-  notifying the URL; this pins the statically-registered OAuth flows, which can only break inside the
-  artifact — the frames are hand-rolled JSON, keeping `contracts` out of the cli), **moves a seeded pi
+  frame — offline and credential-free, since the flow only does PKCE + a local callback server before
+  notifying the URL; this pins omp's lazily imported OAuth modules inside the artifact — the frames are
+  hand-rolled JSON, keeping `contracts` out of the cli), **moves a seeded pi
   transcript through `session.delete` into the OS trash** (pinning the static `processMountinfo` parser
   inclusion that `trash`'s Linux implementation otherwise reaches through a binary-opaque CommonJS
   require; the fixture is seeded at the **host-reported `worktreePath`**, never the smoke's own temp path,
@@ -288,13 +335,15 @@ and `trash`'s **native helper sidecars** (which macOS/Windows must execute from 
   provider; real turn behavior stays in `e2e:agent`. The smoke's **broad-net sibling** is `bun run e2e:binary` (root
   `playwright.binary.config.ts`): the whole no-agent e2e suite executed against this binary — in CI on
   those same runs. And `bun run check:seams` (root `scripts/check-binary-seams.ts`) is the build-time canary
-  for the seam class: it fails when a pi bump introduces a new bundler-opaque dynamic import the server's
-  `registerBundledRuntime` doesn't statically register. The scan **excludes `pi-coding-agent/dist/bundle/`**
-  (recorded as a skipped dir in the script, stale-checked like the allowlist): pi ≥ 0.84.3 ships a bundled
-  runtime there for its own CLI `bin` and `./rpc-entry` export — the only two ways to reach it — while the
-  in-process library import (`.` → `dist/index.js`) stays on the modular runtime, so the bundle's opaque
-  imports (content-hashed chunk duplicates of the allowlisted modular seams) are dead code in ThinkRail and
-  allowlisting them by chunk name would churn on every pi release.
+  for the seam class. It scans the `@oh-my-pi/*` packages reachable from the server (their shipped
+  `src/**` TypeScript) and fails on a new **bundler-opaque** dynamic import (variable specifier) or a new
+  **literal dynamic import that resolves to no installed module** — the latter can only be a
+  build-supplied virtual module, today exactly `omp-legacy-pi-modules`, served by build-support's plugin.
+  Every allowlisted occurrence carries its evidence, and stale entries fail too. The opaque imports
+  today are all runtime filesystem paths (extension entries, hooks, custom commands, the custom share
+  script, JS-eval user imports), which a binary loads from disk. It skips `pi-coding-agent/dist`
+  (omp's npm CLI bundle for its `omp` bin, type declarations and HTML-export assets; every ThinkRail
+  import maps to `src/`), `scripts` and `examples`, each stale-checked like the allowlist.
 - **The smoke's fixtures are host-OS-shaped, not POSIX-shaped.** Every one of them was a Windows failure
   in a green-on-Linux suite:
   - The **fake Central CLI is compiled** (`bun build --compile` into `central`/`central.exe`), not written
@@ -351,11 +400,11 @@ and `trash`'s **native helper sidecars** (which macOS/Windows must execute from 
   `@thinkrail/shared/startupMark` (the shared boot
   signature renderer) + `@thinkrail/shared/version` (the shared release identity) +
   `@thinkrail/shared/windowsIdentity` (the Windows file properties and ICO the build stamps), Bun/Node;
-  the generated build module may
-  value-import the bundled extension packages' entries (resolved via the server package — build-time
-  only, deleted after compile).
+  the in-memory generated build modules may
+  value-import the bundled extension packages' entries and omp's worker-host and CLI entry (absolute
+  paths resolved via the server package's build-support — build-time only, never written to disk).
 - **Forbidden:** product feature/domain logic; reaching into the server's internals (use only its public
-  surface); importing the web, desktop, or `contracts` UI layers; `@earendil-works/pi-coding-agent`
+  surface); importing the web, desktop, or `contracts` UI layers; `@oh-my-pi/pi-coding-agent`
   directly; importing the artifact test workspace. Its smoke adapter and shared probes belong to
   [[module-artifact-tests]]. An ordinary product feature must not need a CLI implementation.
 

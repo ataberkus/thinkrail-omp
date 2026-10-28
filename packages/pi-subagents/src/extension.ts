@@ -1,10 +1,6 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionFactory,
-	TurnEndEvent,
-} from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
+import { getAgentDir, z } from "@oh-my-pi/pi-coding-agent";
 import {
 	type ChildHandle,
 	createDelegationService,
@@ -17,7 +13,6 @@ import {
 	type RunSnapshot,
 	type RunStatus,
 } from "pi-delegation";
-import { Type } from "typebox";
 import { type AgentDefinition, discoverAgentDefinitions } from "./definitions";
 import { RECURSION_GUARD_TOOLS, toSpawnMapping } from "./mapping";
 import { THINKING_LEVELS } from "./thinking";
@@ -29,6 +24,25 @@ export type CompletionDelivery = "wake" | "run" | "appended";
 export type SubagentCompletionDetails = DelegationRunDetails & { delivery?: CompletionDelivery };
 
 const MAX_RESULT_CHARS = 50_000;
+
+const AGENT_PARAMETERS = z.object({
+	subagent_type: z.string().describe('The agent definition to run, e.g. "scout"'),
+	task: z.string().describe("The complete, self-contained task for the subagent"),
+	model: z
+		.string()
+		.describe(
+			'Available model for an unpinned agent: "provider/id" or "provider/id:thinking". Whole-reference matches win; a definition pin ignores this value, and definition thinking overrides a suffix.',
+		)
+		.optional(),
+	run_in_background: z
+		.boolean()
+		.describe("Do not wait: return the child session id immediately")
+		.optional(),
+});
+
+const RESULT_PARAMETERS = z.object({
+	session_id: z.string().describe("The child session id returned by Agent"),
+});
 
 export interface SubagentsExtensionOptions {
 	service?: DelegationService;
@@ -103,20 +117,19 @@ interface HeldCompletion {
 	stopped: boolean;
 }
 
-type DeliveryMode = { idle: true } | { idle: false; runContinues: boolean };
+type DeliveryMode = "idle" | "step" | "settle";
 
 function wakes(completion: HeldCompletion): boolean {
 	return !completion.stopped && completion.outcome.details.abortReason !== "user";
 }
 
 function deliveryOf(mode: DeliveryMode, batchWakes: boolean, index: number): CompletionDelivery {
-	if (mode.idle) return !batchWakes ? "appended" : index === 0 ? "wake" : "run";
-	return mode.runContinues || batchWakes ? "run" : "appended";
+	if (mode === "idle") return !batchWakes ? "appended" : index === 0 ? "wake" : "run";
+	return "run";
 }
 
-function eligibleTurn(event: TurnEndEvent, ctx: ExtensionContext): boolean {
-	const stopReason = event.message.role === "assistant" ? event.message.stopReason : undefined;
-	return (stopReason === "stop" || stopReason === "toolUse") && ctx.signal?.aborted !== true;
+function endedAborted(messages: readonly AgentMessage[]): boolean {
+	return messages.findLast((message) => message.role === "assistant")?.stopReason === "aborted";
 }
 
 function createOwner(options: SubagentsExtensionOptions, retained: boolean): Subagents {
@@ -125,8 +138,9 @@ function createOwner(options: SubagentsExtensionOptions, retained: boolean): Sub
 	let closed = false;
 	let flushing = false;
 	let flushScheduled = false;
-	let turnEnd: { runContinues: boolean } | undefined;
-	let owedWake = false;
+	let running = false;
+	let waking = false;
+	const batch = { calls: new Set<string>(), executing: false };
 	const pending = new Set<HeldCompletion>();
 
 	function dispose(): void {
@@ -152,7 +166,8 @@ function createOwner(options: SubagentsExtensionOptions, retained: boolean): Sub
 			}
 			const batch = [...pending];
 			const batchWakes = batch.some(wakes);
-			const carrier = mode.idle ? batch.findLast(wakes) : undefined;
+			if (mode === "settle" && !batchWakes) return false;
+			const carrier = mode === "idle" ? batch.findLast(wakes) : undefined;
 			const ordered = carrier ? [...batch.filter((c) => c !== carrier), carrier] : batch;
 			let deliveredWake = false;
 			for (const [index, completion] of ordered.entries()) {
@@ -168,10 +183,16 @@ function createOwner(options: SubagentsExtensionOptions, retained: boolean): Sub
 							display: true,
 							details: { ...outcome.details, delivery } satisfies SubagentCompletionDetails,
 						},
-						{ triggerTurn: completion === carrier },
+						mode === "step"
+							? { deliverAs: "aside" }
+							: mode === "settle"
+								? { deliverAs: "nextTurn" }
+								: { triggerTurn: completion === carrier },
 					);
+					if (completion === carrier) waking = true;
 					deliveredWake ||= wakes(completion);
 				} catch {
+					if (completion === carrier) waking = false;
 					if (!closed) pending.add(completion);
 					break;
 				}
@@ -182,13 +203,9 @@ function createOwner(options: SubagentsExtensionOptions, retained: boolean): Sub
 		}
 	}
 
-	function flushCompletions(flush: { atTurnEnd?: boolean } = {}): void {
+	function flushCompletions(_flush: { atTurnEnd?: boolean } = {}): void {
 		if (closed) return;
-		if (parentIdle()) {
-			if (!flushScheduled) deliver({ idle: true });
-			return;
-		}
-		if (flush.atTurnEnd && turnEnd && deliver({ idle: false, ...turnEnd })) owedWake = true;
+		if (parentIdle() && !flushScheduled) deliver("idle");
 	}
 
 	function scheduleFlush(): void {
@@ -196,55 +213,66 @@ function createOwner(options: SubagentsExtensionOptions, retained: boolean): Sub
 		flushScheduled = true;
 		setTimeout(() => {
 			flushScheduled = false;
-			flushCompletions();
+			if (closed || pending.size === 0 || running) return;
+			if (parentIdle()) deliver("idle");
+			else scheduleFlush();
 		}, 0);
 	}
 
 	const extension: ExtensionFactory = (pi) => {
-		const binding = { send: pi.sendMessage, isIdle: () => false };
+		const binding: { send: ExtensionAPI["sendMessage"]; isIdle: () => boolean } = {
+			send: (message, sendOptions) => pi.sendMessage(message, sendOptions),
+			isIdle: () => false,
+		};
 		const delegationRoot = options.delegationRoot ?? defaultDelegationRoot();
 		const scope = options.scope ?? DEFAULT_SCOPE;
 		const isEnabled = () => !closed && (options.isEnabled?.() ?? true);
 		const erroredRunDetails = new Map<string, DelegationRunDetails>();
+		pi.on("tool_call", (event) => {
+			if (batch.executing) {
+				batch.calls.clear();
+				batch.executing = false;
+			}
+			batch.calls.add(event.toolCallId);
+			return undefined;
+		});
 		pi.on("tool_result", (event) => {
+			if (batch.calls.delete(event.toolCallId)) {
+				batch.executing = true;
+				if (batch.calls.size === 0) deliver("step");
+			}
 			const details = erroredRunDetails.get(event.toolCallId);
 			if (details === undefined) return undefined;
 			erroredRunDetails.delete(event.toolCallId);
 			return event.isError ? { details } : undefined;
 		});
-		pi.on("turn_end", (event, ctx) => {
+		pi.on("turn_end", (_event, ctx) => {
 			erroredRunDetails.clear();
 			registerAgentTool(ctx);
-			const runContinues =
-				event.message.role === "assistant" && event.message.stopReason === "toolUse";
-			turnEnd = eligibleTurn(event, ctx) ? { runContinues } : undefined;
-			if (turnEnd && deliver({ idle: false, ...turnEnd })) return { continue: true };
-			return undefined;
 		});
-		pi.on("turn_start", () => {
-			turnEnd = undefined;
-			owedWake = false;
+		pi.on("agent_start", () => {
+			running = true;
 		});
-		pi.on("agent_end", () => {
-			turnEnd = undefined;
-		});
-		pi.on("agent_before_settle", () => {
-			const wake = deliver({ idle: false, runContinues: owedWake }) || owedWake;
-			owedWake = false;
-			return wake ? { continue: true } : undefined;
-		});
-		pi.on("agent_settled", (event) => {
-			turnEnd = undefined;
-			owedWake = false;
-			if (event.aborted) for (const completion of pending) completion.stopped = true;
+		pi.on("session_stop", () =>
+			deliver("settle")
+				? {
+						continue: true,
+						additionalContext:
+							"Background subagent results were delivered above; take them into account before you finish.",
+					}
+				: undefined,
+		);
+		pi.on("agent_end", (event) => {
+			if (event.willContinue) return;
+			running = false;
+			if (endedAborted(event.messages)) for (const completion of pending) completion.stopped = true;
 			scheduleFlush();
 		});
 		pi.on("session_compact", () => scheduleFlush());
-		pi.on("session_compact_failed", () => scheduleFlush());
 		pi.on("session_tree", () => scheduleFlush());
-		pi.on("session_shutdown", async (event, ctx) => {
+		pi.on("session_shutdown", async (_event, ctx) => {
 			if (sender === binding) sender = undefined;
-			if (!retained || event.reason !== "reload") dispose();
+			if (!retained) dispose();
 			erroredRunDetails.clear();
 			const service = fallbackService;
 			if (!service) return;
@@ -260,10 +288,17 @@ function createOwner(options: SubagentsExtensionOptions, retained: boolean): Sub
 			latestCtx = ctx;
 			if (options.service) return options.service;
 			fallbackService ??= createDelegationService({
-				resolveParent: (sessionId) =>
-					latestCtx && sessionId === latestCtx.sessionManager.getSessionId()
-						? latestCtx
-						: undefined,
+				resolveParent: (sessionId) => {
+					const parentCtx = latestCtx;
+					if (!parentCtx || sessionId !== parentCtx.sessionManager.getSessionId()) return undefined;
+					return {
+						cwd: parentCtx.cwd,
+						model: parentCtx.model,
+						thinkingLevel: pi.getThinkingLevel(),
+						modelRegistry: parentCtx.modelRegistry,
+						isProjectTrusted: () => parentCtx.isProjectTrusted(),
+					};
+				},
 				delegationRoot,
 				scope,
 			});
@@ -295,25 +330,8 @@ subagent needs in the task.
 
 Available subagent types:
 ${known}`,
-				parameters: Type.Object({
-					subagent_type: Type.String({
-						description: 'The agent definition to run, e.g. "scout"',
-					}),
-					task: Type.String({
-						description: "The complete, self-contained task for the subagent",
-					}),
-					model: Type.Optional(
-						Type.String({
-							description:
-								'Available model for an unpinned agent: "provider/id" or "provider/id:thinking". Whole-reference matches win; a definition pin ignores this value, and definition thinking overrides a suffix.',
-						}),
-					),
-					run_in_background: Type.Optional(
-						Type.Boolean({
-							description: "Do not wait: return the child session id immediately",
-						}),
-					),
-				}),
+				parameters: AGENT_PARAMETERS,
+				loadMode: "essential",
 				async execute(toolCallId, params, signal, onUpdate, ctx) {
 					if (!isEnabled()) throw new Error("Subagents are disabled in this session.");
 					const definition = definitions.find((d) => d.name === params.subagent_type);
@@ -391,13 +409,14 @@ ${known}`,
 			});
 		}
 
-		pi.on("before_agent_start", (event, ctx) => {
-			if (event.messageType === "user")
-				for (const completion of pending) completion.stopped = false;
+		pi.on("before_agent_start", (_event, ctx) => {
+			if (!waking) for (const completion of pending) completion.stopped = false;
+			waking = false;
 			registerAgentTool(ctx);
+			return undefined;
 		});
 
-		pi.on("session_start", (_event, sessionCtx) => {
+		pi.on("session_start", async (_event, sessionCtx) => {
 			const sessionId = sessionCtx.sessionManager.getSessionId();
 			if (parentSessionId !== undefined && parentSessionId !== sessionId)
 				throw new Error("Subagents belong to a different session");
@@ -410,9 +429,8 @@ ${known}`,
 				label: "Get subagent result",
 				description:
 					"Collect the result or current status of a subagent started with Agent (typically one started with run_in_background).",
-				parameters: Type.Object({
-					session_id: Type.String({ description: "The child session id returned by Agent" }),
-				}),
+				parameters: RESULT_PARAMETERS,
+				loadMode: "essential",
 				async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 					const service = serviceFor(ctx);
 					const found = service.findChild(params.session_id);
@@ -460,7 +478,7 @@ ${known}`,
 			});
 
 			if (!isEnabled()) {
-				pi.setActiveTools(
+				await pi.setActiveTools(
 					pi
 						.getActiveTools()
 						.filter((name) => !RECURSION_GUARD_TOOLS.some((toolName) => toolName === name)),

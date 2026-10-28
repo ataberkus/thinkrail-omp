@@ -10,15 +10,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
-import { AgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
+import { type AgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import type { SessionResources, SessionState } from "@thinkrail/contracts";
 import type { ChildHandle } from "pi-delegation";
+import {
+	createFauxCore,
+	type FauxResponseFactory,
+	type FauxResponseStep,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import { interactiveTools } from "../extensions";
 import { setTrashImplementationForTests } from "../trash";
 import {
@@ -52,6 +56,8 @@ import {
 	stopSubagent,
 } from "./chatResources";
 import { delegationServiceFor, readChildTranscript } from "./delegation";
+import { interceptExtensionBinding } from "./fixtures/extensionBinding";
+import { ModelRuntime } from "./modelRuntime";
 import { configurePiRuntime } from "./piRuntime";
 import { admissionContextFor } from "./skillAdmission";
 import { assessRespondability, TOOL_RESPONSE_PENDING_TEXT } from "./toolResponses";
@@ -72,18 +78,33 @@ const faux = createFauxCore({
 	tokensPerSecond: 10000,
 });
 const saved = {
-	agent: process.env.PI_CODING_AGENT_DIR,
 	data: process.env.THINKRAIL_DATA_DIR,
 	offline: process.env.PI_OFFLINE,
 };
 const root = mkdtempSync(join(tmpdir(), "chat-resources-"));
 let sequence = 0;
+const teardownHold = join(root, "HOLD_TEARDOWN");
+let isolated: IsolatedAgentDir | undefined;
 beforeAll(async () => {
-	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+	isolated = isolateAgentDir(join(root, "agent"));
+	mkdirSync(join(root, "agent", "extensions"), { recursive: true });
+	writeFileSync(
+		join(root, "agent", "extensions", "teardown-hold.ts"),
+		[
+			'import { existsSync } from "node:fs";',
+			`const hold = ${JSON.stringify(teardownHold)};`,
+			"export default function teardownHold(pi) {",
+			'  pi.on("session_shutdown", async () => {',
+			"    while (existsSync(hold)) await new Promise((resolve) => setTimeout(resolve, 10));",
+			"  });",
+			"}",
+			"",
+		].join("\n"),
+	);
 	process.env.THINKRAIL_DATA_DIR = join(root, "data");
 	process.env.PI_OFFLINE = "1";
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -104,8 +125,7 @@ afterAll(async () => {
 	disposeAllSessions();
 	configurePiRuntime(null);
 	setSessionManagerFactory((cwd) => SessionManager.create(cwd));
-	if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = saved.agent;
+	isolated?.restore();
 	if (saved.data === undefined) delete process.env.THINKRAIL_DATA_DIR;
 	else process.env.THINKRAIL_DATA_DIR = saved.data;
 	if (saved.offline === undefined) delete process.env.PI_OFFLINE;
@@ -253,9 +273,9 @@ test("scoped catalog notifications expose stopping before settlement, never outp
 test("natural completion wakes once after reload, and shell settings use the current parent identity", async () => {
 	const workspaceId = `resources-${++sequence}`;
 	const cwd = mkdtempSync(join(root, "shell-"));
-	mkdirSync(join(cwd, ".pi"));
+	mkdirSync(join(cwd, ".omp"));
 	writeFileSync(
-		join(cwd, ".pi", "settings.json"),
+		join(cwd, ".omp", "settings.json"),
 		JSON.stringify({
 			shellPath: "/bin/bash",
 			shellCommandPrefix: "export RESOURCE_PREFIX=effective",
@@ -285,6 +305,27 @@ test("natural completion wakes once after reload, and shell settings use the cur
 		messages.filter((m) => m.role === "custom" && m.customType === "background-command-completion"),
 	).toHaveLength(1);
 });
+
+function requestsTask(context: Context, task: string): boolean {
+	return context.messages.some(
+		(message) =>
+			message.role === "user" &&
+			(typeof message.content === "string"
+				? message.content
+				: message.content.map((block) => (block.type === "text" ? block.text : "")).join("")
+			).includes(task),
+	);
+}
+
+function childOrParent(
+	task: string,
+	child: () => AssistantMessage | Promise<AssistantMessage>,
+	parentReply: () => AssistantMessage,
+): FauxResponseStep[] {
+	const step: FauxResponseFactory = (context) =>
+		requestsTask(context, task) ? child() : parentReply();
+	return [step, step];
+}
 
 function deferred() {
 	let resolve = () => {};
@@ -410,6 +451,7 @@ test("resource reads fail closed while a prior parent generation tears down", as
 	});
 	const run = child.runQueued("Hold teardown open.");
 	await waitFor(async () => child.snapshot?.status === "running");
+	writeFileSync(teardownHold, "");
 	const removing = removeSession(p.sessionId);
 	try {
 		await expect(getSessionResources(p.workspaceId, p.sessionId, p.cwd)).rejects.toMatchObject({
@@ -417,6 +459,7 @@ test("resource reads fail closed while a prior parent generation tears down", as
 		});
 	} finally {
 		gate.resolve();
+		rmSync(teardownHold, { force: true });
 	}
 	await Promise.all([removing, run]);
 	expect(await getSessionResources(p.workspaceId, p.sessionId, p.cwd)).toEqual({
@@ -439,16 +482,15 @@ test("workspace archive stops existing resources before awaiting parent preparat
 		`while :; do printf x >> '${marker}'; sleep 0.02; done`,
 	);
 	await waitFor(async () => existsSync(marker));
-	const original = AgentSession.prototype.bindExtensions;
 	const entered = deferred();
 	const release = deferred();
 	let sessionId: string | undefined;
-	AgentSession.prototype.bindExtensions = async function (bindings) {
-		await original.call(this, bindings);
-		sessionId = this.sessionId;
+	const restoreBinding = interceptExtensionBinding(async (session, bind) => {
+		await bind();
+		sessionId = session.sessionId;
 		entered.resolve();
 		await release.promise;
-	};
+	});
 	const creating = createSession({ cwd, workspaceId });
 	creating.catch(() => {});
 	try {
@@ -469,7 +511,7 @@ test("workspace archive stops existing resources before awaiting parent preparat
 		expect(sessionId && hasSession(sessionId)).toBe(false);
 	} finally {
 		release.resolve();
-		AgentSession.prototype.bindExtensions = original;
+		restoreBinding();
 		await creating.catch(() => {});
 		if (sessionId && hasSession(sessionId)) await removeSession(sessionId);
 		if (hasSession(existing.sessionId)) await removeSession(existing.sessionId);
@@ -483,15 +525,14 @@ test("workspace archive fences an in-flight persisted-parent attachment", async 
 	faux.setResponses([fauxAssistantMessage("PERSISTED_FOR_ARCHIVE")]);
 	await promptSession(p.sessionId, "Persist before attachment.");
 	await removeSession(p.sessionId);
-	const original = AgentSession.prototype.bindExtensions;
 	const entered = deferred();
 	const release = deferred();
-	AgentSession.prototype.bindExtensions = async function (bindings) {
-		await original.call(this, bindings);
-		if (this.sessionId !== p.sessionId) return;
+	const restoreBinding = interceptExtensionBinding(async (session, bind) => {
+		await bind();
+		if (session.sessionId !== p.sessionId) return;
 		entered.resolve();
 		await release.promise;
-	};
+	});
 	const attaching = getSessionResources(p.workspaceId, p.sessionId, p.cwd);
 	attaching.catch(() => {});
 	try {
@@ -509,7 +550,7 @@ test("workspace archive fences an in-flight persisted-parent attachment", async 
 		expect(hasSession(p.sessionId)).toBe(false);
 	} finally {
 		release.resolve();
-		AgentSession.prototype.bindExtensions = original;
+		restoreBinding();
 		await attaching.catch(() => {});
 		if (hasSession(p.sessionId)) await removeSession(p.sessionId);
 	}
@@ -629,13 +670,12 @@ test("a registration failure removes the disposed session from live resource aut
 });
 
 test("failed preparation stops commands launched before registration and does not deliver completion", async () => {
-	const original = AgentSession.prototype.bindExtensions;
 	const cwd = mkdtempSync(join(root, "prepare-"));
 	const marker = join(cwd, "alive");
 	let failedSession: AgentSession | undefined;
-	AgentSession.prototype.bindExtensions = async function (bindings) {
-		await original.call(this, bindings);
-		failedSession = this;
+	const restoreBinding = interceptExtensionBinding(async (session, bind) => {
+		await bind();
+		failedSession = session;
 		faux.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall("background_command", {
@@ -645,10 +685,10 @@ test("failed preparation stops commands launched before registration and does no
 			),
 			fauxAssistantMessage("started"),
 		]);
-		await this.prompt("Launch.");
+		await session.prompt("Launch.");
 		await waitFor(async () => existsSync(marker));
 		throw new Error("prepare failed");
-	};
+	});
 	try {
 		await expect(createSession({ workspaceId: "prepare-failed", cwd })).rejects.toThrow(
 			"prepare failed",
@@ -663,7 +703,7 @@ test("failed preparation stops commands launched before registration and does no
 			),
 		).toBe(false);
 	} finally {
-		AgentSession.prototype.bindExtensions = original;
+		restoreBinding();
 	}
 });
 
@@ -682,11 +722,14 @@ test("user stop of a detached Agent child does not wake its idle parent", async 
 				run_in_background: true,
 			}),
 		),
-		async () => {
-			await gate.promise;
-			return fauxAssistantMessage("CHILD_DONE");
-		},
-		fauxAssistantMessage("PARENT_ACK"),
+		...childOrParent(
+			"Do background work",
+			async () => {
+				await gate.promise;
+				return fauxAssistantMessage("CHILD_DONE");
+			},
+			() => fauxAssistantMessage("PARENT_ACK"),
+		),
 	]);
 	try {
 		await promptSession(p.sessionId, "Delegate in the background.");
@@ -791,11 +834,14 @@ test("a running detached Agent child holds the idle parent's completion unread u
 				run_in_background: true,
 			}),
 		),
-		async () => {
-			await gate.promise;
-			return fauxAssistantMessage("CHILD_DONE");
-		},
-		fauxAssistantMessage("PARENT_ACK"),
+		...childOrParent(
+			"Do background work",
+			async () => {
+				await gate.promise;
+				return fauxAssistantMessage("CHILD_DONE");
+			},
+			() => fauxAssistantMessage("PARENT_ACK"),
+		),
 	]);
 	const recorder = recordStates(p.sessionId);
 	try {
@@ -942,7 +988,7 @@ test("shutdown and disposal signal commands and every child before waiting for a
 		const length = readFileSync(marker).length;
 		await Bun.sleep(80);
 		expect(readFileSync(marker).length).toBe(length);
-		expect(children.filter((child) => child.snapshot?.status === "running")).toHaveLength(4);
+		expect(children.filter((child) => child.snapshot?.status === "aborted")).toHaveLength(5);
 		await expect(getSessionResources(p.workspaceId, p.sessionId, p.cwd)).rejects.toMatchObject({
 			code: "RESOURCE_UNAVAILABLE",
 		});
@@ -982,27 +1028,25 @@ test("SDK creation failure on new and reopened sessions never registers resource
 	faux.setResponses([fauxAssistantMessage("PERSISTED")]);
 	await promptSession(p.sessionId, "Persist this parent.");
 	await removeSession(p.sessionId);
-	const original = AgentSession.prototype.bindExtensions;
-	AgentSession.prototype.bindExtensions = async () => {
+	const restoreBinding = interceptExtensionBinding(async () => {
 		throw new Error("reopen preparation failed");
-	};
+	});
 	try {
 		await expect(getSessionResources(p.workspaceId, p.sessionId, p.cwd)).rejects.toMatchObject({
 			code: "RESOURCE_UNAVAILABLE",
 		});
 		expect(hasSession(p.sessionId)).toBe(false);
 	} finally {
-		AgentSession.prototype.bindExtensions = original;
+		restoreBinding();
 	}
 	expect((await getSessionResources(p.workspaceId, p.sessionId, p.cwd)).commands).toEqual([]);
 });
 
 test("completion before registration is held and flushed once the parent is addressable", async () => {
-	const original = AgentSession.prototype.bindExtensions;
 	const cwd = mkdtempSync(join(root, "registration-"));
 	const marker = join(cwd, "finished");
-	AgentSession.prototype.bindExtensions = async function (bindings) {
-		await original.call(this, bindings);
+	const restoreBinding = interceptExtensionBinding(async (session, bind) => {
+		await bind();
 		faux.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall("background_command", {
@@ -1012,16 +1056,16 @@ test("completion before registration is held and flushed once the parent is addr
 			),
 			fauxAssistantMessage("ACK"),
 		]);
-		await this.prompt("Launch before registration.");
+		await session.prompt("Launch before registration.");
 		await waitFor(async () => existsSync(marker));
 		await Bun.sleep(30);
 		expect(
-			this.messages.some(
+			session.messages.some(
 				(m) => m.role === "custom" && m.customType === "background-command-completion",
 			),
 		).toBe(false);
 		faux.setResponses([fauxAssistantMessage("REGISTERED_COMPLETION")]);
-	};
+	});
 	try {
 		const { sessionId } = await createSession({ workspaceId: "registration", cwd });
 		await waitFor(async () => {
@@ -1035,7 +1079,7 @@ test("completion before registration is held and flushed once the parent is addr
 			),
 		).toHaveLength(1);
 	} finally {
-		AgentSession.prototype.bindExtensions = original;
+		restoreBinding();
 	}
 });
 
@@ -1050,12 +1094,15 @@ async function launchSubagent(p: Awaited<ReturnType<typeof parent>>, finish = de
 				run_in_background: true,
 			}),
 		),
-		async () => {
-			entered.resolve();
-			await finish.promise;
-			return fauxAssistantMessage("DETACHED_CHILD_RESULT");
-		},
-		fauxAssistantMessage("IDLE_PARENT_ACK"),
+		...childOrParent(
+			"Retain this detached job through parent lifecycle changes",
+			async () => {
+				entered.resolve();
+				await finish.promise;
+				return fauxAssistantMessage("DETACHED_CHILD_RESULT");
+			},
+			() => fauxAssistantMessage("IDLE_PARENT_ACK"),
+		),
 		() => {
 			completionTurns++;
 			return fauxAssistantMessage("DETACHED_COMPLETION_TURN");
@@ -1177,7 +1224,7 @@ test.each([
 	try {
 		if (expireBudget) {
 			await closing;
-			expect(job.child.snapshot?.status).toBe("running");
+			expect(job.child.snapshot?.status).toBe("aborted");
 		}
 		job.finish();
 		await closing;
@@ -1200,19 +1247,15 @@ test.each([
 ])("host resource reload retains Agent jobs and completion settling %s", async (timing) => {
 	const p = await parent();
 	const job = await launchSubagent(p);
-	const original = AgentSession.prototype.reload;
 	const inGap = deferred();
 	const resume = deferred();
-	AgentSession.prototype.reload = async function (options) {
-		await original.call(this, {
-			...options,
-			beforeSessionStart: async () => {
-				inGap.resolve();
-				await resume.promise;
-				await options?.beforeSessionStart?.();
-			},
-		});
-	};
+	const restoreBinding = interceptExtensionBinding(async (session, bind) => {
+		if (session.sessionId === p.sessionId) {
+			inGap.resolve();
+			await resume.promise;
+		}
+		await bind();
+	});
 	const reloading = reloadSessionResources(p.sessionId);
 	try {
 		await inGap.promise;
@@ -1245,7 +1288,7 @@ test.each([
 		resume.resolve();
 		job.finish();
 		await reloading;
-		AgentSession.prototype.reload = original;
+		restoreBinding();
 		await removeSession(p.sessionId);
 	}
 });
@@ -1463,7 +1506,9 @@ test("stopped command completion cannot strand a live question across polite shu
 		disposeAllSessions();
 		await prompting;
 		expect(hasSession(p.sessionId)).toBe(false);
-		const persisted = SessionManager.open(path).buildSessionContext().messages;
+		const persisted = (await SessionManager.open(path))
+			.getEntries()
+			.flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
 		expect(persisted.at(-1)).toMatchObject({
 			role: "assistant",
 			content: [{ type: "toolCall", name: "ask_user_question", id: toolCallId }],
@@ -1495,7 +1540,7 @@ test("stopped command completion cannot strand a live question across polite shu
 				interactiveTools(() => false),
 			).ok,
 		).toBe(true);
-		expect(SessionManager.open(path).buildSessionContext().messages.at(-1)).toEqual(ack[0]);
+		expect((await SessionManager.open(path)).buildSessionContext().messages.at(-1)).toEqual(ack[0]);
 		expect((await getSessionResources(p.workspaceId, p.sessionId, p.cwd)).commands).toEqual([]);
 		faux.setResponses([fauxAssistantMessage("RESOURCE_QUESTION_RESTART_ANSWERED")]);
 		await respondToTool(p.sessionId, toolCallId, resourceAnswer);
@@ -1529,9 +1574,9 @@ test("stopped command completion cannot strand a live question across polite shu
 test("a command that finishes during an idle manual compaction is reported once it ends", async () => {
 	const workspaceId = `resources-${++sequence}`;
 	const cwd = mkdtempSync(join(root, "compact-"));
-	mkdirSync(join(cwd, ".pi"));
+	mkdirSync(join(cwd, ".omp"));
 	writeFileSync(
-		join(cwd, ".pi", "settings.json"),
+		join(cwd, ".omp", "settings.json"),
 		JSON.stringify({ compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 4096 } }),
 	);
 	const p = { workspaceId, cwd, ...(await createSession({ workspaceId, cwd })) };
@@ -1544,7 +1589,7 @@ test("a command that finishes during an idle manual compaction is reported once 
 	let wokeWithReport = false;
 	const summaryOrWake = (context: { messages: unknown[] }) => {
 		const text = JSON.stringify(context.messages);
-		if (text.includes("context summarization assistant"))
+		if (text.includes("context summarization assistant") || text.includes("<conversation>"))
 			return fauxAssistantMessage("COMPACTION_SUMMARY");
 		wokeWithReport = text.includes("COMPACTED_COMMAND");
 		return fauxAssistantMessage("AFTER_COMPACTION");
@@ -1555,6 +1600,8 @@ test("a command that finishes during an idle manual compaction is reported once 
 			await summaryGate.promise;
 			return fauxAssistantMessage("COMPACTION_SUMMARY");
 		},
+		summaryOrWake,
+		summaryOrWake,
 		summaryOrWake,
 		summaryOrWake,
 	]);

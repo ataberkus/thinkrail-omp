@@ -96,12 +96,12 @@ test("discovery precedence: builtins > personal > project, first-name-wins (trus
 		const agentDir = join(root, "agent");
 		const cwd = join(root, "worktree");
 		mkdirSync(join(agentDir, "agents"), { recursive: true });
-		mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+		mkdirSync(join(cwd, ".omp", "agents"), { recursive: true });
 		mkdirSync(join(cwd, ".agents", "agents"), { recursive: true });
 
-		writeFileSync(join(cwd, ".pi", "agents", "scout.md"), definitionFile("scout"));
-		writeFileSync(join(cwd, ".pi", "agents", "deploy.md"), definitionFile("deploy"));
-		writeFileSync(join(cwd, ".pi", "agents", "repo-only.md"), definitionFile("repo-only"));
+		writeFileSync(join(cwd, ".omp", "agents", "scout.md"), definitionFile("scout"));
+		writeFileSync(join(cwd, ".omp", "agents", "deploy.md"), definitionFile("deploy"));
+		writeFileSync(join(cwd, ".omp", "agents", "repo-only.md"), definitionFile("repo-only"));
 		writeFileSync(join(cwd, ".agents", "agents", "legacy.md"), definitionFile("legacy"));
 		writeFileSync(join(agentDir, "agents", "deploy.md"), definitionFile("deploy"));
 

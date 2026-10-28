@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type AskUserQuestionArgs, CHAT_LABEL } from "./core.ts";
 import { askWithDialogs, optionLine, parseMultiAnswer } from "./dialogs.ts";
 

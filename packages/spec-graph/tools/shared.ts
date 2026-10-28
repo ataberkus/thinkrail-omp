@@ -1,13 +1,13 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	type AgentToolResult,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	truncateHead,
-} from "@earendil-works/pi-coding-agent";
+import { type AgentToolResult, truncateHead } from "@oh-my-pi/pi-coding-agent";
 import { SpecIndex, type SpecType } from "../core/index.ts";
+
+export const MAX_OUTPUT_LINES = 2000;
+export const MAX_OUTPUT_BYTES = 50 * 1024;
+
+const OUTPUT_LIMITS = { maxLines: MAX_OUTPUT_LINES, maxBytes: MAX_OUTPUT_BYTES };
 
 const indexes = new Map<string, SpecIndex>();
 
@@ -26,7 +26,7 @@ export async function textResult<T>(
 	continuation = "",
 ): Promise<AgentToolResult<T>> {
 	if (continuation) text += `\n${continuation}`;
-	const preview = truncateHead(text);
+	const preview = truncateHead(text, OUTPUT_LIMITS);
 	if (!preview.truncated) return { content: [{ type: "text", text }], details };
 	let fullOutputPath: string | undefined;
 	let notice: string;
@@ -35,15 +35,15 @@ export async function textResult<T>(
 		const path = join(directory, "output.txt");
 		await writeFile(path, text, { mode: 0o600 });
 		fullOutputPath = path;
-		notice = `Full output saved to: ${path}\nTemporary file; may expire. Read only relevant offset/limit ranges; use shell byte ranges for oversized single lines.`;
+		notice = `Full output saved to: ${path}\nTemporary file; may expire. Read only relevant line ranges (read "<path>:N-M"); use shell byte ranges for oversized single lines.`;
 	} catch {
 		notice =
 			"Full output unavailable: temporary-file capture failed. Narrow a read query; do not repeat a mutation to retrieve its output.";
 	}
 	const footer = `\n\n[Output truncated: ${preview.totalLines} lines, ${preview.totalBytes} bytes total. ${notice}]${continuation ? `\n${continuation}` : ""}`;
 	const bounded = truncateHead(text, {
-		maxBytes: Math.max(0, DEFAULT_MAX_BYTES - Buffer.byteLength(footer)),
-		maxLines: DEFAULT_MAX_LINES - footer.split("\n").length,
+		maxBytes: Math.max(0, MAX_OUTPUT_BYTES - Buffer.byteLength(footer)),
+		maxLines: MAX_OUTPUT_LINES - footer.split("\n").length,
 	});
 	return {
 		content: [{ type: "text", text: `${bounded.content}${footer}` }],
@@ -59,7 +59,7 @@ export async function textResult<T>(
 
 export async function errorResult(message: string): Promise<AgentToolResult<{ error: string }>> {
 	const inline = `Error: ${message}`;
-	const text = truncateHead(inline).truncated ? `Error:\n${message}` : inline;
+	const text = truncateHead(inline, OUTPUT_LIMITS).truncated ? `Error:\n${message}` : inline;
 	return { ...(await textResult(text, { error: message })), isError: true };
 }
 

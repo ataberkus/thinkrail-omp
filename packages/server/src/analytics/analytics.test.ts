@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import { getBundledModels } from "@oh-my-pi/pi-catalog";
 import { ATTRIBUTION_LIFETIME_MS, ensureInstallation } from "../persistence";
 import {
 	type AdditionalAnalyticsEvent,
@@ -755,7 +755,7 @@ test("transport failure never throws into capture", async () => {
 });
 
 test("provider and model identity stays catalog-bucketed", () => {
-	const model = getBuiltinModels("anthropic")[0];
+	const model = getBundledModels("anthropic")[0];
 	if (!model) throw new Error("pi catalog has no anthropic models");
 	expect(bucketProviderModel("anthropic", model.id)).toEqual({
 		provider: "anthropic",

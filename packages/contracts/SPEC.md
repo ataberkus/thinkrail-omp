@@ -77,8 +77,8 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
   `session.getMessages` by it *and* `history` counts `messageIndex` by it, so two copies differing by a role
   would silently shift every later jump anchor); `export *` (value) of `wsProtocol`
   (`WS_METHODS`, `WS_CHANNELS`, the typed maps, `PROTOCOL_VERSION`, and feature-introduction versions).
-- **Allowed deps:** none at runtime. **Type-only** devDeps on `@earendil-works/pi-ai` +
-  `@earendil-works/pi-agent-core`, imported **from their package roots** (type-only → erased at build).
+- **Allowed deps:** none at runtime. **Type-only** devDeps on `@oh-my-pi/pi-ai` +
+  `@oh-my-pi/pi-agent-core`, imported **from their package roots** (type-only → erased at build).
 - **Deployment obligation:** wire contracts describe host behavior and compatibility, never the launcher
   or deployment that supplies it. A feature's wire shape is shared by browser, desktop, and future clients.
   Separate type-only native client capabilities describe an optional shell-local bridge, not host WS
@@ -95,14 +95,14 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
   request that can start only the launcher's pre-bound updater. The browser never supplies a command, path,
   channel, version, URL, restart, or feed authority.
 - **Forbidden:** any *value* import of a `pi` package; **any** import (even `type`) of
-  `@earendil-works/pi-coding-agent` (pulls `node:fs`); the pi-ai **provider / API subpaths**
+  `@oh-my-pi/pi-coding-agent` (pulls `node:fs`); the pi-ai **provider / API subpaths**
   (`/providers/*`, `/api/*`, `/bedrock-provider`, … — they statically load the Node provider SDKs); and
   importing `server` / `shared` / `web`.
 
 ## Contents
 
 - **piProtocol.ts** — `import type` re-exports from the pi package roots (type-only → erased at build):
-  - `@earendil-works/pi-ai`: `Model`, `Message`, `UserMessage`, `AssistantMessage`,
+  - `@oh-my-pi/pi-ai`: `Model`, `Message`, `UserMessage`, `AssistantMessage`,
     `ToolResultMessage`, `TextContent`, `ThinkingContent`, `ImageContent`, `ToolCall`,
     `AssistantMessageEvent`, `Usage`, `StopReason`;
   - **`WireModel`** = `Pick<Model<string>, "id"|"name"|"provider"|"contextWindow"|"reasoning">` **+ the one
@@ -121,7 +121,7 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
     can neither read the secret nor inject a `baseUrl` for the agent to call (see the `agent` module SPEC).
     **`sameModel(a, b)`** is the one identity test — `{provider, id}` — every ring uses; no other field is
     identity, since name, context, prices and levels are catalog snapshots that may lag a refresh;
-  - `@earendil-works/pi-agent-core`: `AgentEvent`, `AgentMessage`, `ThinkingLevel` (the
+  - `@oh-my-pi/pi-agent-core`: `AgentEvent`, `AgentMessage`, `ThinkingLevel` (the
     `off`-inclusive one);
   - the local render union **`PiEvent`** — the real superset `AgentSessionEvent` lives in the Node-only
     `pi-coding-agent`, so it's **mirrored** here (the `agent_end.willRetry` + `agent_settled` /
@@ -337,7 +337,7 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
   whose registration the JetBrains AI (Central) extension replaced, derived from registration identity
   alone, never from Central's configuration; plus `canOAuth`/`canApiKey`/`canLogout`,
   which gate the strip's in-app Sign-in / Sign-out affordances — `canLogout` is true only for a removable
-  auth.json credential, false for env / runtime / models.json auth the host can't unset); the **in-app login wire** — **`LoginFrame`** (the streamed
+  stored `agent.db` credential, false for env / runtime / models.yml auth the host can't unset); the **in-app login wire** — **`LoginFrame`** (the streamed
   flow updates: `authUrl` / `deviceCode` / `select` / `prompt` / `progress` / `success` / `error`, which
   **accumulate** client-side, never a credential value), **`LoginPush`** (the `provider.login` frame,
   `{ loginId, providerId, frame }`) and **`LoginReply`** (`{ loginId, value }` — the browser's answer to a
@@ -605,7 +605,7 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
   `defaultEffort ?? "medium"`, clamped with Pi's `clampThinkingLevel` when a model exists) /
   **`model.contextSettings`** / **`model.setContextWindow`** (v76; both return
   **`ModelContextSetting[]`** — the eligible OpenAI models' `provider`/`id`/`name`, pi's effective
-  `contextWindow`, and the explicit models.json `override` or `null` for pi's default. The mutation takes
+  `contextWindow`, and the explicit models.yml `override` or `null` for pi's default. The mutation takes
   `{target: "available" | {provider,id}, contextWindow: number | null}`: `null` removes the override;
   a number must satisfy **`isModelContextWindow`** within **`MODEL_CONTEXT_WINDOW_LIMITS`**
   (272,000–1,000,000), the app's editing policy rather than a verified provider capacity, enforced on
@@ -923,30 +923,24 @@ contracts only.
   again after each reload, the servers it starts read `starting`. `configErrors` (`McpConfigFileError`:
   the file's path and the pi-equivalent message, masked) lists problems with a whole file — unparsable
   JSON, `mcpServers` not an object, a mistyped top-level key — that no server row can carry; older hosts
-  omit it. `handledElsewhere` marks a host
-  where a user-installed extension or `-builtin:mcp` owns MCP and management is read-only; pi settings
-  are read even with no chat open (`by: "pi settings (-builtin:mcp)"` — Settings recognises that exact
-  value to say which entry to remove, so it stays stable), a replacing extension is seen through a live
-  chat (`by` = its path).
+  omit it. The host owns MCP in every chat: omp has no MCP-off setting, no replaceable MCP built-in and no
+  extension MCP registration, and a discovered extension's `/mcp` loads before the host's inline one, which
+  therefore wins, so there is no read-only "handled elsewhere" mode.
 - `MCP_TOOL_GRANTS_PROTOCOL_VERSION` (84) adds the optional `McpServerSummary.alwaysAllowed`
   (`{ tool, label }`: grants still valid for the effective entry, listed on that row only) and
   `mcp.revokeToolGrant { workspaceId, name, tool }`, a record-only mutation like `setProjectOverride`.
   An older host never lists grants, so a client needs no gate to hide the revoke.
-- Mutations (`add`, `update`, `remove`, `setProjectOverride`, `approve`, `shareWithRepo`, `revokeToolGrant`) re-check that
-  ownership and the current project policy in the same synchronous step as the write and fail with `MCP_HANDLED_ELSEWHERE` where
-  `mcp.list` would set `handledElsewhere`, so a stale client cannot write while another manager owns MCP; they return the fresh
+- Mutations (`add`, `update`, `remove`, `setProjectOverride`, `approve`, `shareWithRepo`, `revokeToolGrant`) read
+  the workspace and the current project policy in the same synchronous step as the write; they return the fresh
   list without waiting for the open chats to reload; `mcp.status` pushes report each reload, so the returned
   snapshots may predate it. `setProjectOverride` writes the project record, never the tracked
   `.pi/mcp.json`; `shareWithRepo` is the explicit write into it. `setProjectOverride` merges the fields it
   carries into the latest stored override atomically (a client sends only what changed, so concurrent
   clients do not overwrite each other's setting). Enablement must be boolean and exposure one of
   `deferred`, `direct`, `hidden`; malformed runtime values fail with `MCP_CONFIG_INVALID`. `setSessionOverride` is the chat-resources
-  "Disable in this chat": it applies to `mcp.json` servers only — a `SessionResources.mcpServers` row with
-  `registered: true` is a server an extension registered (its `transport` is that registration's), and
-  disabling it fails with `MCP_CONFIG_INVALID`; where MCP is handled elsewhere it fails with
-  `MCP_HANDLED_ELSEWHERE`. `mcp.reconnect` resolves once pi reconnected the server and rejects with pi's
-  failure (masked) — pi's notices for it never appear in the chat — and fails with `MCP_HANDLED_ELSEWHERE`
-  likewise.
+  "Disable in this chat": it applies to the `mcp.json` servers the chat loaded. `mcp.reconnect` resolves
+  once pi reconnected the server and rejects with pi's failure (masked) — pi's notices for it never appear
+  in the chat.
 - Writes into the repository (`approve`, `shareWithRepo`, and project-scope `add` / `update` / `remove`)
   need the project's pi-level trust and fail with `MCP_CONFIG_INVALID` without it, since an untrusted
   project's repository entries are not even listed; `setProjectOverride` is record-only and stays available.
@@ -962,17 +956,15 @@ contracts only.
   whole at `MCP_PROTOCOL_VERSION`, so there is no older host or client to tolerate. The
   host validates `scope` itself; anything but `user` / `project` is rejected before any path is chosen. `shareWithRepo` refuses when the project file already defines that name or
   holds an override that is not approved at its current fingerprint.
-- `mcp.login` / `mcp.testConnection` check MCP ownership in the same synchronous step that starts the
-  probe, like the mutations; they return a `loginId` and reuse the `provider.login` frame family
+- `mcp.login` / `mcp.testConnection` read the workspace and policy in the same synchronous step that starts
+  the probe, like the mutations; they return a `loginId` and reuse the `provider.login` frame family
   (`LoginPush.target` identifies the server); those pushes reach only the connection that started the
   operation, and a reply or cancel from another connection fails with `LOGIN_NOT_OWNER`. They and
-  `mcp.logout` fail with `MCP_HANDLED_ELSEWHERE` where `handledElsewhere` is set, and with an "already
-  running" error while a sign-in for that server runs anywhere — another Settings operation or a chat's
+  `mcp.logout` fail with an "already running" error while a sign-in for that server runs anywhere — another Settings operation or a chat's
   `/mcp login <name>`. An operation still open after 10 minutes, or whose client the host has reaped after
   the reconnect window, ends with an `error` frame ("Sign-in timed out." / "Sign-in cancelled.").
   `mcp.testConnection` judges the transport of the actual admitted configuration, not an approved but
-  invalid project row that the loader skipped. Mutations and probes reject if workspace identity, cwd or
-  project trust changed during async ownership resolution; no stale project grant admits a new operation.
+  invalid project row that the loader skipped.
 - `McpToolDetails` mirrors pi's result details for `mcp__*` and the three MCP resource tools;
   `McpResultSummary` is the host-written, bounded, base64-free presentation summary under
   `details.thinkrail` that lets cards render identically live, after reload and on another client.
@@ -985,13 +977,12 @@ contracts only.
 - States (`McpServerState`) are one vocabulary for host snapshots and the rows a client derives:
   `starting`, `connected`, `needs-sign-in`, `failed`, `disconnected`, `disabled`, `disabled-in-project`,
   `disabled-in-chat`, `pending-approval`, `invalid-config`, `pending-reload`, `not-running`,
-  `handled-elsewhere`, `unknown`; the host never sends `not-running` / `handled-elsewhere`. `detail` is
+  `unknown`; the host never sends `not-running`. `detail` is
   pi's status text for the server and `configError` the pi-equivalent validation message; pi does not
   redact either (a connection error or a stdio server's stderr tail arrives verbatim), so the host masks
   credential-looking values in both — and in MCP sign-in `error` frames — before they reach any client.
 - Error codes: `MCP_CONFIG_INVALID` (pi-equivalent validation failed, or a write precondition above does
-  not hold), `MCP_PATH_UNSAFE` (symlinked or non-regular project config path), `MCP_HANDLED_ELSEWHERE`,
-  `LOGIN_NOT_OWNER`.
+  not hold), `MCP_PATH_UNSAFE` (symlinked or non-regular project config path), `LOGIN_NOT_OWNER`.
 
 ## Normalized session state
 

@@ -1,13 +1,13 @@
 {
 	"name": "@thinkrail/pi-visualize",
 	"version": "0.1.0",
-	"description": "A pi extension adding a `visualize` tool: mermaid diagrams and option comparisons, rendered as box-drawing in the terminal and as rich cards in hosts that have a renderer.",
+	"description": "An oh-my-pi (omp) extension adding a `visualize` tool: mermaid diagrams and option comparisons, rendered as box-drawing in the terminal and as rich cards in hosts that have a renderer.",
 	"license": "Apache-2.0",
 	"type": "module",
 	"keywords": [
 		"pi-package",
-		"pi",
-		"pi-coding-agent",
+		"oh-my-pi",
+		"omp",
 		"extension",
 		"mermaid",
 		"diagram",
@@ -37,7 +37,7 @@
 		"access": "public",
 		"provenance": true
 	},
-	"pi": {
+	"omp": {
 		"extensions": [
 			"./index.ts"
 		]
@@ -50,17 +50,14 @@
 		"lovely-mermaid": "0.3.3"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
-		"typebox": "*"
+		"@oh-my-pi/pi-coding-agent": "*",
+		"@oh-my-pi/pi-tui": "*"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-ai": "catalog:",
-		"@earendil-works/pi-coding-agent": "catalog:",
-		"@earendil-works/pi-tui": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-tui": "catalog:",
 		"@types/bun": "catalog:",
-		"typebox": "catalog:",
+		"pi-faux": "workspace:*",
 		"typescript": "catalog:"
 	}
 }

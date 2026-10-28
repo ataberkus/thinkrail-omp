@@ -2,12 +2,11 @@ import { afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test"
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils";
 import type { HostUpdateNotice, ServerWelcome } from "@thinkrail/contracts";
 import { PROTOCOL_VERSION, WS_CHANNELS } from "@thinkrail/contracts";
 import { isPortFree } from "@thinkrail/shared/freePort";
-import { configurePiRuntime, configurePiRuntimeFactory } from "../agent";
+import { configurePiRuntime, configurePiRuntimeFactory, ModelRuntime } from "../agent";
 import {
 	getAdditionalAnalyticsCapture,
 	initializeAnalytics,
@@ -126,7 +125,7 @@ async function socketBarrier(collector: SocketCollector, id: string): Promise<vo
 
 beforeAll(async () => {
 	testRuntime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -323,12 +322,7 @@ test("the host forwards successful login generation metadata into the basic even
 			return new Response("{}");
 		}) as typeof fetch,
 	});
-	const login = spyOn(testRuntime, "login").mockResolvedValue({
-		type: "oauth",
-		access: "private-token",
-		refresh: "private-refresh",
-		expires: Date.now() + 60_000,
-	});
+	const login = spyOn(testRuntime, "login").mockResolvedValue(undefined);
 	try {
 		await handleRequest(
 			"provider.loginStart",
@@ -429,6 +423,7 @@ test("boot applies the stored environment before serving, and launch variables w
 		delete process.env.TR_BOOT_LAUNCH;
 		if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+		refreshDirsFromEnv();
 	}
 });
 

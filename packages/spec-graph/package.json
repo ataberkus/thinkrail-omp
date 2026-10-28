@@ -22,18 +22,16 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"yaml": "2.9.1"
+		"yaml": "catalog:"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"typebox": "*"
+		"@oh-my-pi/pi-coding-agent": "*"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-ai": "catalog:",
-		"@earendil-works/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-ai": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
 		"@types/bun": "catalog:",
-		"typebox": "catalog:",
+		"pi-faux": "workspace:*",
 		"typescript": "catalog:"
 	},
 	"pi": {

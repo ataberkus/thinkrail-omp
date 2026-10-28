@@ -1,31 +1,23 @@
-import {
-	type AgentSession,
-	createAgentSession,
-	DefaultResourceLoader,
-	type ExtensionUIContext,
-	getAgentDir,
-	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import type { LoginFrame, LoginPush } from "@thinkrail/contracts";
 import { CodedError } from "@thinkrail/shared/codedError";
 import { liveSessionIdsOf, mcpSessionView } from "./agentSessionManager";
 import {
 	acquireMcpSignInLock,
-	createMcpEngine,
+	type HostMcpServerConfig,
 	loadHostMcpConfig,
 	type McpProjectPolicy,
-	parseMcpStatusText,
 	redactMcpText,
+	signInMcpServer,
+	signOutMcpServer,
+	testMcpConnection,
 } from "./mcp";
 import { reconnectMcpServer, refreshMcpStatus } from "./mcpSessions";
 import { getPiRuntimeGeneration } from "./piRuntime";
-import { createWebUiContext } from "./webUiContext";
 
-const PROBE_SHUTDOWN_MS = 3_000;
 const PROBE_DEADLINE_MS = 10 * 60_000;
-const SIGNED_IN = /^Signed in to MCP server "/;
 const SIGN_IN_INSTRUCTIONS = "Finish signing in in your browser.";
+const PASTE_BACK = "Paste the address the browser was sent to after signing in";
 
 export type McpProbeAction = "login" | "test" | "logout";
 
@@ -35,7 +27,7 @@ interface Probe {
 	serverName: string;
 	workspaceId: string;
 	pendingInput?: (value: string | undefined) => void;
-	session?: AgentSession;
+	abort: AbortController;
 	settled: boolean;
 	cancelled: boolean;
 	last?: LoginFrame;
@@ -79,129 +71,76 @@ function frame(probe: Probe, raw: LoginFrame): void {
 	);
 }
 
-function probeUi(probe: Probe, notices: { message: string; level: string }[]): ExtensionUIContext {
-	const noop = () => {};
-	return {
-		...createWebUiContext(`probe:${probe.loginId}`),
-		notify(message, type) {
-			notices.push({ message, level: type ?? "info" });
-		},
-		async input(_title, placeholder, opts) {
-			if (probe.settled) return undefined;
-			return new Promise<string | undefined>((resolve) => {
-				const settle = (value: string | undefined) => {
-					if (probe.pendingInput === settle) delete probe.pendingInput;
-					resolve(value);
-				};
-				probe.pendingInput = settle;
-				opts?.signal?.addEventListener("abort", () => settle(undefined), { once: true });
-				frame(probe, {
-					kind: "prompt",
-					message: "Paste the address the browser was sent to after signing in",
-					...(placeholder ? { placeholder } : {}),
-				});
-			});
-		},
-		async select() {
-			return undefined;
-		},
-		async confirm() {
-			return false;
-		},
-		async editor() {
-			return undefined;
-		},
-		setStatus: noop,
-		setWidget: noop,
-		setTitle: noop,
-	};
+function pasteBack(probe: Probe, signal: AbortSignal | undefined): Promise<string> {
+	if (probe.settled) return Promise.reject(new Error("Sign-in cancelled."));
+	return new Promise<string>((resolve, reject) => {
+		const settle = (value: string | undefined) => {
+			if (probe.pendingInput === settle) delete probe.pendingInput;
+			if (value === undefined) reject(new Error("Sign-in cancelled."));
+			else resolve(value);
+		};
+		probe.pendingInput = settle;
+		signal?.addEventListener("abort", () => settle(undefined), { once: true });
+		frame(probe, { kind: "prompt", message: PASTE_BACK });
+	});
 }
 
-async function openProbe(
-	probe: Probe,
+function effectiveConfig(
+	serverName: string,
 	options: { cwd: string; projectTrusted: boolean; policy: McpProjectPolicy },
-	notices: { message: string; level: string }[],
-): Promise<AgentSession> {
-	const { cwd, projectTrusted, policy } = options;
-	const agentDir = getAgentDir();
-	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
-	const loadConfig = () => {
-		const loaded = loadHostMcpConfig({ agentDir, cwd, projectTrusted, policy });
+): HostMcpServerConfig {
+	const config = loadHostMcpConfig({ agentDir: getAgentDir(), ...options }).servers.find(
+		(server) => server.name === serverName,
+	)?.config;
+	if (!config) throw new Error(`No admitted MCP server named "${serverName}".`);
+	return { ...config, enabled: true };
+}
+
+async function runProbe(
+	probe: Probe,
+	action: McpProbeAction,
+	options: { cwd: string; projectTrusted: boolean; policy: McpProjectPolicy },
+): Promise<LoginFrame> {
+	const { serverName } = probe;
+	const config = effectiveConfig(serverName, options);
+	const { authStorage } = (await getPiRuntimeGeneration()).runtime;
+	if (action === "logout") {
+		await signOutMcpServer(config, authStorage);
+		return { kind: "success" };
+	}
+	if (action === "test") {
+		const result = await testMcpConnection({
+			name: serverName,
+			config,
+			authStorage,
+			cwd: options.cwd,
+		});
+		if (result.kind === "connected") {
+			frame(probe, { kind: "progress", message: `Connected · ${result.toolCount} tools` });
+			return { kind: "success" };
+		}
 		return {
-			...loaded,
-			servers: loaded.servers
-				.filter((server) => server.name === probe.serverName)
-				.map((server) => ({ ...server, config: { ...server.config, enabled: true } })),
+			kind: "error",
+			message: result.kind === "needs-sign-in" ? "Reachable — needs sign-in." : result.message,
 		};
-	};
-	const resourceLoader = new DefaultResourceLoader({
-		cwd,
-		agentDir,
-		settingsManager,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		additionalExtensionPaths: ["builtin:mcp"],
-		extensionFactories: createMcpEngine({
-			loadConfig,
-			lockSignIns: false,
-			openUrl: (url) => {
+	}
+	await signInMcpServer({
+		name: serverName,
+		config,
+		authStorage,
+		cwd: options.cwd,
+		signal: probe.abort.signal,
+		presentation: {
+			onAuthUrl: (url) => {
 				if (!isAllowedSignInUrl(url)) {
 					throw new Error("The server sent a sign-in address that is not https or loopback.");
 				}
 				frame(probe, { kind: "authUrl", url, instructions: SIGN_IN_INSTRUCTIONS });
 			},
-		}).extensions,
+			onPasteBack: (signal) => pasteBack(probe, signal),
+		},
 	});
-	await resourceLoader.reload();
-	const { session } = await createAgentSession({
-		cwd,
-		modelRuntime: (await getPiRuntimeGeneration()).runtime,
-		sessionManager: SessionManager.inMemory(cwd),
-		settingsManager,
-		resourceLoader,
-	});
-	await session.bindExtensions({
-		mode: "rpc",
-		uiContext: probeUi(probe, notices),
-		onError: () => {},
-	});
-	return session;
-}
-
-async function closeProbe(session: AgentSession): Promise<void> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	await Promise.race([
-		session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => {}),
-		new Promise<void>((resolve) => {
-			timer = setTimeout(resolve, PROBE_SHUTDOWN_MS);
-		}),
-	]);
-	clearTimeout(timer);
-	session.dispose();
-}
-
-function outcome(
-	action: McpProbeAction,
-	serverName: string,
-	notices: readonly { message: string; level: string }[],
-	status: string | undefined,
-): LoginFrame {
-	if (action === "test") {
-		const parsed = status ? parseMcpStatusText(status)?.servers.get(serverName) : undefined;
-		if (parsed?.state === "connected") return { kind: "success" };
-		if (parsed?.state === "needs-sign-in")
-			return { kind: "error", message: "Reachable — needs sign-in." };
-		return { kind: "error", message: parsed?.detail ?? "The server did not answer." };
-	}
-	const last = notices.at(-1);
-	if (action === "login" && notices.some((notice) => SIGNED_IN.test(notice.message))) {
-		return { kind: "success" };
-	}
-	if (action === "logout" && last && last.level === "info") return { kind: "success" };
-	return { kind: "error", message: last?.message ?? "Sign-in did not finish." };
+	return { kind: "success" };
 }
 
 async function reconnectSignedIn(workspaceId: string, serverName: string): Promise<void> {
@@ -240,6 +179,7 @@ export function startMcpProbe(options: {
 		ownerClientKey: options.ownerClientKey,
 		serverName,
 		workspaceId: options.workspaceId,
+		abort: new AbortController(),
 		settled: false,
 		cancelled: false,
 	};
@@ -248,47 +188,29 @@ export function startMcpProbe(options: {
 		() => stopProbe(probe, "Sign-in timed out."),
 		options.deadlineMs ?? PROBE_DEADLINE_MS,
 	);
-	const notices: { message: string; level: string }[] = [];
 	void (async () => {
 		try {
 			frame(probe, {
 				kind: "progress",
 				message: action === "test" ? "Connecting…" : "Contacting the server…",
 			});
-			probe.session = await openProbe(probe, options, notices);
-			if (probe.cancelled) return;
-			const command = probe.session.extensionRunner.getCommand("mcp");
-			if (!command) throw new Error("MCP is not available in this host.");
-			const context = probe.session.extensionRunner.createCommandContext();
-			const args =
-				action === "login"
-					? `login ${serverName}`
-					: action === "logout"
-						? `logout ${serverName}`
-						: "";
-			const before = notices.length;
-			await command.handler(args, context);
-			const status = action === "test" ? notices.slice(before).at(-1)?.message : undefined;
-			const result = probe.cancelled
-				? ({ kind: "error", message: "Sign-in cancelled." } as const)
-				: outcome(action, serverName, notices.slice(before), status);
-			if (result.kind === "success" && action === "test") {
-				const parsed = status ? parseMcpStatusText(status)?.servers.get(serverName) : undefined;
-				frame(probe, { kind: "progress", message: `Connected · ${parsed?.toolCount ?? 0} tools` });
-			}
-			frame(probe, result);
-			if (result.kind === "success" && action === "login") {
+			const result = await runProbe(probe, action, options);
+			frame(probe, probe.cancelled ? { kind: "error", message: "Sign-in cancelled." } : result);
+			if (result.kind === "success" && action === "login" && !probe.cancelled) {
 				await reconnectSignedIn(options.workspaceId, serverName);
 			}
 		} catch (error) {
 			frame(probe, {
 				kind: "error",
-				message: error instanceof Error ? error.message : String(error),
+				message: probe.cancelled
+					? "Sign-in cancelled."
+					: error instanceof Error
+						? error.message
+						: String(error),
 			});
 		} finally {
 			clearTimeout(deadline);
 			probes.delete(probe.loginId);
-			if (probe.session) await closeProbe(probe.session).catch(() => {});
 			lock.release();
 			finish(probe.last ?? { kind: "error", message: "Sign-in did not finish." });
 		}
@@ -313,8 +235,7 @@ function stopProbe(probe: Probe, message: string): void {
 	probe.cancelled = true;
 	frame(probe, { kind: "error", message });
 	probe.pendingInput?.(undefined);
-	if (probe.session)
-		void probe.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+	probe.abort.abort();
 }
 
 export function cancelMcpProbe(loginId: string, clientKey: string): void {

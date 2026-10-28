@@ -1,16 +1,12 @@
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
 	buildSessionContext,
+	migrateSessionEntries,
+	parseSessionEntries,
 	type SessionEntry,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
-import {
-	type DelegationRunStatus,
-	isTranscriptMessageRole,
-	type ThinkingLevel,
-	type TranscriptMessage,
-} from "@thinkrail/contracts";
+} from "@oh-my-pi/pi-coding-agent";
+import type { DelegationRunStatus, ThinkingLevel, TranscriptMessage } from "@thinkrail/contracts";
 import { CodedError } from "@thinkrail/shared/codedError";
 import {
 	type ChildHandle,
@@ -30,7 +26,12 @@ import {
 	scheduleSessionStatePublish,
 } from "./agentSessionManager";
 import { publishSessionResourcesChanged } from "./chatResources";
-import { childBaseExtensionFactories, childExtensionFactories } from "./extensions";
+import {
+	childBaseExtensionFactories,
+	childExtensionFactories,
+	childSystemPrompt,
+} from "./extensions";
+import { convertPiSessionText, isPiSessionText } from "./piMigration";
 import { getPiRuntime } from "./piRuntime";
 import { isHostResourceId, isPiSessionId } from "./resourceIdentity";
 import {
@@ -39,6 +40,7 @@ import {
 	SUBAGENT_USAGE_KIND,
 	type SubagentUsage,
 } from "./subagentUsage";
+import { wireTranscriptMessages } from "./wireMessages";
 
 export function delegationRootDir(): string {
 	return join(dataDir(), "delegation");
@@ -98,10 +100,12 @@ export function delegationServiceFor(workspaceId: string): DelegationService {
 				canUseSessionResources(sessionId, workspaceId) ? liveParentContext(sessionId) : undefined,
 			delegationRoot: delegationRootDir(),
 			scope: workspaceId,
-			modelRuntime: getPiRuntime,
+			modelRegistry: async () => (await getPiRuntime()).modelRegistry,
 			childBaseExtensionFactories: childBaseExtensionFactories(),
 			childExtensionFactories: childExtensionFactories(),
-			buildChildSettings: buildSessionSettings,
+			buildChildSettings: async (cwd, projectTrusted) =>
+				(await buildSessionSettings(cwd, projectTrusted)).settings,
+			childSystemPrompt,
 		});
 		service.onLifecycle((event) => {
 			if (event.type === "run-progress") {
@@ -182,6 +186,14 @@ function assertSessionId(value: string, label: string): void {
 	if (!isPiSessionId(value)) throw new Error(`Invalid ${label}: not a Pi session id`);
 }
 
+function transcriptEntries(content: string, path: string): SessionEntry[] {
+	const entries = parseSessionEntries(
+		isPiSessionText(content) ? convertPiSessionText(content, path) : content,
+	);
+	migrateSessionEntries(entries);
+	return entries.filter((entry): entry is SessionEntry => entry.type !== "session");
+}
+
 export function readChildTranscript(
 	workspaceId: string,
 	parentSessionId: string,
@@ -205,10 +217,12 @@ export function readChildTranscript(
 			`No transcript found for subagent session ${childSessionId}`,
 		);
 	}
-	const sessionManager = SessionManager.open(path);
-	const messages = buildSessionContext(sessionManager.getEntries()).messages.filter((message) =>
-		isTranscriptMessageRole(message.role),
-	) as TranscriptMessage[];
+	const messages = wireTranscriptMessages(
+		buildSessionContext(transcriptEntries(readFileSync(path, "utf8"), path), undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		}).messages,
+	);
 	const status = ownedChild?.snapshot?.status;
 	return { messages, ...(status !== undefined ? { status } : {}) };
 }

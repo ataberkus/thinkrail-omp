@@ -24,10 +24,11 @@ plan UX ([[submodule-web-chat]]'s "Chat TODO plan"), modeled on [[module-spec-gr
   *understanding*, not prompt volume:
   **how to work with the list lives in the skill; each tool's invariants live in its own description.**
   (We tried injecting the live list into every prompt and pulled it back — the tools + skill carry it
-  instead.) The rule rides as the `pi-todos` entry of pi's `systemPromptOptions.sections`, mutated in place
-  and never returned as a forced `systemPrompt` — same mechanism and rationale as [[module-spec-graph]].
+  instead.) The rule rides as a `<pi-todos>`-tagged element appended to omp's `systemPrompt` array from
+  `before_agent_start` — same mechanism, rationale and custom-message-turn gap as [[module-spec-graph]].
+  Tools register with `loadMode: "essential"` so omp keeps them top-level (see [[module-spec-graph]]).
 - **`core/`** — the pi-free model ([[submodule-pi-todos-core]]): the `Todo` types and the per-session
-  `TodoStore` (read-modify-write `.thinkrail/context/todos/<sessionId>.json`). No `@earendil-works/*` imports, so
+  `TodoStore` (read-modify-write `.thinkrail/context/todos/<sessionId>.json`). No `@oh-my-pi/*` imports, so
   the host can value-import `pi-todos/core` to power the plan viewer — reading the plan and writing the
   user's own edits (the `spec/` → `spec.graph` pattern).
 - **`tools/`** — the six `todo_*` custom tools ([[submodule-pi-todos-tools]]), thin wrappers over `core/`.
@@ -118,8 +119,8 @@ The on-disk file `version` is `6` (`3` added artifacts, `4` added the `commit` k
 
 ## Boundary
 
-- **Allowed deps:** `@earendil-works/pi-coding-agent` + `@earendil-works/pi-ai/compat` (`StringEnum`) —
-  types/public truncation helpers/compat, as peer deps — and `typebox`, and Node built-ins.
+- **Allowed deps:** `@oh-my-pi/pi-coding-agent` — types, the `z` schema builder and public truncation
+  helpers, as a peer dep — and Node built-ins.
   `core/` uses Node built-ins only. The tool layer's response-only temporary files do not change
   ownership of the canonical TODO store (see [[submodule-pi-todos-tools]]).
 - **Forbidden:** any `@thinkrail/*` package, `apps/web`, `packages/server` internals — reached only by
@@ -140,6 +141,6 @@ parity.
 
 `core/core.test.ts` pins the store's contract against a real temp dir (add/update/list/remove/replaceAll,
 per-session isolation, plus the corrupt-file and invalid-item degradation).
-`tools/tools.test.ts` drives each tool's `execute` against a temp cwd through a fake `ExtensionAPI` (with
-a stub `sessionManager.getSessionId`) — param plumbing, the error-on-unknown-id path, and that
+`tools/tools.test.ts` loads the extension into a real omp session (`createAgentSession` + `pi-faux`), one per
+temp cwd, and drives each registered tool's `execute` with that session's extension context — param plumbing, the error-on-unknown-id path, and that
 finite-vocabulary params derive their enums from the core tuples.

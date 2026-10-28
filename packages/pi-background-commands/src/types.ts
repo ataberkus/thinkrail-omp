@@ -1,4 +1,4 @@
-import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 export type BackgroundCommandStatus = "running" | "stopping" | "completed" | "error" | "stopped";
 
@@ -12,8 +12,7 @@ export interface BackgroundCommandContext {
 	cwd: string;
 	sessionFile?: string | undefined;
 	model?: Pick<NonNullable<ExtensionContext["model"]>, "provider" | "id"> | undefined;
-	thinkingLevel?: ExtensionContext["thinkingLevel"];
-	shellPath?: string | undefined;
+	thinkingLevel?: ReturnType<ExtensionAPI["getThinkingLevel"]>;
 	commandPrefix?: string | undefined;
 	exposeSessionEnvironment?: boolean;
 }
@@ -24,8 +23,23 @@ export interface BackgroundCommandsBinding {
 	canDeliverCompletion?(): boolean;
 }
 
+export interface BackgroundCommandExecOptions {
+	onData(data: Buffer): void;
+	signal: AbortSignal;
+	timeout?: number;
+	env: Record<string, string>;
+}
+
+export interface BackgroundCommandOperations {
+	exec(
+		command: string,
+		cwd: string,
+		options: BackgroundCommandExecOptions,
+	): Promise<{ exitCode: number | null }>;
+}
+
 export interface BackgroundCommandsOptions {
-	createOperations?(options: { shellPath?: string }): BashOperations;
+	createOperations?(): BackgroundCommandOperations;
 }
 
 export interface BackgroundCommandSnapshot {

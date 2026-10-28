@@ -49,22 +49,24 @@ by capture/reopen, not an arbitrary file importer.
 
 `reopenChild` consumes the saved immutable birth record excluding its path, plus saved declarative
 session configuration. It validates owner/scope/file identity and preserves birth metadata, resolving
-only a new access path. Missing files never create replacement sessions. A crash-dangling final tool
-batch receives generic error results before pi replay; a non-tail or malformed gap fails closed because
-no positional repair is safe. Fork assembly persists the actual model and pi-clamped thinking in the
-child branch; source metadata/global defaults stay intact.
-Pi reloads opted-in resources on reopen; saved configuration is not a frozen rendered prompt.
+only a new access path. Missing files never create replacement sessions. omp replay
+(`buildSessionContext`) drops unpaired tool calls from any assistant turn, so a crash-dangling batch
+needs no repair; orphan, duplicate or mismatched results still fail closed. Fork assembly persists the
+actual model and engine-clamped thinking in the child branch; source metadata/global defaults stay
+intact. Opted-in resources reload on reopen; saved configuration is not a frozen rendered prompt.
 
 `RunOutcome` gains invocation-local `stopReason` and terminal `historyEntryId`. Finalized-message
-observation survives compaction; usage remains pi-stat deltas. Resource prompts bypass command and
-skill/template expansion. Resource steering synchronously targets only the active invocation through
+observation survives compaction; usage is a delta of omp's cumulative
+`SessionManager.getUsageStatistics()` (not `getSessionStats()`, which covers only the active context).
+Resource prompts bypass template expansion. Resource steering synchronously targets only the active invocation through
 pi's queue; enqueue is not consumption. Cancellation covers preflight/queued work and cleans residual
 queues before admitting another run. All settlement stays inside the existing run owner.
 
-Owners supplying a runtime guarantee its lifetime; registry-based retention reuses opaque provider
-replay without reloading source extensions or resynchronizing from later chats. Missing models or
-unsupported runtime-only auth paths fail explicitly, not by substitution. Neither kind of retained
-object is a credential snapshot or an ownership lease. Regression coverage must include later child
+Owners supplying a `ModelRegistry` guarantee its lifetime; resource children use that registry live
+(decision #26), without reloading source extensions. A model the registry no longer resolves fails
+explicitly (`model-unavailable`), never by substitution; `unsupported-auth` is no longer produced
+because no credentials are replayed. The retained registry is neither a credential snapshot nor an
+ownership lease. Regression coverage must include later child
 creation after source-chat disposal, unchanged parent behavior, and zero-worker retention.
 
 ### Resource implementation decisions and verification
@@ -73,59 +75,64 @@ creation after source-chat disposal, unchanged parent behavior, and zero-worker 
   Scope/resource/session segments are validated; capture and reopen share an identity-checked
   locator that rejects ambiguous files, symlinks, non-regular files and malformed v3 history.
   Reopen never uses a caller-supplied path, never manufactures a missing transcript, and treats
-  the saved birth record as authoritative for delegation metadata not present in pi's header. It
-  repairs only replay-safe missing results at the active tail before constructing the session.
+  the saved birth record as authoritative for delegation metadata not present in pi's header. omp's
+  `open` falls back to the process cwd when the recorded cwd is missing, so reopen re-pins the
+  context cwd with `setCwdWithoutRelocation`. Replay closure is checked, never repaired.
 - Registration reserves the identity immediately, prepares context before returning, and does
   not create a session. Duplicate registration fails with `resource-exists`. Effective model
   references must resolve exactly (`model-unavailable`); resource creation never falls back to
-  an arbitrary SDK model. Registry inputs replay opaque configured/native provider registrations
-  once, without rerunning source extensions. Public auth-source metadata detects runtime-only
-  credentials and unavailable stored-auth replay (`unsupported-auth`), without extracting secrets.
-  This static check cannot certify opaque provider-private state or future remote authentication.
+  an arbitrary SDK model. Children resolve through the borrowed registry itself, so runtime-only
+  credentials and extension-registered providers work without being read or replayed.
 - Resource concurrency defaults to the service's parent limit (4 unless bound otherwise), with
   independent FIFO slots per resource. Resource-local factories augment the service curated set;
   the existing `session.extensions` opt-in and tool allowlist still apply. Resource handles and
   records never appear in parent lookups, collections, events or disposal cascades. Child specs,
   model refs and nested configuration are detached before admission can await; records and their
   `info` values are frozen copies.
+- `ResourceDelegationOptions.terminalTools` names tools whose successful result ends the invocation:
+  a core-loaded `tool_result` hook calls `agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON)`, which omp
+  treats as a graceful yield that stops before the next provider call (pi-agent-core
+  `agent-loop.ts`). It replaces pi's per-result `terminate` flag, which omp lacks; a failed call
+  continues the loop.
 - Release closes all admission synchronously, signals every child before awaiting any teardown,
-  settles in-flight assembly, emits/awaits each resource child's `session_shutdown`, disposes
-  sessions, then removes registration/context/pacing references. Concurrent release/disposal
+  settles in-flight assembly, awaits each child's `session.dispose()` (which emits
+  `session_shutdown`), then removes registration/context/pacing references. Concurrent release/disposal
   share their existing settlement promises; borrowed runtimes are never disposed.
 - Capture serializes one v3 header and exactly the selected ancestor path. `null` is an explicit
   empty branch (`[]`, not `getBranch(null)`). Validation checks identity, shape, ancestry, cuts,
-  SHA-256/UTF-8 length, current v3 system/usage/context-edit records and compaction references,
-  including retain-none compactions and label entries. Pi's public `buildSessionContext` supplies
+  SHA-256/UTF-8 length, every current omp entry type (session-init, model-usage, mode/reset,
+  developer messages, …) and compaction references, including retain-none (`firstKeptEntryId: ""`)
+  compactions and label entries. Transcript files are parsed with omp `parseSessionContent`, which
+  strips the leading title slot. omp's public `buildSessionContext` supplies
   compaction-aware replay; `scanReplayTools` supplies tool closure
   checks and the host repair path's unchanged conservative trailing repair candidates. Failed and
   aborted assistant attempts do not invent missing successful results. Capture never repairs.
   Stored capture reads validated bytes directly and invokes no runtime or mutable SDK file open.
-- Forks use an internal private temporary seed with native `SessionManager.forkFrom`, cleaning
-  that seed on either result. Before changing prompt, tools or model, the child appends context edits
-  that hide Anthropic/Claude signed or redacted thinking: those signatures bind the preceding prefix
-  and are not portable to a new child. Canonical captured bytes and raw entries remain unchanged;
-  unsigned and other-provider reasoning remains visible. Actual child model and clamped thinking
+- Forks use an internal private temporary seed with native async `SessionManager.forkFrom`
+  (`copyArtifacts: false`), cleaning that seed on either result. Captured thinking stays verbatim:
+  omp keeps same-deployment Anthropic signatures, drops prefix-bound blocks and strips signatures
+  across deployments itself (`anthropic.ts`, `transform-messages.ts`), so the former context-edit
+  hiding is gone (omp has no context-edit entry). Actual child model and clamped thinking
   changes are appended without changing source history or global settings. Captured strings are
   consumer-retained immutable input, not a core history store. Capture materializes the branch; no
   byte quota is added in this bounded extension. Admission-limit policy remains a follow-up.
-- Resource prompt preflight uses literal extension-source input; guarded steering synchronously
-  calls public `session.agent.steer` with the unchanged user message. A prompt whose run was
-  cancelled during preflight is dropped by an internal `input` handler that every child loads after
-  its own extensions, so the user message is never written and no request is made; cancellation is
-  reapplied at agent start for the remaining window. Pi 1.2 counts the session busy from
-  `before_agent_start` on and runs `preflightResult` inside that busy span, so throwing from it (the
-  pre-1.2 mechanism) would leave the child busy forever. Queues are cleared before cancellation and again before settlement/admission of another run.
+- omp `prompt()` never emits the extension `input` event (modes call `emitInput` themselves), so
+  the core emits it before prompting: source `"extension"` for resource children, `"interactive"`
+  for parent children. A `handled` result ends the invocation without a request, a text rewrite is
+  honoured, and a run cancelled during that preflight is dropped before the user message is written.
+  Guarded steering synchronously calls public `session.agent.steer` with the unchanged user message.
+  Queues are cleared before cancellation and again before settlement/admission of another run.
   `abort()` on a resource handle awaits the invocation's full settlement, including queued work.
 - `RunOutcome.stopReason` and final text are the last finalized assistant observation in that
   invocation, retained through retries/compaction; cancellation intent cannot overwrite that
-  stop evidence. Usage is still pi cumulative-stat deltas. `historyEntryId` is the settled leaf,
+  stop evidence. Usage is a `getUsageStatistics()` delta. `historyEntryId` is the settled leaf,
   including metadata/compaction entries, not proof of successful completion.
 
 Regression suites use only local synthetic providers. They cover parent compatibility and captured
 parent forks; zero-worker/borrowed/registry/native-provider retention; strict stored capture/reopen
-with crash-tail repair and non-tail rejection;
-canonical cuts, current v3 entries, digest/closure/compaction validation; source-independent fan-out
-with provider-bound thinking sanitization; detached admission inputs; resource-local factories and FIFO
+with crash-tail healing by omp replay and orphan-result rejection;
+canonical cuts, current omp entries, digest/closure/compaction validation; source-independent fan-out
+with engine-side signature handling; terminal-tool invocation ends; detached admission inputs; resource-local factories and FIFO
 isolation; literal steering and stale-queue cleanup; queued/preflight cancellation; pending assembly/
 shutdown release barriers; and finalized outcomes after a shrinking compaction.
 
@@ -136,33 +143,27 @@ shutdown release barriers; and finalized outcomes after a shrinking compaction.
   `captureHistory`. Resource, birth and captured-history contract types are exported from the
   actual package barrel. `scanReplayTools` is the shared pure replay scanner for capture and host
   transcript repair; repair policy and synthesized tool results remain host-owned.
-- `DelegationBindings` — everything host-specific: `resolveParent` (optional for resource-only services; parent creation requires it and a live result; returns
-  `ParentContext` — `Pick<ExtensionContext, "cwd" | "model" | "thinkingLevel">` plus optional
-  `isProjectTrusted`, `modelRuntime` and `modelRegistry` fields. `isProjectTrusted` is the pi-level
-  project trust a child's settings manager receives (asked at creation and again at the revalidation
-  below): trust is part of the context a child derives from its parent, so a child never loads more of
-  the project than its parent — pure pi's `ctx` carries the session's own trust, ThinkRail answers its
-  parent's loaded trust AND the current `Project.piResourceTrust`; absent → trusted, pi's own
-  `SettingsManager` default. A resource context (`ResourceContextInput`) takes the same optional field. The parent's own retained `modelRuntime` is preferred
-  over every fallback: an embedder whose sessions each retain their creation-time runtime generation
-  (ThinkRail) must give a child its *parent's* generation, or a parent kept alive on a Central-only
-  model after a disconnect would delegate into a runtime lacking its provider (PR #303 review
-  follow-up). `modelRegistry` is the public pure-pi compatibility path: when neither a parent nor
-  service runtime is bound, the core mirrors its opaque extension-provider registrations into the
-  self-created runtime before each child is resolved, including removing registrations that have
-  disappeared. ThinkRail projects the manager's live session incl. the entry's generation runtime;
-  pure pi passes the extension's own `ctx`, including its registry), `delegationRoot`, `scope`,
-  `modelRuntime` (a `ModelRuntime` value **or a live provider** `() => ModelRuntime |
-  Promise<ModelRuntime>`, resolved **per `createChild`**: an embedder's runtime can be generational
-  — ThinkRail swaps runtime generations on Central connect/disconnect — and a value captured at
-  service creation would pin every later child to the first generation while new parent chats move
-  on (PR #303 review finding); absent → the service self-creates one runtime **per parent lineage**
-  and caches it until `disposeChildrenOf(parent)` — a service may resolve parents backed by different
-  registries, so one mutable fallback must never synchronize provider state across them),
-  `maxConcurrentPerParent`, `childBaseExtensionFactories` (the hook-only set EVERY child loads) and
-  `childExtensionFactories` (the curated set a child MAY load) — both decision #25, both pi
-  `InlineExtension`s, so an embedder passes bare factories or `{ name, factory }` and keeps the name
-  in pi diagnostics — and `buildChildSettings` (decision #31).
+- `DelegationBindings` — everything host-specific: `resolveParent` (optional for resource-only
+  services; parent creation requires it and a live result; returns `ParentContext` —
+  `Pick<ExtensionContext, "cwd" | "model">`, the parent's omp `thinkingLevel`, plus optional
+  `isProjectTrusted` and `modelRegistry`). `isProjectTrusted` is the project trust a child receives
+  (asked at creation and again at the revalidation below): a child never loads more of the project
+  than its parent. omp itself has no project trust (`ctx.isProjectTrusted()` is always true), so the
+  embedder answers it (ThinkRail: the parent's loaded trust AND the current `Project.piResourceTrust`);
+  absent → trusted. A resource context (`ResourceContextInput`) takes the same optional field and a
+  required `modelRegistry`. The parent's own `modelRegistry` is preferred over every fallback: an
+  embedder whose sessions each retain a creation-time registry generation (ThinkRail) must give a
+  child its *parent's* generation (PR #303 review follow-up). Then `delegationRoot`, `scope`,
+  `modelRegistry` (a `ModelRegistry` value **or a live provider** `() => ModelRegistry |
+  Promise<ModelRegistry>`, resolved **per `createChild`**, because ThinkRail swaps registry
+  generations on Central connect/disconnect — PR #303 review finding; absent → one cached
+  `new ModelRegistry(await discoverAuthStorage(agentDir))`), `maxConcurrentPerParent`,
+  `childBaseExtensionFactories` (the hook-only set EVERY child loads) and `childExtensionFactories`
+  (the curated set a child MAY load) — both decision #25, both omp `ExtensionFactory`s —
+  `buildChildSettings` (decision #31) and `childSystemPrompt` (decision #32).
+- `DelegationThinkingLevel` — the literal thinking union (`off` … `max`) used by `SessionOptions` and
+  `DelegationRunDetails`. omp's `ThinkingLevel` is a const enum that literals do not satisfy, so the
+  core converts at the session boundary.
 - Storage helpers: `defaultDelegationRoot` / `delegationSessionDir` / `deriveChildSessionFile`
   (post-restart transcript reads) / `DEFAULT_SCOPE`.
 - The contract types themselves (incl. `DelegationError`/`DelegationErrorCode`) — enumerated and
@@ -170,10 +171,10 @@ shutdown release barriers; and finalized outcomes after a shrinking compaction.
 
 ## Boundary
 
-- **Allowed deps:** the pi SDK (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`) as
+- **Allowed deps:** the pi SDK (`@oh-my-pi/pi-coding-agent`, `@oh-my-pi/pi-ai`) as
   **peerDependencies** — the loading runtime supplies them; `node:*`.
 - **Forbidden:** any `@thinkrail/*` package (this package must work under vanilla pi);
-  `@earendil-works/pi-tui` (headless by design — rendering is the embedder's);
+  `@oh-my-pi/pi-tui` (headless by design — rendering is the embedder's);
   importing another workspace package's internals.
 - `DelegationRunDetails` is **authored here and mirrored into `@thinkrail/contracts`** (never
   imported from it, never re-exported by it) — the `pi-todos` DTO posture. Its `model`
@@ -236,7 +237,7 @@ stateDiagram-v2
 | Mechanism | Behavior |
 |---|---|
 | Foreground | `await child.runQueued(task)`. pi executes a batch's tool calls concurrently (verified: `pi-agent-core` `executeToolCallsParallel`), so N `Agent` calls = N children in flight — no `tasks[]`/chain DSL needed. |
-| Per-run outcome | A `RunOutcome`'s `finalText`, `stopReason` and `details.usage` belong to **that run alone**: the run captures a session-stat baseline before `prompt()`, observes finalized assistant `message_end` events for text/stop evidence (never a shrinking message-array index), and reports usage/cost/token **deltas** against the baseline — never the child session's cumulative totals. A reusable child running sequential tasks would otherwise return the previous run's text after a preflight failure and double-count usage (PR #302 review finding). `contextTokens` stays a point-in-time snapshot by design. |
+| Per-run outcome | A `RunOutcome`'s `finalText`, `stopReason` and `details.usage` belong to **that run alone**: the run captures a `getUsageStatistics()` baseline before `prompt()`, observes finalized assistant `message_end` events for text/stop evidence (never a shrinking message-array index), and reports usage/cost/token **deltas** against the baseline — never the child session's cumulative totals. A reusable child running sequential tasks would otherwise return the previous run's text after a preflight failure and double-count usage (PR #302 review finding). `contextTokens` stays a point-in-time snapshot by design. |
 | Concurrency | Semaphore **per parent session**, default 4; FIFO. Why: the model decides how many spawns to emit — each child is a full LLM session, so unbounded spawn multiplies token spend, provider 429 pressure, and load on the one shared event loop (no crash isolation). Resource governance, not correctness. The limit is **live**: `setMaxConcurrentPerParent(n)` resizes every existing parent semaphore and the default for later ones — growth admits queued runs at once (FIFO), shrinking never stops running children and only admits below the new limit. Resource semaphores keep their registration-time slots. The embedder owns the policy (ThinkRail: global setting + workspace override). Host-wide ceiling across parents: follow-up. |
 | Background | Don't await the promise. Completion → `run-terminal` event; the subagent tool layer additionally injects a `subagent-completion` custom message into the parent. |
 | Result collection | Registry snapshot via `findChild(id)`: terminal → final output + details, marks `collected`; running → status snapshot (not an error); unknown id → error naming the restart-loss case + the derived transcript path. The subagent layer treats `collected` as "the parent already has it" and drops the pending completion message. |
@@ -283,22 +284,22 @@ to treat lifecycle snapshots as terminal authority.
 
 ## Child assembly (what the core owns, consumers never see)
 
-The child's resource loader is **narrow by default**: no discovered extensions, no prompt
-templates, no themes; context files, skills, and the embedder's curated extension set
+A child is assembled from `createAgentSession` options, **narrow by default**: extension discovery,
+custom-tool paths, rules, prompt templates, slash commands, MCP, LSP and IRC are off, and the session
+is headless (`hasUI: false`). Context files, skills and the embedder's curated extension set
 (`extensions: true` — decision #25) are explicit `SessionOptions` opt-ins, and only the embedder's
-hook-only base set loads unconditionally (same decision); `systemPrompt` maps to
-`systemPromptOverride`. Model/thinking default to the live parent's current values; `cwd` is the
-parent's. Runtime precedence is parent `modelRuntime` → service `modelRuntime` → cached self-created
-runtime. The self-created path caches a separate runtime and mirrored-registration set per parent
-lineage; `disposeChildrenOf(parent)` drops that cache entry with the lineage. It mirrors the parent's
-public `modelRegistry` registrations before each spawn: every previously mirrored id is unregistered
-before the current native providers and opaque configured-provider configs are replayed. Rebuilding
-rather than merging is required because pi provider re-registration preserves omitted fields; without
-the unregister, a same-id replacement can retain stale config such as secret headers. This preserves
-extension-supplied provider behavior and config-contained auth without
-reading either; it cannot reproduce credentials or mutable state held only inside the original
-runtime, which is why exact runtime injection remains the stronger embedder contract. Storage: the
-lineage section above.
+hook-only base set loads unconditionally (same decision). `systemPrompt` maps to
+`customSystemPrompt`. A run materializes the child's transcript file (`ensureOnDisk`) just before its
+first prompt: omp writes a new session lazily, at its first assistant message, so without it a running
+child would have no inspectable transcript (no user task) until its first reply; a run cancelled before
+sending still writes nothing. Every child carries subagent markers (`taskDepth: 1`, `parentTaskPrefix`,
+`agentId`, `agentDisplayName`) and `bindProcessState: false`: without them omp registers it as the
+"Main" agent and lets it take over process-global state that its disposal would then tear down.
+Extensions are bound with `initializeExtensions` (print mode), which emits `session_start`. The tool
+allowlist is applied after creation, because omp keeps extension tools active regardless of
+`toolNames`. Model/thinking default to the live parent's current values; `cwd` is the parent's.
+Registry precedence is parent `modelRegistry` → service `modelRegistry` → the cached fallback;
+decision #26 covers how the registry is shared. Storage: the lineage section above.
 
 ## Extension points (exactly three, plus one seam)
 
@@ -392,8 +393,8 @@ run-scoped signal. Non-user paths retain their behavior.
    human-gate mix (engine-created, human-driven). Replaced by `interactive` (behavior) +
    `ChildInfo.createdBy` (open provenance).
 3. **`SessionOptions` mirrors pi's spawn signature** (user decision) — pi's names/semantics for the
-   session-shaping subset; the infrastructure subset (modelRuntime, sessionManager,
-   settingsManager, resourceLoader, customTools) is firewalled — exposing it would let a consumer
+   session-shaping subset; the infrastructure subset (modelRegistry, sessionManager, settings,
+   extension/skill/context assembly, customTools) is firewalled — exposing it would let a consumer
    bypass storage/lineage/trust.
 4. **`maxTurns` in `RunOptions`**, not `SessionOptions` (mirror purity — pi has no such option) and
    not creation (per-run: a chain reuses a child with different caps).
@@ -465,13 +466,13 @@ run-scoped signal. Non-user paths retain their behavior.
     diagnostic (the completion message had it, the collection path didn't).
 25. **Child extensions: a curated, embedder-bound set — never inheritance, never disk discovery**
     (user round). `SessionOptions.extensions: true` loads exactly
-    `DelegationBindings.childExtensionFactories` (pi's loader loads injected factories even under
-    `noExtensions` — verified); the `tools` allowlist gates which of the set's tools are callable;
+    `DelegationBindings.childExtensionFactories` (omp's `extensions` option loads injected factories
+    with `disableExtensionDiscovery` set — verified); the `tools` allowlist gates which of the set's tools are callable;
     a child loading any factory is bound `mode: "print"` (headless — `ctx.hasUI` false, dialogs
     skipped). The one unconditional set is `DelegationBindings.childBaseExtensionFactories`: every
     child — ordinary or resource, opted in or not — loads it ahead of the curated set. It carries
     tool-less infrastructure hooks an embedder needs on every child request (ThinkRail: the
-    oversized-image guard, made necessary by decision #31's raw-image settings — PR #657 review:
+    oversized-image guard, the in-context backstop for images that reach a child unresized — PR #657 review:
     custom agents default to no extensions, so an opt-in guard left them unguarded). A tool
     registered there would reach children that never opted in, so keeping the set tool-free is the
     embedder's contract; the core does not police it. Literal "inherit the parent's extensions" is
@@ -485,16 +486,17 @@ run-scoped signal. Non-user paths retain their behavior.
     a listed child's loader is built by the host's normal session path (ThinkRail:
     `createSession`'s own loader — full bundled set incl. visualize + ask_user_question, skills,
     admission) and the child registers in the host's manager (tab, WS streaming, hydration).
-26. **Public provider replay for the pure-pi fallback; exact runtime reuse for embedders.** Pi's
-    extension context exposes `modelRegistry` but not its backing `ModelRuntime`, while
-    `createAgentSession` requires a runtime. A self-created child runtime therefore synchronizes the
-    registry's public `getRegisteredProviderIds` / `getRegisteredNativeProvider` /
-    `getRegisteredProviderConfig` values before every spawn and unregisters stale mirrors. The
-    runtime and mirror set are keyed by parent lineage and dropped by `disposeChildrenOf`; otherwise
-    syncing a second parent could remove or replace a provider still used by the first parent's
-    children. This is opaque replay, not provider interpretation, private-field access, or extension
-    re-execution. It makes standalone children compatible with provider-registering extensions while
-    preserving the stronger parent-runtime path for runtime-only credentials and state.
+26. **Children share the parent's `ModelRegistry`; a guard keeps it intact.** omp's
+    `createAgentSession` takes the registry directly, so the pi-era provider mirror into a
+    self-created runtime is gone: runtime-only credentials, extension-registered providers and later
+    registry changes reach children live. Sharing needs one isolation measure, backed by omp source:
+    `createAgentSession` calls `modelRegistry.syncExtensionSources(…)` and
+    `clearSourceRegistrations(…)` for the child's own extension sources (`sdk.ts`), which on a shared
+    registry prunes the parent's extension providers, including inline `<inline-N>` source ids that
+    collide. Children therefore receive a `Proxy` that no-ops those two methods and binds every other
+    method to the real registry (the same pattern as omp's own pool proxy in
+    `config/account-pools.ts`). A child extension that registers a provider still writes through to
+    the shared registry — the documented cost of sharing.
 
 27. **Resource ownership is not a synthetic session parent.** One prepared resource context and
     local semaphore feed the existing child assembly/run owner; no second session runtime loop,
@@ -510,13 +512,23 @@ run-scoped signal. Non-user paths retain their behavior.
     pi assembly, not a persisted rendered prompt.
 30. **Resource control is literal and invocation-scoped.** Steering never starts a turn, queues are
     cleared before successor admission, and cancellation spans preflight through terminal settlement.
-    Finalized message events supply stop/text evidence; pi persisted-entry stats supply usage deltas.
+    Finalized message events supply stop/text evidence; omp `getUsageStatistics()` supplies usage deltas.
 31. **Child settings are an embedder-bound infrastructure hook, never a `SessionOptions` mirror**
-    (issue #604). Each child's settings manager is `buildChildSettings(cwd, projectTrusted)` when
-    bound, else `SettingsManager.create(cwd, undefined, { projectTrusted })`, with `projectTrusted`
-    the parent (or resource) context's `isProjectTrusted`, so an embedder's children run on the
-    settings and trust its own sessions do. ThinkRail binds `buildSessionSettings`, whose raw-image override is what lets a
-    child's `read` deliver images in the compiled binary (rationale: [[submodule-server-agent]]);
-    unbound, every child `read` of an image there returned pi's `[Image omitted…]` note. The hook
-    sits on `DelegationBindings` beside the factory sets, keeping decision #3's firewall: the
-    settings manager stays infrastructure no consumer shapes per child.
+    (issue #604). Each child's `Settings` is `buildChildSettings(cwd, projectTrusted)` when bound,
+    else `Settings.loadReadOnly({ cwd, agentDir })` for a trusted child and `Settings.isolated()` for
+    an untrusted one, with `projectTrusted` the parent (or resource) context's `isProjectTrusted`, so an
+    embedder's children run on the settings and trust its own sessions do. ThinkRail binds
+    its host settings loader, so children read with the same user settings (including omp's
+    `images.autoResize`, which omp honours in the compiled binary too) as the parent. The hook sits on
+    `DelegationBindings` beside the factory sets, keeping decision #3's firewall: settings stay
+    infrastructure no consumer shapes per child.
+32. **Project trust is enforced through session options** (omp port). omp has no trust gate, so an
+    untrusted child drops project-level skills (`_source.level === "project"`) and gets only
+    user-level context files (`loadCapability(contextFileCapability.id)`); project-scoped extensions
+    never load because discovery is off. omp also discovers a project `SYSTEM.md` /
+    `SYSTEM_TEMPLATE.md` override from the cwd whatever the trust, and project beats user; so an
+    untrusted child without its own `systemPrompt` spreads the embedder's
+    `childSystemPrompt(cwd)` (`{ customSystemPrompt?, systemPromptTemplate? }`) into its session options,
+    which take precedence over that discovery. ThinkRail binds the prompt half of its chats' untrusted
+    resources: the user-level override, else the user template, else omp's bundled template. Unbound,
+    the residual stays: an untrusted child can still take a project `SYSTEM.md`.

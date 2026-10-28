@@ -12,7 +12,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getProjectPromptsDir, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import type { Template, TemplateInfo, TemplateScope } from "@thinkrail/contracts";
 
 export interface TemplateDirs {
@@ -29,7 +29,7 @@ export function isValidTemplateName(name: string): boolean {
 export function templateDirs(cwd?: string, agentDir: string = getAgentDir()): TemplateDirs {
 	return {
 		globalDir: join(agentDir, "prompts"),
-		...(cwd ? { projectDir: join(cwd, CONFIG_DIR_NAME, "prompts") } : {}),
+		...(cwd ? { projectDir: getProjectPromptsDir(cwd) } : {}),
 	};
 }
 
@@ -89,11 +89,11 @@ function readHead(filePath: string, bytes: number): string {
 }
 
 function frontmatterMeta(text: string): Pick<TemplateInfo, "description" | "argumentHint"> {
-	const { frontmatter } = parseFrontmatter(text);
+	const { frontmatter } = parseFrontmatter(text.replace(/^\uFEFF/, ""), { level: "off" });
 	const description =
 		typeof frontmatter.description === "string" ? frontmatter.description : undefined;
 	const argumentHint =
-		typeof frontmatter["argument-hint"] === "string" ? frontmatter["argument-hint"] : undefined;
+		typeof frontmatter.argumentHint === "string" ? frontmatter.argumentHint : undefined;
 	return {
 		...(description ? { description } : {}),
 		...(argumentHint ? { argumentHint } : {}),
@@ -177,7 +177,7 @@ export function saveTemplate(
 		throw new Error(`template too large: ${size} bytes (limit ${MAX_TEMPLATE_BYTES})`);
 	}
 	try {
-		parseFrontmatter(content);
+		parseFrontmatter(content.replace(/^\uFEFF/, ""), { level: "fatal" });
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`invalid frontmatter: ${message}`);

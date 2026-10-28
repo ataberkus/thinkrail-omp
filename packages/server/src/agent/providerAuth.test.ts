@@ -15,7 +15,7 @@ test("describeProviderAuth ranks Central over OAuth over credential source", () 
 		kind: "api-key",
 	});
 	expect(describeProviderAuth({ central: false, oauth: false, source: "models_json_key" })).toEqual(
-		{ kind: "api-key", detail: "models.json" },
+		{ kind: "api-key", detail: "models.yml" },
 	);
 	expect(describeProviderAuth({ central: false, oauth: false, source: "fallback" })).toEqual({
 		kind: "other",

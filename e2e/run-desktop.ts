@@ -73,6 +73,7 @@ try {
 		[
 			process.execPath,
 			"x",
+			"--bun",
 			"playwright",
 			"test",
 			"-c",

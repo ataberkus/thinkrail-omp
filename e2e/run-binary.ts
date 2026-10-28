@@ -8,6 +8,7 @@ async function main(): Promise<number> {
 		[
 			process.execPath,
 			"x",
+			"--bun",
 			"playwright",
 			"test",
 			"-c",

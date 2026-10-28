@@ -8,7 +8,7 @@ import {
 	watch,
 } from "node:fs";
 import { basename, isAbsolute } from "node:path";
-import { getAgentDir, type McpServerConfig } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import {
 	MCP_PROTOCOL_VERSION,
 	type McpListResult,
@@ -22,7 +22,6 @@ import {
 import { CodedError } from "@thinkrail/shared/codedError";
 import { logger } from "../log";
 import {
-	dispatchSessionMcpCommand,
 	getSessionMessages,
 	liveSessionIdsOf,
 	type McpSessionView,
@@ -31,38 +30,33 @@ import {
 	type SessionReloadDisposition,
 } from "./agentSessionManager";
 import { publishSessionResourcesChanged } from "./chatResources";
-import { isBuiltinExtensionEnabled } from "./extensions";
 import {
 	deriveMcpServerStatuses,
+	type HostMcpServerConfig,
 	isMcpResultTool,
 	loadHostMcpConfig,
 	mcpPolicyOf,
 	type ParsedMcpStatus,
-	parseMcpAttentionNotice,
-	parseMcpStatusText,
 	redactMcpText,
+	reportMcpRuntime,
 	summarizeMcpConfigErrors,
 	summarizeMcpServers,
 } from "./mcp";
-import { interceptExtUiNotify, notifyExtUi } from "./webUiContext";
+import { notifyExtUi } from "./webUiContext";
 
 const log = logger("mcp");
 const USER_CONFIG_DEBOUNCE_MS = 300;
 const READ_OUTPUT_MAX_BYTES = 1024 * 1024;
 
-const BUILTIN_MCP = "builtin:mcp";
-const DISABLED_IN_SETTINGS = "pi settings (-builtin:mcp)";
+const ATTENTION_STATES = new Set<McpServerStatus["state"]>(["failed", "needs-sign-in"]);
+const ARTIFACT_URL = "artifact://";
 
 interface Tracked {
 	generation: number;
-	load: number;
 	servers: McpServerStatus[];
 	transports: Map<string, McpTransportKind>;
-	registered: Set<string>;
 	resourcesKey: string;
-	inFlight: Promise<void> | null;
 	reloadFailed: boolean;
-	stopAttention: () => void;
 }
 
 const tracked = new Map<string, Tracked>();
@@ -97,10 +91,7 @@ function asParsed(servers: readonly McpServerStatus[]): ParsedMcpStatus["servers
 	);
 }
 
-const ownsMcp = (view: McpSessionView | undefined): view is McpSessionView =>
-	view?.commandOwner === BUILTIN_MCP;
-
-const configKey = (config: McpServerConfig | undefined): string | undefined =>
+const configKey = (config: HostMcpServerConfig | undefined): string | undefined =>
 	config === undefined ? undefined : JSON.stringify(config);
 
 function configuredServers(view: McpSessionView) {
@@ -116,22 +107,14 @@ function configuredServers(view: McpSessionView) {
 export function pendingMcpReload(sessionId: string): Set<string> {
 	const view = mcpSessionView(sessionId);
 	const failed = tracked.get(sessionId)?.reloadFailed === true;
-	if (!ownsMcp(view) || (!view.loaded && !failed)) return new Set();
-	const loaded = view.loaded ?? new Map<string, McpServerConfig>();
+	if (!view || (!view.loaded && !failed)) return new Set();
+	const loaded = view.loaded ?? new Map<string, HostMcpServerConfig>();
 	const current = new Map(configuredServers(view).map((server) => [server.name, server.config]));
 	const names = new Set([...current.keys(), ...loaded.keys()]);
 	return new Set(
 		[...names].filter(
 			(name) => failed || configKey(current.get(name)) !== configKey(loaded.get(name)),
 		),
-	);
-}
-
-function registeredTransports(view: McpSessionView): Map<string, McpTransportKind> {
-	return new Map(
-		view.registered
-			.filter((server) => !view.loaded?.has(server.name))
-			.map((server) => [server.name, "url" in server.config ? "http" : "stdio"]),
 	);
 }
 
@@ -145,7 +128,7 @@ function publishResources(sessionId: string, workspaceId: string, state: Tracked
 function apply(sessionId: string, reported: ParsedMcpStatus | null, partial: boolean): void {
 	const view = mcpSessionView(sessionId);
 	const state = tracked.get(sessionId);
-	if (!ownsMcp(view) || !state) return;
+	if (!view || !state) return;
 	const merged: ParsedMcpStatus | null =
 		partial && reported
 			? {
@@ -159,12 +142,10 @@ function apply(sessionId: string, reported: ParsedMcpStatus | null, partial: boo
 		projectTrusted: view.projectTrusted,
 		policy: view.policy,
 	});
-	const registered = registeredTransports(view);
-	state.transports = new Map([
-		...summaries.map((summary): [string, McpTransportKind] => [summary.name, summary.transport]),
-		...registered,
-	]);
-	state.registered = new Set(registered.keys());
+	state.transports = new Map(
+		summaries.map((summary): [string, McpTransportKind] => [summary.name, summary.transport]),
+	);
+	const before = new Map(state.servers.map((status) => [status.name, status.state]));
 	state.servers = deriveMcpServerStatuses({
 		summaries,
 		reported: merged,
@@ -177,50 +158,41 @@ function apply(sessionId: string, reported: ParsedMcpStatus | null, partial: boo
 	const snapshot = snapshotOf(sessionId);
 	if (snapshot) publish(snapshot);
 	publishResources(sessionId, view.workspaceId, state);
+	notifyLegacyClients(
+		sessionId,
+		state.servers.filter(
+			(status) => ATTENTION_STATES.has(status.state) && before.get(status.name) !== status.state,
+		),
+	);
 }
 
-function retire(sessionId: string, view: McpSessionView): void {
-	const state = tracked.get(sessionId);
-	if (!state || state.servers.length === 0) return;
-	state.servers = [];
-	state.generation++;
-	publish({ workspaceId: view.workspaceId, sessionId, generation: state.generation, servers: [] });
-	publishResources(sessionId, view.workspaceId, state);
+function notifyLegacyClients(sessionId: string, attention: readonly McpServerStatus[]): void {
+	if (attention.length === 0) return;
+	const lines = attention.map(
+		(status) => `  ${status.name} (${status.state})${status.detail ? `: ${status.detail}` : ""}`,
+	);
+	notifyExtUi(
+		sessionId,
+		["MCP servers need attention:", ...lines, "Open Settings › MCP servers to fix."].join("\n"),
+		"warning",
+		{ belowProtocol: MCP_PROTOCOL_VERSION },
+	);
 }
 
 export function showPendingMcpReload(sessionId: string): void {
 	apply(sessionId, null, true);
 }
 
-function startingReport(view: McpSessionView): ParsedMcpStatus {
-	const servers: ParsedMcpStatus["servers"] = new Map();
-	const given = [
-		...(view.loaded ?? []),
-		...view.registered.map((server): [string, McpServerConfig] => [server.name, server.config]),
-	];
-	for (const [name, config] of given) {
-		if (servers.has(name)) continue;
-		servers.set(name, { state: config.enabled === false ? "disabled" : "starting", detail: "" });
-	}
-	return { servers, configErrors: [] };
-}
-
 export function restartMcpStatus(sessionId: string): void {
 	const view = mcpSessionView(sessionId);
 	if (!view) return;
-	const state = trackedOf(sessionId);
-	state.load++;
-	state.inFlight = null;
-	state.reloadFailed = false;
-	if (ownsMcp(view)) apply(sessionId, startingReport(view), false);
-	scheduleMcpStatusRefresh(sessionId);
+	trackedOf(sessionId).reloadFailed = false;
+	apply(sessionId, reportMcpRuntime(view.runtime), false);
 }
 
 export function assertMcpServerDisablableInChat(sessionId: string, name: string): void {
 	const view = mcpSessionView(sessionId);
-	if (!ownsMcp(view)) {
-		throw new CodedError("MCP_HANDLED_ELSEWHERE", "MCP is not managed by ThinkRail here.");
-	}
+	if (!view) throw new CodedError("RESOURCE_UNAVAILABLE", "Session resources unavailable");
 	if (view.loaded?.has(name)) return;
 	if (
 		view.loaded === null &&
@@ -230,9 +202,7 @@ export function assertMcpServerDisablableInChat(sessionId: string, name: string)
 		return;
 	throw new CodedError(
 		"MCP_CONFIG_INVALID",
-		view.registered.some((server) => server.name === name)
-			? `"${name}" is registered by an extension; it can't be disabled per chat.`
-			: `No MCP server named "${name}" is configured for this chat.`,
+		`No MCP server named "${name}" is configured for this chat.`,
 	);
 }
 
@@ -244,7 +214,6 @@ export function mcpResourceSummaries(sessionId: string): McpServerResourceSummar
 		state: status.state,
 		...(status.toolCount !== undefined ? { toolCount: status.toolCount } : {}),
 		transport: state.transports.get(status.name) ?? "stdio",
-		...(state.registered.has(status.name) ? { registered: true as const } : {}),
 	}));
 }
 
@@ -343,79 +312,46 @@ function trackedOf(sessionId: string): Tracked {
 	if (existing) return existing;
 	const state: Tracked = {
 		generation: 0,
-		load: 0,
 		servers: [],
 		transports: new Map(),
-		registered: new Set(),
 		resourcesKey: "[]",
-		inFlight: null,
 		reloadFailed: false,
-		stopAttention: () => {},
 	};
 	tracked.set(sessionId, state);
-	state.stopAttention = interceptExtUiNotify(sessionId, (message, level) => {
-		const parsed = parseMcpAttentionNotice(message);
-		if (!parsed) return false;
-		apply(sessionId, parsed, true);
-		queueMicrotask(() => scheduleMcpStatusRefresh(sessionId));
-		notifyExtUi(sessionId, redactMcpText(message), level, { belowProtocol: MCP_PROTOCOL_VERSION });
-		return true;
-	});
 	return state;
-}
-
-async function capture(sessionId: string, state: Tracked): Promise<void> {
-	const load = state.load;
-	const notices: string[] = [];
-	try {
-		await dispatchSessionMcpCommand(sessionId, "", (message) => notices.push(message));
-	} catch {}
-	if (tracked.get(sessionId) !== state || state.load !== load) return;
-	const parsed = notices.map(parseMcpStatusText).findLast((status) => status !== null);
-	if (parsed) apply(sessionId, parsed, false);
 }
 
 export async function refreshMcpStatus(
 	sessionId: string,
 	waitMs: number,
 ): Promise<McpStatusSnapshot | null> {
+	const before = mcpSessionView(sessionId);
+	if (!before) return null;
+	trackedOf(sessionId);
+	if (waitMs > 0 && before.runtime.some((server) => server.state === "starting")) {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([
+			before.startup(),
+			new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, waitMs);
+			}),
+		]);
+		clearTimeout(timer);
+	}
 	const view = mcpSessionView(sessionId);
 	if (!view) return null;
-	if (!ownsMcp(view)) {
-		retire(sessionId, view);
-		return null;
-	}
-	const state = trackedOf(sessionId);
-	if (!state.inFlight) {
-		const running: Promise<void> = capture(sessionId, state).finally(() => {
-			if (state.inFlight === running) state.inFlight = null;
-		});
-		state.inFlight = running;
-	}
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	await Promise.race([
-		state.inFlight,
-		new Promise<void>((resolve) => {
-			timer = setTimeout(resolve, waitMs);
-		}),
-	]);
-	clearTimeout(timer);
+	apply(sessionId, reportMcpRuntime(view.runtime), false);
 	return snapshotOf(sessionId);
 }
 
 export async function reconnectMcpServer(sessionId: string, name: string): Promise<void> {
-	const failures: string[] = [];
-	const reconnect = ownsMcp(mcpSessionView(sessionId))
-		? dispatchSessionMcpCommand(sessionId, `reconnect ${name}`, (message, level) => {
-				if (level === "error") failures.push(message);
-			})
-		: null;
-	if (!reconnect) {
-		throw new CodedError("MCP_HANDLED_ELSEWHERE", "MCP is not managed by ThinkRail here.");
+	const view = mcpSessionView(sessionId);
+	if (!view) throw new CodedError("RESOURCE_UNAVAILABLE", "Session resources unavailable");
+	try {
+		await view.reconnect(name);
+	} catch (error) {
+		throw new Error(redactMcpText(error instanceof Error ? error.message : String(error)));
 	}
-	await reconnect;
-	const failure = failures.at(-1);
-	if (failure !== undefined) throw new Error(redactMcpText(failure));
 }
 
 export function scheduleMcpStatusRefresh(sessionId: string): void {
@@ -423,42 +359,7 @@ export function scheduleMcpStatusRefresh(sessionId: string): void {
 }
 
 export function forgetMcpStatus(sessionId: string): void {
-	tracked.get(sessionId)?.stopAttention();
 	tracked.delete(sessionId);
-}
-
-function mcpOwnerElsewhere(
-	owners: readonly (string | null)[],
-	enabledInSettings: boolean,
-): string | undefined {
-	const replacement = owners.find((owner) => owner !== null && owner !== BUILTIN_MCP);
-	if (replacement) return replacement;
-	if (!enabledInSettings) return DISABLED_IN_SETTINGS;
-	return owners.includes(null) ? "pi settings" : undefined;
-}
-
-/**
- * Resolves pi settings, then returns a synchronous answer to "who manages MCP for this workspace instead
- * of ThinkRail?" (`undefined` when ThinkRail does) that samples the live `/mcp` owners when called, so a
- * caller can check and mutate in one call stack.
- */
-export async function mcpOwnershipGuard(options: {
-	workspaceId: string;
-	cwd: string;
-	projectTrusted: boolean;
-}): Promise<() => string | undefined> {
-	const enabledInSettings = await isBuiltinExtensionEnabled(
-		options.cwd,
-		options.projectTrusted,
-		"mcp",
-	);
-	return () =>
-		mcpOwnerElsewhere(
-			liveSessionIdsOf(options.workspaceId).map(
-				(sessionId) => mcpSessionView(sessionId)?.commandOwner ?? null,
-			),
-			enabledInSettings,
-		);
 }
 
 export async function listMcpServers(options: {
@@ -469,18 +370,15 @@ export async function listMcpServers(options: {
 }): Promise<McpListResult> {
 	const sessionIds = liveSessionIdsOf(options.workspaceId);
 	const projectTrusted = options.project?.piResourceTrust === "granted";
-	const [snapshots, ownership] = await Promise.all([
-		Promise.all(sessionIds.map((sessionId) => refreshMcpStatus(sessionId, options.waitMs))),
-		mcpOwnershipGuard({ workspaceId: options.workspaceId, cwd: options.cwd, projectTrusted }),
-	]);
-	const elsewhere = ownership();
+	const snapshots = await Promise.all(
+		sessionIds.map((sessionId) => refreshMcpStatus(sessionId, options.waitMs)),
+	);
 	const files = { agentDir: getAgentDir(), cwd: options.cwd, projectTrusted };
 	const configErrors = summarizeMcpConfigErrors(files);
 	return {
 		servers: summarizeMcpServers({ ...files, policy: mcpPolicyOf(options.project) }),
 		statuses: snapshots.filter((snapshot): snapshot is McpStatusSnapshot => snapshot !== null),
 		...(configErrors.length > 0 ? { configErrors } : {}),
-		...(elsewhere !== undefined ? { handledElsewhere: { by: elsewhere } } : {}),
 	};
 }
 
@@ -510,12 +408,25 @@ export async function readMcpToolOutput(
 		return { available: false, reason: "unavailable" };
 	}
 	const details = result.details as { fullOutputPath?: unknown } | undefined;
-	const path = details?.fullOutputPath;
-	if (typeof path !== "string" || !isAbsolute(path))
-		return { available: false, reason: "unavailable" };
+	const recorded = details?.fullOutputPath;
+	if (typeof recorded !== "string") return { available: false, reason: "unavailable" };
+	let path = recorded;
+	if (recorded.startsWith(ARTIFACT_URL)) {
+		const artifact = await mcpSessionView(sessionId)?.artifact(recorded.slice(ARTIFACT_URL.length));
+		if (!artifact) return { available: false, reason: "expired" };
+		if ("text" in artifact) return { available: true, ...boundedText(artifact.text) };
+		path = artifact.path;
+	}
+	if (!isAbsolute(path)) return { available: false, reason: "unavailable" };
 	try {
 		return { available: true, ...readBounded(path) };
 	} catch {
 		return { available: false, reason: "expired" };
 	}
+}
+
+function boundedText(text: string): { text: string; truncated: boolean } {
+	const bytes = Buffer.from(text, "utf8");
+	if (bytes.length <= READ_OUTPUT_MAX_BYTES) return { text, truncated: false };
+	return { text: bytes.subarray(0, READ_OUTPUT_MAX_BYTES).toString("utf8"), truncated: true };
 }

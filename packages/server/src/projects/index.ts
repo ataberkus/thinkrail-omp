@@ -12,7 +12,6 @@ export {
 	refreshRecentProjectFolders,
 	renameProject,
 	revokeProjectMcpTool,
-	setPiTrustSeed,
 	setProjectGroupEnabled,
 	setProjectMcpOverride,
 	setProjectPublisher,

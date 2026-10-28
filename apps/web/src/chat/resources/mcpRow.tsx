@@ -15,12 +15,7 @@ type McpRowAction = { id: McpRowActionId; label: MessageKey };
 const DISABLE = { id: "disable", label: "resources.mcp.disable" } as const satisfies McpRowAction;
 
 export function mcpRowActions(server: McpServerResourceSummary): McpRowAction[] {
-	const actions = stateActions(server.state);
-	return server.registered ? actions.filter((action) => action.id !== DISABLE.id) : actions;
-}
-
-function stateActions(state: McpServerResourceSummary["state"]): McpRowAction[] {
-	switch (state) {
+	switch (server.state) {
 		case "disabled-in-chat":
 			return [{ id: "enable", label: "resources.mcp.enable" }];
 		case "needs-sign-in":

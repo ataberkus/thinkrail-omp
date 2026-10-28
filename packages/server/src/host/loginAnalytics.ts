@@ -1,6 +1,5 @@
-import type { AuthType } from "@earendil-works/pi-ai";
 import type { LoginPush } from "@thinkrail/contracts";
-import type { PiRuntimeGeneration } from "../agent";
+import type { AuthType, PiRuntimeGeneration } from "../agent";
 import {
 	type AdditionalAnalyticsCapture,
 	bucketProvider,

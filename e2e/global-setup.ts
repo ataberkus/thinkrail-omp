@@ -45,8 +45,8 @@ function centralSetupFailure(error: unknown): Error {
 
 function seedLocalAgentConfiguration(): void {
 	mkdirSync(E2E_PI_AGENT_DIR, { recursive: true });
-	const seed = JSON.stringify({ providers: {} });
-	writeFileSync(join(E2E_PI_AGENT_DIR, "models.json"), seed);
+	const seed = "providers: {}\n";
+	writeFileSync(join(E2E_PI_AGENT_DIR, "models.yml"), seed);
 	writeFileSync(E2E_PI_MODELS_SEED, seed);
 	writeE2eAgentSettings();
 }

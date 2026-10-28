@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { fauxAssistantMessage } from "pi-faux";
 import { createDelegationService, DelegationError, type DelegationErrorCode } from "../index";
 
 const core = createDelegationService({});
@@ -64,38 +64,45 @@ test("session capture detaches the selected branch, max thinking and canonical U
 	expect(manager.getBranch().at(-1)?.type).toBe("custom");
 });
 
-test("capture accepts current system, usage and context-edit entries", async () => {
+test("capture accepts current session-init, developer, model-usage and reset entries", async () => {
 	const manager = SessionManager.inMemory("/synthetic");
-	manager.appendMessage({
-		role: "system",
-		content: "",
-		sections: { preamble: "Current prompt", removed: null },
-		timestamp: Date.now(),
-	});
-	const user = manager.appendMessage({ role: "user", content: "original", timestamp: Date.now() });
+	manager.appendSessionInit({ systemPrompt: ["Current prompt"], task: "work", tools: ["read"] });
+	manager.appendMessage({ role: "developer", content: "hidden directive", timestamp: Date.now() });
+	manager.appendMessage({ role: "user", content: "original", timestamp: Date.now() });
 	manager.appendMessage(assistant());
-	manager.appendUsage("cache_warm", "faux", "worker", {
-		input: 1,
-		output: 2,
-		cacheRead: 3,
-		cacheWrite: 4,
-		totalTokens: 10,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	});
-	manager.appendContextEdit(user, { content: "edited" });
+	manager.appendModelUsage(
+		{
+			purpose: "cache_warm",
+			api: "faux",
+			provider: "faux",
+			model: "worker",
+			stopReason: "stop",
+			usage: {
+				input: 1,
+				output: 2,
+				cacheRead: 3,
+				cacheWrite: 4,
+				totalTokens: 10,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		},
+		{ sessionId: manager.getSessionId(), parentId: manager.getLeafId() },
+	);
+	manager.appendResetBoundary();
 	const history = await capture(manager);
-	expect(history.jsonl).toContain('"role":"system"');
-	expect(history.jsonl).toContain('"type":"usage"');
-	expect(history.jsonl).toContain('"type":"context_edit"');
+	expect(history.jsonl).toContain('"type":"session_init"');
+	expect(history.jsonl).toContain('"role":"developer"');
+	expect(history.jsonl).toContain('"type":"model_usage"');
+	expect(history.jsonl).toContain('"type":"reset_boundary"');
 });
 
-test("capture accepts a retain-none compaction that points to itself", async () => {
+test("capture accepts a retain-none compaction with an empty first-kept reference", async () => {
 	const manager = SessionManager.inMemory("/synthetic");
 	manager.appendMessage({ role: "user", content: "summarized", timestamp: Date.now() });
-	const compaction = manager.appendCompaction("complete summary", null, 100);
+	const compaction = manager.appendCompaction("complete summary", undefined, "", 100);
 	const history = await capture(manager);
 	expect(history.entryId).toBe(compaction);
-	expect(history.jsonl).toContain(`"firstKeptEntryId":"${compaction}"`);
+	expect(history.jsonl).toContain('"firstKeptEntryId":""');
 });
 
 test("capture rejects malformed provider-facing content metadata", async () => {
@@ -121,12 +128,13 @@ test("capture rejects malformed provider-facing content metadata", async () => {
 	await code(capture(manager, entryId), "invalid-history");
 });
 
-test("capture rejects a context edit whose content cannot replace its target role", async () => {
+test("capture rejects a custom message whose content carries blocks its role cannot hold", async () => {
 	const manager = SessionManager.inMemory("/synthetic");
-	const target = manager.appendMessage(assistant());
-	manager.appendContextEdit(
-		target,
-		JSON.parse('{"content":[{"type":"image","data":"aGVsbG8=","mimeType":"image/png"}]}'),
+	manager.appendMessage(assistant());
+	manager.appendCustomMessageEntry(
+		"extension-note",
+		JSON.parse('[{"type":"thinking","thinking":"assistant-only block"}]'),
+		true,
 	);
 	await code(capture(manager), "invalid-history");
 });
@@ -205,22 +213,39 @@ test("capture rejects wrong identity, cuts, v3 shape and ancestry without source
 	expect((await capture(manager)).entryId).toBe(entry.id);
 });
 
-test("replay closure rejects partial batches, orphan/duplicate results, names and duplicate call ids", async () => {
+test("replay closure rejects orphan/duplicate results, names and duplicate call ids; omp strips unpaired calls", async () => {
 	const read = { id: "a", name: "read" };
 	const call = assistant([read]);
 	const completed = result(read.id, read.name);
 	for (const messages of [
-		[call],
 		[completed],
 		[call, result(read.id, "bash")],
 		[call, completed, completed],
 		[assistant([read, read]), completed],
+	]) {
+		const manager = SessionManager.inMemory("/synthetic");
+		for (const message of messages) manager.appendMessage(message);
+		await code(capture(manager), "incomplete-history");
+	}
+	for (const messages of [
+		[call],
 		[assistant([read, { id: "b", name: "bash" }]), completed],
 		[call, assistant()],
 	]) {
 		const manager = SessionManager.inMemory("/synthetic");
 		for (const message of messages) manager.appendMessage(message);
-		await code(capture(manager), "incomplete-history");
+		const history = await capture(manager);
+		expect(history.jsonl).toContain('"toolCall"');
+		const replay = manager.buildSessionContext().messages;
+		const replayedCalls = replay.flatMap((message) =>
+			message.role === "assistant"
+				? message.content.filter((block) => block.type === "toolCall").map((block) => block.id)
+				: [],
+		);
+		const results = new Set(
+			replay.flatMap((message) => (message.role === "toolResult" ? [message.toolCallId] : [])),
+		);
+		expect(replayedCalls.every((id) => results.has(id))).toBe(true);
 	}
 });
 
@@ -242,15 +267,18 @@ test("compaction closure uses pi replay, preserves label first-kept references a
 	const label = manager.getLeafId();
 	if (!label) throw new Error("Missing label");
 	manager.appendMessage({ role: "user", content: "kept", timestamp: Date.now() });
-	manager.appendCompaction("summary", label, 100);
+	manager.appendCompaction("summary", undefined, label, 100);
 	const history = await capture(manager);
 	expect(history.jsonl).toContain(`"firstKeptEntryId":"${label}"`);
 	expect(history.jsonl).toContain(offPath);
 	expect(history.jsonl).not.toContain("UNRELATED");
 	expect(history.jsonl).toContain("summarized-dangling");
 	manager.appendMessage(assistant([{ id: "new-dangling", name: "read" }]));
+	expect((await capture(manager)).jsonl).toContain("new-dangling");
+	expect(JSON.stringify(manager.buildSessionContext().messages)).not.toContain("new-dangling");
+	manager.appendMessage(result("orphan", "read"));
 	await code(capture(manager), "incomplete-history");
 	manager.branch(dangling);
-	manager.appendCompaction("invalid", offPath, 100);
+	manager.appendCompaction("invalid", undefined, offPath, 100);
 	await code(capture(manager), "invalid-history");
 });

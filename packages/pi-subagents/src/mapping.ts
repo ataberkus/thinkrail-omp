@@ -1,13 +1,13 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionOptions } from "pi-delegation";
 import type { AgentDefinition } from "./definitions";
 import { isThinkingLevel, THINKING_LEVELS } from "./thinking";
 
 export const RECURSION_GUARD_TOOLS = ["Agent", "get_subagent_result"] as const;
 
-type ModelRef = Pick<Model<string>, "provider" | "id">;
+type ModelRef = Pick<Model, "provider" | "id">;
 type ModelMatch = { model: ModelRef } | { reason: "missing" | "ambiguous" };
 
 function matchModelRef(ref: string, available: readonly ModelRef[]): ModelMatch {
@@ -89,7 +89,7 @@ export function toSpawnMapping(
 	definition: AgentDefinition,
 	options: {
 		cwd: string;
-		availableModels: readonly Pick<Model<string>, "provider" | "id">[];
+		availableModels: readonly Pick<Model, "provider" | "id">[];
 		model?: string;
 	},
 ): SpawnMapping {

@@ -1,33 +1,48 @@
+/// <reference path="../ompPrompts.d.ts" />
 import { createRequire } from "node:module";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	createSyntheticSourceInfo,
-	DefaultPackageManager,
-	DefaultResourceLoader,
-	type ExtensionAPI,
+	type CreateAgentSessionOptions,
+	discoverPromptTemplates,
+	discoverSessionExtensionPaths,
 	type ExtensionFactory,
 	getAgentDir,
-	type InlineExtension,
-	type LoadExtensionsResult,
-	type PathMetadata,
-	type ResourceDiagnostic,
-	type ResourceLoader,
-	SettingsManager,
+	loadSkills,
+	loadSkillsFromDir,
+	type PromptTemplate,
+	type Settings,
 	type Skill,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
+import {
+	reset as forgetCapabilityReads,
+	loadCapability,
+} from "@oh-my-pi/pi-coding-agent/capability";
+import { type Rule, ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import {
+	type SystemPrompt,
+	systemPromptCapability,
+} from "@oh-my-pi/pi-coding-agent/capability/system-prompt";
+import {
+	discoverCustomToolPaths,
+	type ToolPathWithSource,
+} from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
+import bundledSystemPromptTemplate from "@oh-my-pi/pi-coding-agent/prompts/system/system-prompt" with {
+	type: "text",
+};
 import type { SkillCatalogEntry, SlashCommandInfo } from "@thinkrail/contracts";
-import specGraphExtension from "pi-spec-graph";
+import specGraphExtension, { SPEC_BLOCK } from "pi-spec-graph";
+import { WORKFLOW_BLOCK } from "pi-thinkrail-workflow";
+import { TODO_BLOCK } from "pi-todos";
 import {
 	type ExtensionSessionServices,
-	omitDisabledRegistryExtensions,
-	preferRegistryTools,
 	registryInlineExtensions,
 	resolveExtensionSkillRoots,
 	serverExtensions,
 } from "../extensions";
 import { type BundledTrashHelpers, setBundledTrashHelpers } from "../trash";
 import { oversizedImageGuard } from "./imageGuard";
+import { loadHostSettings } from "./piSettings";
 import { requestReviewExtension } from "./requestReviewTool";
 import { reviewToolExtension } from "./reviewTool";
 import { decideSkill, type SkillAdmissionContext } from "./skillAdmission";
@@ -44,7 +59,25 @@ export interface BundledExtensions {
 	factories: BundledExtensionFactory[];
 	skillsDir: string;
 	trashHelpers: BundledTrashHelpers;
-	webAccessFactory: BundledExtensionFactory;
+}
+
+export const HOST_BUILTIN_TOOL_NAMES: readonly string[] = [
+	"read",
+	"bash",
+	"edit",
+	"write",
+	"grep",
+	"glob",
+	"find",
+	"ast_grep",
+	"ast_edit",
+	"web_search",
+];
+
+export const HOST_RULE_BLOCKS: readonly string[] = [SPEC_BLOCK, WORKFLOW_BLOCK, TODO_BLOCK];
+
+export function withHostRules(base: string[]): string[] {
+	return [...base, ...HOST_RULE_BLOCKS.filter((block) => !base.includes(block))];
 }
 
 let bundled: BundledExtensions | undefined;
@@ -52,26 +85,17 @@ let bundled: BundledExtensions | undefined;
 export async function registerBundledRuntime(extensions: BundledExtensions): Promise<void> {
 	bundled = extensions;
 	setBundledTrashHelpers(extensions.trashHelpers);
-	const [{ registerBunOAuthFlows }, { bedrockProviderModule }, { setBedrockProviderModule }] =
-		await Promise.all([
-			import("@earendil-works/pi-ai/bun-oauth"),
-			import("@earendil-works/pi-ai/bedrock-provider"),
-			import("@earendil-works/pi-ai/compat"),
-		]);
-	registerBunOAuthFlows();
-	setBedrockProviderModule(bedrockProviderModule);
 }
 
 let devPaths: { extensionPaths: string[]; skillPaths: string[] } | undefined;
 function resolveDevPaths(): { extensionPaths: string[]; skillPaths: string[] } {
 	if (devPaths) return devPaths;
 	const require = createRequire(import.meta.url);
-	const webAccessPath = require.resolve("pi-web-access/index.ts");
 	const specGraphPath = require.resolve("pi-spec-graph/index.ts");
 	const workflowPath = require.resolve("pi-thinkrail-workflow/index.ts");
 	const todosPath = require.resolve("pi-todos/index.ts");
 	devPaths = {
-		extensionPaths: [webAccessPath, specGraphPath, workflowPath, todosPath],
+		extensionPaths: [specGraphPath, workflowPath, todosPath],
 		skillPaths: [
 			join(dirname(specGraphPath), "skills"),
 			join(dirname(workflowPath), "skills"),
@@ -83,13 +107,9 @@ function resolveDevPaths(): { extensionPaths: string[]; skillPaths: string[] } {
 	return devPaths;
 }
 
-const headlessSearchPolicy: ExtensionFactory = (pi: ExtensionAPI) => {
-	pi.on("tool_call", (event) => {
-		if (event.toolName !== "web_search") return;
-		const input = event.input as Record<string, unknown>;
-		if (input.workflow == null) input.workflow = "none";
-	});
-};
+function bundledSkillPaths(): string[] {
+	return bundled ? [bundled.skillsDir] : resolveDevPaths().skillPaths;
+}
 
 function isUnderPath(path: string, root: string): boolean {
 	const normalizedPath = resolve(path);
@@ -97,25 +117,11 @@ function isUnderPath(path: string, root: string): boolean {
 	return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${sep}`);
 }
 
-function relabelAliasProvenance(skill: Skill, sources: CompatibilitySkillSource[]): Skill {
-	if (skill.sourceInfo.scope !== "temporary") return skill;
-	const source = sources.find((candidate) => isUnderPath(skill.filePath, candidate.path));
-	if (!source) return skill;
-	return {
-		...skill,
-		sourceInfo: createSyntheticSourceInfo(skill.filePath, {
-			source: source.provider,
-			scope: source.scope,
-			origin: "top-level",
-			baseDir: source.path,
-		}),
-	};
-}
-
 function skillGroup(
 	filePath: string,
 	sources: CompatibilitySkillSource[],
 	bundledPaths: string[],
+	level: string | undefined,
 ): { group: string; isPlugin: boolean } {
 	const source = sources.find((candidate) => isUnderPath(filePath, candidate.path));
 	if (source?.plugin) return { group: source.plugin, isPlugin: true };
@@ -124,52 +130,81 @@ function skillGroup(
 	if (bundledPaths.some((path) => isUnderPath(filePath, path))) {
 		return { group: "bundled", isPlugin: false };
 	}
+	if (level === "project") return { group: "project", isPlugin: false };
 	return { group: "pi", isPlugin: false };
 }
 
-function skillsGate(cwd: string, bundledPaths: string[], getCtx: () => SkillAdmissionContext) {
-	return (current: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => {
-		const ctx = getCtx();
-		const sources = discoverCompatibilitySkillSources(cwd);
-		const projectAliasPaths = sources.filter((s) => s.scope === "project").map((s) => s.path);
-		const isProjectAlias = (filePath: string) =>
-			projectAliasPaths.some((path) => isUnderPath(filePath, path));
-		return {
-			...current,
-			skills: current.skills
-				.map((skill) => relabelAliasProvenance(skill, sources))
-				.filter((skill) => {
-					const { group, isPlugin } = skillGroup(skill.filePath, sources, bundledPaths);
-					return (
-						decideSkill(
-							{ name: skill.name, isProjectAlias: isProjectAlias(skill.filePath), group, isPlugin },
-							ctx,
-						) === "load"
-					);
-				}),
-		};
-	};
+const OMP_SKILL_PROVIDERS = new Set(["native", "agents", "custom", "omp-managed"]);
+
+function configuredSkillDirectories(settings: Settings): string[] {
+	const directories: string[] = [];
+	for (const layer of [settings.getProjectSettings(), settings.getGlobalSettings()]) {
+		const skills: unknown = layer.skills;
+		if (typeof skills !== "object" || skills === null) continue;
+		const configured: unknown = Reflect.get(skills, "customDirectories");
+		if (!Array.isArray(configured)) continue;
+		for (const dir of configured) if (typeof dir === "string" && dir) directories.push(dir);
+	}
+	return directories;
 }
 
-function resolveSkillInputs(
+async function candidateSkills(
 	cwd: string,
-	getCtx: () => SkillAdmissionContext,
-): {
-	additionalSkillPaths: string[];
-	skillsOverride: ReturnType<typeof skillsGate>;
-} {
-	const candidates = candidateCompatibilitySkillRoots(cwd);
-	const personal = candidates.filter((source) => source.scope === "user");
-	const project = candidates.filter((source) => source.scope === "project");
-	const bundledSkillPaths = bundled ? [bundled.skillsDir] : resolveDevPaths().skillPaths;
-	return {
-		additionalSkillPaths: [
-			...bundledSkillPaths,
-			...personal.map((source) => source.path),
-			...project.map((source) => source.path),
-		],
-		skillsOverride: skillsGate(cwd, bundledSkillPaths, getCtx),
-	};
+	projectTrusted: boolean,
+	settings?: Settings,
+): Promise<Skill[]> {
+	const hostSettings = settings ?? (await loadHostSettings(cwd, projectTrusted)).settings;
+	const native = await loadSkills({
+		cwd,
+		enableClaudeUser: false,
+		enableClaudeProject: false,
+		enableCodexUser: false,
+		enablePiProject: projectTrusted,
+		enableAgentsProject: projectTrusted,
+		customDirectories: configuredSkillDirectories(hostSettings),
+	});
+	const compatibility = candidateCompatibilitySkillRoots(cwd);
+	const extraRoots = [
+		...bundledSkillPaths().map((dir) => ({ dir, source: "bundled:user" })),
+		...compatibility
+			.filter((root) => root.scope === "user")
+			.map((root) => ({ dir: root.path, source: `${root.provider}:user` })),
+		...compatibility
+			.filter((root) => root.scope === "project")
+			.map((root) => ({ dir: root.path, source: `${root.provider}:project` })),
+	];
+	const extra = await Promise.all(extraRoots.map((root) => loadSkillsFromDir(root)));
+	const ompSkills = native.skills.filter((skill) =>
+		OMP_SKILL_PROVIDERS.has(skill._source?.provider ?? ""),
+	);
+	const seen = new Set<string>();
+	const skills: Skill[] = [];
+	for (const skill of [...ompSkills, ...extra.flatMap((result) => result.skills)]) {
+		if (seen.has(skill.name)) continue;
+		seen.add(skill.name);
+		skills.push(skill);
+	}
+	return skills;
+}
+
+function admittedSkills(
+	cwd: string,
+	skills: readonly Skill[],
+	ctx: SkillAdmissionContext,
+): Skill[] {
+	const sources = discoverCompatibilitySkillSources(cwd);
+	const projectAliasPaths = sources.filter((s) => s.scope === "project").map((s) => s.path);
+	const bundledPaths = bundledSkillPaths();
+	return skills.filter((skill) => {
+		const isProjectAlias = projectAliasPaths.some((path) => isUnderPath(skill.filePath, path));
+		const { group, isPlugin } = skillGroup(
+			skill.filePath,
+			sources,
+			bundledPaths,
+			skill._source?.level,
+		);
+		return decideSkill({ name: skill.name, isProjectAlias, group, isPlugin }, ctx) === "load";
+	});
 }
 
 export function toSkillCommands(skills: readonly Skill[]): SlashCommandInfo[] {
@@ -177,22 +212,19 @@ export function toSkillCommands(skills: readonly Skill[]): SlashCommandInfo[] {
 		name: `skill:${skill.name}`,
 		description: skill.description,
 		source: "skill" as const,
-		sourceInfo: skill.sourceInfo,
+		sourceInfo: skillSourceInfo(skill),
 	}));
 }
 
-let devWebAccessFactory: Promise<BundledExtensionFactory> | undefined;
-const devWebAccess: BundledExtensionFactory = async (pi) => {
-	devWebAccessFactory ??= import("jiti").then(({ createJiti }) =>
-		createJiti(import.meta.url).import<BundledExtensionFactory>("pi-web-access/index.ts", {
-			default: true,
-		}),
-	);
-	await (await devWebAccessFactory)(pi);
-};
-
-function webAccessFactory(): BundledExtensionFactory {
-	return bundled ? bundled.webAccessFactory : devWebAccess;
+function skillSourceInfo(skill: Skill): SlashCommandInfo["sourceInfo"] {
+	const level = skill._source?.level;
+	return {
+		path: skill.filePath,
+		source: skill._source?.provider ?? skill.source,
+		scope: level === "project" ? "project" : "user",
+		origin: "top-level",
+		baseDir: skill.baseDir,
+	};
 }
 
 let disabledExtensionsResolver: () => ReadonlySet<string> = () => new Set();
@@ -210,156 +242,167 @@ export function disabledExtensions(): ReadonlySet<string> {
 
 const isExtensionDisabled = (name: string): boolean => disabledExtensions().has(name);
 
-export function childBaseExtensionFactories(): InlineExtension[] {
+export function childBaseExtensionFactories(): ExtensionFactory[] {
 	return [oversizedImageGuard];
 }
 
-export function childExtensionFactories(): InlineExtension[] {
-	return [
-		headlessSearchPolicy,
-		webAccessFactory(),
-		specGraphExtension,
-		...registryInlineExtensions("childExtensions", isExtensionDisabled),
-	];
+export function childExtensionFactories(): ExtensionFactory[] {
+	return [specGraphExtension, ...registryInlineExtensions("childExtensions", isExtensionDisabled)];
 }
 
-export async function buildResourceLoader(
+function projectScoped(path: string, cwd: string): boolean {
+	return isUnderPath(path, cwd) && !isUnderPath(path, getAgentDir());
+}
+
+async function sessionExtensionPaths(
 	cwd: string,
-	settingsManager: SettingsManager,
-	getAdmission: () => SkillAdmissionContext,
-	excludedExtensionPaths: readonly string[] = [],
-	extraFactories: InlineExtension[] = [],
-	session?: ExtensionSessionServices,
-): Promise<ResourceLoader> {
-	let disabledAtReload = disabledExtensions();
-	const isDisabledAtReload = (name: string): boolean => disabledAtReload.has(name);
-	const sharedFactories: InlineExtension[] = [
-		...registryInlineExtensions("extensions", isDisabledAtReload, serverExtensions, session),
-		headlessSearchPolicy,
+	settings: Settings,
+	projectTrusted: boolean,
+	excludedExtensionPaths: readonly string[],
+): Promise<string[]> {
+	const excluded = new Set(excludedExtensionPaths.map((path) => resolve(path)));
+	const discovered = await discoverSessionExtensionPaths({}, cwd, settings);
+	const kept = discovered.filter(
+		(path) => !excluded.has(resolve(path)) && (projectTrusted || !projectScoped(path, cwd)),
+	);
+	return [...(bundled ? [] : resolveDevPaths().extensionPaths), ...kept];
+}
+
+export function isProjectPromptTemplate(template: PromptTemplate): boolean {
+	return template.source.startsWith("(project");
+}
+
+export function promptTemplateSourceInfo(template: PromptTemplate): SlashCommandInfo["sourceInfo"] {
+	return {
+		path: `prompt:${template.name}`,
+		source: template.source,
+		scope: isProjectPromptTemplate(template) ? "project" : "user",
+		origin: "top-level",
+	};
+}
+
+async function sessionPromptTemplates(
+	cwd: string,
+	projectTrusted: boolean,
+): Promise<PromptTemplate[]> {
+	const templates = await discoverPromptTemplates(cwd, getAgentDir());
+	return projectTrusted
+		? templates
+		: templates.filter((template) => !isProjectPromptTemplate(template));
+}
+
+export type SessionResourceOptions = Pick<
+	CreateAgentSessionOptions,
+	| "extensions"
+	| "preloadedExtensionPaths"
+	| "disableExtensionDiscovery"
+	| "preloadedCustomToolPaths"
+	| "skills"
+	| "promptTemplates"
+	| "slashCommands"
+	| "toolNames"
+	| "enableLsp"
+	| "enableIrc"
+	| "skipPythonPreflight"
+	| "systemPrompt"
+	| "rules"
+	| "customSystemPrompt"
+	| "systemPromptTemplate"
+>;
+
+export interface SessionResourceInput {
+	cwd: string;
+	settings: Settings;
+	projectTrusted: boolean;
+	getAdmission: () => SkillAdmissionContext;
+	excludedExtensionPaths?: readonly string[];
+	extraFactories?: ExtensionFactory[];
+	session?: ExtensionSessionServices;
+	onRegistryLoaded?: (name: string) => void;
+}
+
+async function sessionCustomToolPaths(
+	cwd: string,
+	projectTrusted: boolean,
+): Promise<ToolPathWithSource[]> {
+	const paths = await discoverCustomToolPaths([], cwd, getAgentDir());
+	return projectTrusted ? paths : paths.filter((entry) => entry.source?.level !== "project");
+}
+
+async function untrustedPromptResources(
+	cwd: string,
+): Promise<Pick<SessionResourceOptions, "rules" | "customSystemPrompt" | "systemPromptTemplate">> {
+	const [rules, prompt] = await Promise.all([
+		loadCapability<Rule>(ruleCapability.id, { cwd, agentDir: getAgentDir() }),
+		untrustedSystemPrompt(cwd),
+	]);
+	return { rules: rules.items.filter((rule) => rule._source.level !== "project"), ...prompt };
+}
+
+export type SystemPromptOverride = Pick<
+	SessionResourceOptions,
+	"customSystemPrompt" | "systemPromptTemplate"
+>;
+
+async function untrustedSystemPrompt(cwd: string): Promise<SystemPromptOverride> {
+	const prompts = await loadCapability<SystemPrompt>(systemPromptCapability.id, { cwd });
+	if (!prompts.items.some((prompt) => prompt.level === "project")) return {};
+	const user = prompts.items.filter((prompt) => prompt.level === "user");
+	const text = user.find((prompt) => (prompt.kind ?? "text") === "text");
+	if (text) return { customSystemPrompt: text.content };
+	const template = user.find((prompt) => prompt.kind === "template" && prompt.content.trim());
+	return { systemPromptTemplate: template?.content ?? bundledSystemPromptTemplate };
+}
+
+export function childSystemPrompt(cwd: string): Promise<SystemPromptOverride> {
+	forgetCapabilityReads();
+	return untrustedSystemPrompt(cwd);
+}
+
+export async function buildSessionResources(
+	input: SessionResourceInput,
+): Promise<SessionResourceOptions> {
+	const { cwd, settings, projectTrusted } = input;
+	forgetCapabilityReads();
+	const disabledAtLoad = disabledExtensions();
+	const isDisabledAtLoad = (name: string): boolean => disabledAtLoad.has(name);
+	const sharedFactories: ExtensionFactory[] = [
+		...registryInlineExtensions(
+			"extensions",
+			isDisabledAtLoad,
+			serverExtensions,
+			input.session,
+			input.onRegistryLoaded,
+		),
 		reviewToolExtension,
 		requestReviewExtension,
 		setTitleExtension,
 		oversizedImageGuard,
-		...extraFactories,
+		...(input.extraFactories ?? []),
 	];
-	const extensionFactories = bundled ? [...bundled.factories, ...sharedFactories] : sharedFactories;
-	const skillInputs = resolveSkillInputs(cwd, getAdmission);
-	const agentDir = getAgentDir();
-	const common = {
-		cwd,
-		agentDir,
-		settingsManager,
-		...skillInputs,
-		extensionFactories,
-		extensionsOverride: (result: LoadExtensionsResult) =>
-			preferRegistryTools(omitDisabledRegistryExtensions(result, isDisabledAtReload)),
+	const [extensionPaths, customToolPaths, skills, promptTemplates, promptResources] =
+		await Promise.all([
+			sessionExtensionPaths(cwd, settings, projectTrusted, input.excludedExtensionPaths ?? []),
+			sessionCustomToolPaths(cwd, projectTrusted),
+			candidateSkills(cwd, projectTrusted, settings),
+			sessionPromptTemplates(cwd, projectTrusted),
+			projectTrusted ? {} : untrustedPromptResources(cwd),
+		]);
+	return {
+		extensions: bundled ? [...bundled.factories, ...sharedFactories] : sharedFactories,
+		preloadedExtensionPaths: extensionPaths,
+		disableExtensionDiscovery: true,
+		preloadedCustomToolPaths: customToolPaths,
+		skills: admittedSkills(cwd, skills, input.getAdmission()),
+		promptTemplates,
+		slashCommands: [],
+		toolNames: [...HOST_BUILTIN_TOOL_NAMES],
+		enableLsp: false,
+		enableIrc: false,
+		skipPythonPreflight: true,
+		systemPrompt: withHostRules,
+		...promptResources,
 	};
-	const devExtensionPaths = bundled ? [] : resolveDevPaths().extensionPaths;
-	const applyCurrentPolicy = (): void => {
-		settingsManager.setProjectTrusted(getAdmission().piResourceTrusted);
-		disabledAtReload = disabledExtensions();
-	};
-
-	const excluded = new Set(excludedExtensionPaths.map((path) => resolve(path)));
-	if (excluded.size === 0) {
-		const loader = new DefaultResourceLoader({
-			...common,
-			additionalExtensionPaths: devExtensionPaths,
-		});
-		const reloadTrusted = loader.reload.bind(loader);
-		loader.reload = async (options) => {
-			applyCurrentPolicy();
-			await reloadTrusted(options);
-		};
-		await loader.reload();
-		return loader;
-	}
-
-	// pi keeps a reference to this array and reads it on every reload, so it is rebuilt in place.
-	const additionalExtensionPaths: string[] = [...devExtensionPaths];
-	const packageManager = new DefaultPackageManager({
-		cwd,
-		agentDir,
-		settingsManager,
-		builtinExtensions: builtinExtensionNames(extensionFactories),
-	});
-	let discoveredMetadata = new Map<string, PathMetadata>();
-	const resolveExclusionPaths = async (): Promise<void> => {
-		await settingsManager.reload();
-		const resolvedResources = await packageManager.resolve();
-		const next: string[] = [];
-		const metadata = new Map<string, PathMetadata>();
-		for (const resource of resolvedResources.extensions) {
-			if (!resource.enabled) continue;
-			if (resource.path.startsWith(BUILTIN_EXTENSION_PREFIX)) {
-				next.push(resource.path);
-				continue;
-			}
-			if (excluded.has(resolve(resource.path))) continue;
-			next.push(resource.path);
-			metadata.set(resolve(resource.path), resource.metadata);
-		}
-		additionalExtensionPaths.splice(
-			0,
-			additionalExtensionPaths.length,
-			...devExtensionPaths,
-			...next,
-		);
-		discoveredMetadata = metadata;
-	};
-	const loader = new DefaultResourceLoader({
-		...common,
-		noExtensions: true,
-		additionalExtensionPaths,
-	});
-	const reloadResolved = loader.reload.bind(loader);
-	loader.reload = async (options) => {
-		applyCurrentPolicy();
-		await resolveExclusionPaths();
-		await reloadResolved(options);
-		relabelDiscoveredExtensions(loader, discoveredMetadata);
-	};
-	await loader.reload();
-	return loader;
-}
-
-const BUILTIN_EXTENSION_PREFIX = "builtin:";
-
-export async function isBuiltinExtensionEnabled(
-	cwd: string,
-	projectTrusted: boolean,
-	name: string,
-): Promise<boolean> {
-	const agentDir = getAgentDir();
-	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
-	const packageManager = new DefaultPackageManager({
-		cwd,
-		agentDir,
-		settingsManager,
-		builtinExtensions: [name],
-	});
-	const { extensions } = await packageManager.resolve(async () => "skip");
-	const path = `${BUILTIN_EXTENSION_PREFIX}${name}`;
-	return extensions.some((resource) => resource.path === path && resource.enabled);
-}
-
-function builtinExtensionNames(factories: readonly InlineExtension[]): string[] {
-	return factories.flatMap((entry) =>
-		typeof entry !== "function" && entry.builtin ? [entry.name] : [],
-	);
-}
-
-function relabelDiscoveredExtensions(
-	loader: DefaultResourceLoader,
-	discoveredMetadata: ReadonlyMap<string, PathMetadata>,
-): void {
-	for (const extension of loader.getExtensions().extensions) {
-		const metadata = discoveredMetadata.get(resolve(extension.resolvedPath));
-		if (!metadata) continue;
-		extension.sourceInfo = createSyntheticSourceInfo(extension.path, metadata);
-		for (const command of extension.commands.values()) command.sourceInfo = extension.sourceInfo;
-		for (const tool of extension.tools.values()) tool.sourceInfo = extension.sourceInfo;
-	}
 }
 
 function admissionCacheKey(cwd: string, ctx: SkillAdmissionContext): string {
@@ -384,21 +427,9 @@ export async function listSkillCommands(
 	const cacheKey = admissionCacheKey(cwd, admission);
 	const cached = skillListCache.get(cacheKey);
 	if (cached && Date.now() - cached.at < SKILL_LIST_TTL_MS) return cached.value;
-	const settingsManager = SettingsManager.create(cwd, getAgentDir(), {
-		projectTrusted: admission.piResourceTrusted,
-	});
-	const loader = new DefaultResourceLoader({
-		cwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		...resolveSkillInputs(cwd, () => admission),
-		noExtensions: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await loader.reload();
-	const value = toSkillCommands(loader.getSkills().skills);
+	forgetCapabilityReads();
+	const skills = await candidateSkills(cwd, admission.piResourceTrusted);
+	const value = toSkillCommands(admittedSkills(cwd, skills, admission));
 	skillListCache.set(cacheKey, { at: Date.now(), value });
 	return value;
 }
@@ -408,22 +439,10 @@ export async function listProjectAliasSkillNames(cwd: string): Promise<string[]>
 		.filter((source) => source.scope === "project")
 		.map((source) => source.path);
 	if (projectPaths.length === 0) return [];
-	const settingsManager = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
-	const loader = new DefaultResourceLoader({
-		cwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		additionalSkillPaths: projectPaths,
-		noExtensions: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await loader.reload();
-	return loader
-		.getSkills()
-		.skills.filter((skill) => projectPaths.some((path) => isUnderPath(skill.filePath, path)))
-		.map((skill) => skill.name);
+	const results = await Promise.all(
+		projectPaths.map((dir) => loadSkillsFromDir({ dir, source: "project" })),
+	);
+	return results.flatMap((result) => result.skills.map((skill) => skill.name));
 }
 
 export async function listSkillCatalog(
@@ -431,39 +450,22 @@ export async function listSkillCatalog(
 	admission: SkillAdmissionContext,
 ): Promise<SkillCatalogEntry[]> {
 	const discovered = discoverCompatibilitySkillSources(cwd);
-	const personal = discovered.filter((s) => s.scope === "user");
-	const project = discovered.filter((s) => s.scope === "project");
-	const bundledSkillPaths = bundled ? [bundled.skillsDir] : resolveDevPaths().skillPaths;
-	const settingsManager = SettingsManager.create(cwd, getAgentDir(), {
-		projectTrusted: admission.piResourceTrusted,
-	});
-	const loader = new DefaultResourceLoader({
-		cwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		additionalSkillPaths: [
-			...bundledSkillPaths,
-			...personal.map((s) => s.path),
-			...project.map((s) => s.path),
-		],
-		skillsOverride: (current) => ({
-			...current,
-			skills: current.skills.map((skill) => relabelAliasProvenance(skill, discovered)),
-		}),
-		noExtensions: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await loader.reload();
-	return loader.getSkills().skills.map((skill) => {
+	const bundledPaths = bundledSkillPaths();
+	forgetCapabilityReads();
+	const skills = await candidateSkills(cwd, admission.piResourceTrusted);
+	return skills.map((skill) => {
 		const source = discovered.find((candidate) => isUnderPath(skill.filePath, candidate.path));
 		const gated = source?.scope === "project";
-		const { group, isPlugin } = skillGroup(skill.filePath, discovered, bundledSkillPaths);
+		const { group, isPlugin } = skillGroup(
+			skill.filePath,
+			discovered,
+			bundledPaths,
+			skill._source?.level,
+		);
 		return {
 			name: skill.name,
 			description: skill.description,
-			sourceInfo: skill.sourceInfo,
+			sourceInfo: skillSourceInfo(skill),
 			gated,
 			group,
 			...(source?.plugin ? { plugin: source.plugin } : {}),

@@ -1,26 +1,29 @@
-import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import {
 	type AgentSession,
+	type CreateAgentSessionOptions,
 	createAgentSession,
-	DefaultResourceLoader,
 	type ExtensionFactory,
 	type ExtensionUIContext,
-	getAgentDir,
-	ModelRuntime,
+	type ModelRegistry,
 	SessionManager,
-	type SessionShutdownEvent,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+	Settings,
+} from "@oh-my-pi/pi-coding-agent";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { createDelegationService } from "pi-delegation";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+	registerFaux,
+} from "pi-faux";
 import { Check } from "typebox/value";
 import standalone, {
 	createDagExtension,
@@ -37,6 +40,7 @@ import standalone, {
 } from "../index.ts";
 
 const root = mkdtempSync(join(tmpdir(), "dag-adapter-"));
+const agentDir = join(root, "agent");
 const controller = createFauxCore({
 	provider: "dag-controller",
 	api: "dag-controller",
@@ -48,8 +52,10 @@ const worker = createFauxCore({
 	tokensPerSecond: 100_000,
 });
 const workerModel = { provider: worker.provider, id: worker.getModel().id };
-let runtime: ModelRuntime;
-let previousAgentDir: string | undefined;
+let runtime: ModelRegistry;
+let controllerModel: Model<Api>;
+let workerEngineModel: Model<Api>;
+let isolated: IsolatedAgentDir | undefined;
 let previousOffline: string | undefined;
 let serial = 0;
 const sessions: AgentSession[] = [];
@@ -62,37 +68,24 @@ const failure = {
 } as const;
 
 beforeAll(async () => {
-	previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	isolated = isolateAgentDir(agentDir);
 	previousOffline = process.env.PI_OFFLINE;
-	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 	process.env.PI_OFFLINE = "1";
-	runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
-	for (const faux of [controller, worker])
-		runtime.registerProvider(faux.provider, {
-			api: faux.api,
-			baseUrl: "http://faux.invalid",
-			apiKey: "isolated-synthetic",
-			streamSimple: faux.streamSimple,
-			models: faux.models,
-		});
+	runtime = (await createFauxModelRegistry(Settings.isolated({}))).modelRegistry;
+	controllerModel = registerFaux(runtime, controller);
+	workerEngineModel = registerFaux(runtime, worker);
 });
 afterEach(async () => {
 	for (const release of releases.splice(0)) release();
 	for (const session of sessions.splice(0)) {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		session.dispose();
+		await session.dispose();
 		expect(errors.get(session)).toEqual([]);
 	}
 	errors.clear();
 	for (const service of services.splice(0)) await service.close();
 });
 afterAll(() => {
-	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	isolated?.restore();
 	if (previousOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = previousOffline;
 	rmSync(root, { recursive: true, force: true });
@@ -145,45 +138,62 @@ function fixture() {
 	});
 	return { service, owner };
 }
-async function resources(factory: ExtensionFactory, cwd: string) {
-	const settingsManager = SettingsManager.inMemory({
-		compaction: { enabled: false },
-		retry: { enabled: false },
-	});
-	const resourceLoader = new DefaultResourceLoader({
+async function loaded(
+	factory: ExtensionFactory,
+	cwd: string,
+	manager = SessionManager.inMemory(cwd),
+): Promise<AgentSession> {
+	mkdirSync(cwd, { recursive: true });
+	const options: CreateAgentSessionOptions = {
 		cwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		extensionFactories: [factory],
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
+		agentDir,
+		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+		modelRegistry: runtime,
+		model: controllerModel,
+		sessionManager: manager,
+		extensions: [factory],
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		toolNames: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
+		bindProcessState: false,
+	};
+	const { session, extensionsResult } = await createAgentSession(options);
+	expect(extensionsResult.errors).toEqual([]);
+	return session;
+}
+function initialize(
+	session: AgentSession,
+	reportRuntimeError: (message: string) => void,
+	uiContext?: ExtensionUIContext,
+) {
+	return initializeExtensions(session, {
+		reportSendError: (_action, error) => reportRuntimeError(error.message),
+		reportRuntimeError: (error) => reportRuntimeError(error.error),
+		...(uiContext ? { uiContext, mode: "rpc" as const } : {}),
 	});
-	await resourceLoader.reload();
-	expect(resourceLoader.getExtensions().errors).toEqual([]);
-	return { resourceLoader, settingsManager };
 }
 async function sessionWith(
 	factory: ExtensionFactory,
 	cwd = join(root, `workspace-${serial++}`),
 	manager = SessionManager.inMemory(cwd),
 ) {
-	mkdirSync(cwd, { recursive: true });
-	const { session } = await createAgentSession({
-		cwd,
-		...(await resources(factory, cwd)),
-		sessionManager: manager,
-		modelRuntime: runtime,
-		model: controller.getModel(),
-		noTools: "builtin",
-	});
+	const session = await loaded(factory, cwd, manager);
 	sessions.push(session);
 	const reported: string[] = [];
 	errors.set(session, reported);
-	await session.bindExtensions({ mode: "print", onError: (error) => reported.push(error.error) });
+	await initialize(session, (message) => reported.push(message));
 	return session;
+}
+function runner(session: AgentSession) {
+	const extensions = session.extensionRunner;
+	if (!extensions) throw new Error("Missing extension runner");
+	return extensions;
 }
 async function tool<T>(
 	session: AgentSession,
@@ -192,17 +202,27 @@ async function tool<T>(
 	id = `invocation-${serial++}`,
 	signal?: AbortSignal,
 ): Promise<DagResult<T>> {
-	const definition = session.getToolDefinition(name);
+	const extensions = runner(session);
+	const definition = extensions.getRegisteredTool(name)?.definition;
 	if (!definition) throw new Error(`Missing tool ${name}`);
 	const result = await definition.execute(
 		id,
 		args,
 		signal,
 		undefined,
-		session.extensionRunner.createToolContext(id, signal),
+		extensions.createContext(undefined, { toolName: name, ...(signal ? { signal } : {}) }),
 	);
 	expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.details, null, 2) }]);
 	return result.details as DagResult<T>;
+}
+function parameters(session: AgentSession, name: string) {
+	const definition = runner(session).getRegisteredTool(name)?.definition;
+	if (!definition) throw new Error(`Missing tool ${name}`);
+	return definition.parameters;
+}
+async function eventually(check: () => boolean) {
+	for (let attempt = 0; attempt < 500 && !check(); attempt++) await Bun.sleep(10);
+	expect(check()).toBe(true);
 }
 async function snapshot(session: AgentSession, dagId: string) {
 	return value(await tool<DagSnapshot>(session, "dag_read", { query: { kind: "get", dagId } }));
@@ -218,15 +238,18 @@ async function until(
 	}
 	throw new Error("DAG did not reach expected state");
 }
-async function shutdown(session: AgentSession, reason: SessionShutdownEvent["reason"]) {
-	await session.extensionRunner.emit({ type: "session_shutdown", reason });
+async function shutdown(
+	session: AgentSession,
+	reason: "new" | "resume" | "fork" | "reload" | "quit",
+) {
+	if (reason === "reload" || reason === "quit")
+		await runner(session).emit({ type: "session_shutdown" });
+	else
+		await runner(session).emit({ type: "session_switch", reason, previousSessionFile: undefined });
 }
-function ui(session: AgentSession, confirm: ExtensionUIContext["confirm"]) {
-	const notify = spyOn(session.extensionRunner.getUIContext(), "notify");
-	session.extensionRunner.setUIContext(
-		{ ...session.extensionRunner.getUIContext(), confirm },
-		"rpc",
-	);
+async function ui(session: AgentSession, confirm: ExtensionUIContext["confirm"]) {
+	const notify = mock<ExtensionUIContext["notify"]>(() => {});
+	await initialize(session, () => {}, { ...runner(session).getUIContext(), confirm, notify });
 	return notify;
 }
 async function create(session: AgentSession, graph = definition()) {
@@ -261,7 +284,7 @@ test("tools preserve exact requests and trusted invocation identity; reads proje
 			service: f.service,
 			executionContext(ctx) {
 				projections++;
-				return { kind: "runtime", modelRuntime: runtime, cwd: ctx.cwd, model: workerModel };
+				return { modelRegistry: runtime, cwd: ctx.cwd, model: workerModel };
 			},
 		}),
 	);
@@ -316,7 +339,7 @@ test("tools preserve exact requests and trusted invocation identity; reads proje
 	}
 });
 
-test("schemas, cancellation and real pi error rendering preserve current context and supplied versions", async () => {
+test("schemas, cancellation and real engine error rendering preserve current context and supplied versions", async () => {
 	const f = boundary();
 	const session = await sessionWith(createDagExtension({ service: f.service }));
 	const request: DagCommandRequest = {
@@ -325,18 +348,17 @@ test("schemas, cancellation and real pi error rendering preserve current context
 		expectedVersion: 23,
 		command: { kind: "pause" },
 	};
-	const schema = session.getToolDefinition("dag_control")?.parameters;
-	const reads = session.getToolDefinition("dag_read")?.parameters;
-	if (!schema || !reads) throw new Error("Missing tool schemas");
+	const schema = parameters(session, "dag_control");
+	const reads = parameters(session, "dag_read");
 	expect(Check(schema, request)).toBe(true);
 	expect(Check(schema, { ...request, actor: "human" })).toBe(false);
 	expect(Check(schema, { ...request, command: { kind: "anything" } })).toBe(false);
 	expect(Check(reads, { query: { kind: "sql", text: "select *" } })).toBe(false);
-	await session.setModel(worker.getModel());
+	await session.setModel(workerEngineModel);
 	await tool(session, "dag_control", request);
-	expect(f.service.bind.mock.calls.at(-1)?.[0].execution).toEqual({
-		kind: "registry",
-		modelRegistry: session.extensionRunner.createContext().modelRegistry,
+	const execution: unknown = f.service.bind.mock.calls.at(-1)?.[0].execution;
+	expect(execution).toEqual({
+		modelRegistry: runner(session).createContext().modelRegistry,
 		cwd: session.sessionManager.getCwd(),
 		model: workerModel,
 		thinkingLevel: session.thinkingLevel,
@@ -450,7 +472,7 @@ test("operator requires confirmation, preserves human provenance, and cannot out
 		expect(JSON.parse(message)).toEqual(request);
 		return approved;
 	});
-	const notify = ui(session, confirm);
+	const notify = await ui(session, confirm);
 	await session.prompt("/dag not-json");
 	await session.prompt(`/dag ${JSON.stringify({ ...request, actor: "human" })}`);
 	expect(notify).toHaveBeenCalledTimes(2);
@@ -473,6 +495,7 @@ test("operator requires confirmation, preserves human provenance, and cannot out
 	});
 	expect(binding?.mainHistory?.cut).toEqual({ kind: "at-entry", entryId });
 	expect(binding?.signal.aborted).toBe(true);
+	await eventually(() => session.messages.at(-1)?.role === "custom");
 	expect(session.messages.at(-1)).toMatchObject({
 		role: "custom",
 		customType: "dag-command",
@@ -483,7 +506,7 @@ test("operator requires confirmation, preserves human provenance, and cannot out
 		const entered = latch(),
 			confirmed = latch();
 		let signal: AbortSignal | undefined;
-		ui(switched, async (_title, _message, options) => {
+		await ui(switched, async (_title, _message, options) => {
 			signal = options?.signal;
 			entered.release();
 			await confirmed.promise;
@@ -501,7 +524,7 @@ test("operator requires confirmation, preserves human provenance, and cannot out
 	expect(f.service.close).not.toHaveBeenCalled();
 });
 
-test("notice delivery waits for idle, wakes on agent_settled only, and stays passive and revocable", async () => {
+test("notice delivery waits for idle, wakes on terminal agent_end only, and stays passive and revocable", async () => {
 	const f = boundary();
 	const session = await sessionWith(createDagExtension({ service: f.service }));
 	const binding = f.service.bind.mock.calls[0]?.[0];
@@ -528,20 +551,20 @@ test("notice delivery waits for idle, wakes on agent_settled only, and stays pas
 	const running = session.prompt("Stay busy");
 	await entered.promise;
 	expect(sink.tryDeliver(notice)).toBe("deferred");
-	await session.extensionRunner.emit({ type: "agent_end", messages: [] });
+	await runner(session).emit({ type: "agent_end", messages: [], willContinue: true });
 	expect(ready).not.toHaveBeenCalled();
 	expect(notices(session)).toEqual([]);
 	finish.release();
 	await running;
 	expect(ready).toHaveBeenCalledTimes(1);
 	expect(sink.tryDeliver(notice)).toBe("submitted");
-	expect(notices(session)).toHaveLength(1);
+	await eventually(() => notices(session).length === 1);
 	expect(notices(session)[0]).toMatchObject({ details: notice });
 	const calls = controller.state.callCount;
 	await Bun.sleep(30);
 	expect(controller.state.callCount).toBe(calls);
 	await shutdown(session, "resume");
-	await session.extensionRunner.emit({ type: "agent_settled", aborted: false });
+	await runner(session).emit({ type: "agent_end", messages: [] });
 	expect(ready).toHaveBeenCalledTimes(1);
 	expect(binding.signal.aborted).toBe(true);
 	expect(sink.tryDeliver(notice)).toBe("deferred");
@@ -556,7 +579,7 @@ async function replacedModule() {
 	return loaded.default;
 }
 
-test("standalone owners survive replaced modules and new/resume/fork, including cwd aliases", async () => {
+test("standalone owners survive replaced modules and new/resume/fork switches, including cwd aliases", async () => {
 	const first = await sessionWith(standalone);
 	const entered = latch(),
 		finish = latch();
@@ -577,7 +600,7 @@ test("standalone owners survive replaced modules and new/resume/fork, including 
 	symlinkSync(first.sessionManager.getCwd(), alias);
 	for (const reason of ["new", "resume", "fork"] as const) {
 		await shutdown(current, reason);
-		current.dispose();
+		expect((await snapshot(current, receipt.dagId)).executionOwner).toBe("local");
 		current = await sessionWith(await replacedModule(), alias);
 		const state = await snapshot(current, receipt.dagId);
 		expect(state.mode).toBe("running");
@@ -649,31 +672,33 @@ test.each([
 });
 
 test("standalone canonicalizes an initially absent agent root through its existing symlink ancestor", async () => {
-	const original = getAgentDir();
 	const base = join(root, `canonical-${serial++}`);
 	const alias = `${base}-alias`;
 	mkdirSync(base);
 	symlinkSync(base, alias);
+	let scoped = isolateAgentDir(join(alias, "missing", "agent"));
 	try {
-		process.env.PI_CODING_AGENT_DIR = join(alias, "missing", "agent");
 		const first = await sessionWith(await replacedModule());
 		const receipt = await create(first);
 		await shutdown(first, "new");
-		process.env.PI_CODING_AGENT_DIR = join(base, "missing", "agent");
+		scoped.restore();
+		scoped = isolateAgentDir(join(base, "missing", "agent"));
 		const replacement = await sessionWith(await replacedModule(), first.sessionManager.getCwd());
 		expect((await snapshot(replacement, receipt.dagId)).executionOwner).toBe("local");
 		await shutdown(replacement, "quit");
 		const fresh = await sessionWith(await replacedModule(), first.sessionManager.getCwd());
 		expect((await snapshot(fresh, receipt.dagId)).executionOwner).toBe("none");
 	} finally {
-		process.env.PI_CODING_AGENT_DIR = original;
+		scoped.restore();
 	}
 });
 
 test("factory loading is lazy and incompatible process registries fail loudly across module replacement", async () => {
 	const key = Symbol.for("pi-dag.standalone-owners");
 	expect(Reflect.get(globalThis, key)).toBeUndefined();
-	await resources(await replacedModule(), root);
+	const unbound = await loaded(await replacedModule(), root);
+	expect(Reflect.get(globalThis, key)).toBeUndefined();
+	await unbound.dispose();
 	expect(Reflect.get(globalThis, key)).toBeUndefined();
 	for (const incompatible of [
 		{ version: 0, owners: new Map() },

@@ -2,19 +2,21 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import type { PiEvent } from "@thinkrail/contracts";
 import {
 	createFauxCore,
 	fauxAssistantMessage,
 	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import type { PiEvent } from "@thinkrail/contracts";
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	configurePiRuntime,
 	configurePiRuntimeFactory,
 	createSession,
 	getSessionWorkspaceId,
+	ModelRuntime,
 	promptSession,
 	removeSession,
 	setSessionManagerFactory,
@@ -32,12 +34,12 @@ import { createServer, type RunningServer } from "./server";
 
 const saved = {
 	THINKRAIL_DATA_DIR: process.env.THINKRAIL_DATA_DIR,
-	PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
 	PI_OFFLINE: process.env.PI_OFFLINE,
 };
 let directory: string;
 let repo: string;
 let server: RunningServer | undefined;
+let isolatedAgentDir: IsolatedAgentDir | undefined;
 
 function sh(...args: string[]): void {
 	const result = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "pipe" });
@@ -47,7 +49,7 @@ function sh(...args: string[]): void {
 beforeEach(async () => {
 	directory = mkdtempSync(join(tmpdir(), "thinkrail-turn-shutdown-"));
 	process.env.THINKRAIL_DATA_DIR = join(directory, "data");
-	process.env.PI_CODING_AGENT_DIR = join(directory, "pi");
+	isolatedAgentDir = isolateAgentDir(join(directory, "pi"));
 	process.env.PI_OFFLINE = "1";
 	repo = join(directory, "repo");
 	mkdirSync(repo);
@@ -85,6 +87,8 @@ afterEach(async () => {
 	await resetJbcentralStateForTests();
 	configurePiRuntimeFactory();
 	configurePiRuntime(null);
+	isolatedAgentDir?.restore();
+	isolatedAgentDir = undefined;
 	rmSync(directory, { recursive: true, force: true });
 	for (const [key, value] of Object.entries(saved)) {
 		if (value === undefined) delete process.env[key];
@@ -109,13 +113,17 @@ test.each([
 	});
 	const realObserve = TurnTracker.prototype.observe;
 	let recording: Promise<void> | undefined;
+	const settled = Promise.withResolvers<void>();
 	const observeSpy = spyOn(TurnTracker.prototype, "observe").mockImplementation(function (
 		this: TurnTracker,
 		sessionId: string,
 		event: PiEvent,
 	) {
 		const job = realObserve.call(this, sessionId, event);
-		if (event.type === "agent_settled") recording = job;
+		if (event.type === "agent_settled") {
+			recording = job;
+			settled.resolve();
+		}
 		return job;
 	});
 	try {
@@ -147,7 +155,7 @@ test.each([
 			fauxAssistantMessage("Done"),
 		]);
 		const runtime = await ModelRuntime.create({
-			credentials: new InMemoryCredentialStore(),
+			inMemoryCredentials: true,
 			modelsPath: null,
 			allowModelNetwork: false,
 		});
@@ -167,6 +175,7 @@ test.each([
 			model: toWireModel(faux.getModel()),
 		});
 		await promptSession(sessionId, "Write feature.ts");
+		await settled.promise;
 		expect(recording).toBeDefined();
 		expect(listTurns("w1")).toEqual([]);
 		if (teardown === "removeSession") {

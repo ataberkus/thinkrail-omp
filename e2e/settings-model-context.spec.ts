@@ -1,14 +1,16 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
 import { CONTEXT_WINDOW_SETTINGS_PROTOCOL_VERSION, type Workspace } from "@thinkrail/contracts";
 import { openWorkspaceChat } from "./fixtures/app";
+import { resolveBunExecutable } from "./fixtures/executables";
 import { connectCentral, openProviders, waitForCentralState } from "./fixtures/jbcentral";
 import { E2E_CENTRAL_EXTENSION_SOURCE, E2E_PI_AGENT_DIR } from "./fixtures/paths";
 import { shot } from "./fixtures/screenshots";
 import { E2eWire } from "./fixtures/wire";
 
-const modelsPath = join(E2E_PI_AGENT_DIR, "models.json");
+const modelsPath = join(E2E_PI_AGENT_DIR, "models.yml");
 const modelId = "gpt-5.5";
 const providers = ["openai", "openai-codex", "context-proxy"];
 const seed = {
@@ -54,7 +56,14 @@ async function choose(
 }
 
 function savedConfig(): unknown {
-	return JSON.parse(readFileSync(modelsPath, "utf8"));
+	const parse =
+		'process.stdout.write(JSON.stringify(Bun.YAML.parse(require("node:fs").readFileSync(process.env.MODELS_FILE, "utf8"))))';
+	return JSON.parse(
+		execFileSync(resolveBunExecutable(), ["-e", parse], {
+			encoding: "utf8",
+			env: { ...process.env, MODELS_FILE: modelsPath },
+		}),
+	);
 }
 
 test.beforeEach(async ({ page }) => {

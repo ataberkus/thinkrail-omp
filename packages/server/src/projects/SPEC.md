@@ -59,16 +59,15 @@ bootstrap it into one so it can be opened.
   as acknowledged so later arrivals remain pending; and disabled skill/group sets form the project baseline
   beneath any workspace override. The host composes discovery with these mutation operations; this module
   stores no skill catalog and imports no agent code. Project records also carry the pi-level trust state
-  `piResourceTrust` (trust for the project's native `.pi/` resources — settings, extensions, skills,
-  prompts, themes, `SYSTEM.md`, subagent definitions — distinct from the alias-skill grant). A newly added
-  project starts `untrusted`, or `granted` when pi itself already trusts its path; that answer arrives
-  through the host-injected `setPiTrustSeed` (this module imports no pi code). There is **no
+  `piResourceTrust` (trust for the project's native `.omp/` resources — settings, extensions, skills,
+  prompts, `SYSTEM.md`, rules, subagent definitions — distinct from the alias-skill grant). A newly added
+  project starts `untrusted`: omp keeps no trust store of its own to seed it from. There is **no
   grandfathering**: a record that predates the field is left as stored and reads as untrusted, so a project
   added before pi-level trust existed asks once through the trust notice instead of keeping code-running
   resources nobody consented to (user decision, PR #690 review). pi-level trust never enables MCP by itself:
   the record also carries `mcpApprovals` (repo-defined MCP server name → fingerprint of the whole original
   project-file entry), `mcpOverrides` (per-project enablement/exposure of user-level servers, kept out of
-  the tracked `.pi/mcp.json`) and `mcpToolGrants` (per server, the "Always allow" tools and the `target` of
+  the tracked `.omp/mcp.json`) and `mcpToolGrants` (per server, the "Always allow" tools and the `target` of
   the entry they were granted for — out of the repository so it can never ship pre-granted).
   `grantProjectMcpTool(id, name, target, tool)` appends a tool, starting the list over when `target`
   changed; `revokeProjectMcpTool` drops one and removes the server, then the field, once empty. Both store
@@ -86,8 +85,7 @@ bootstrap it into one so it can be opened.
   `refreshRecentProjectFolders`, `closeProject`, `renameProject`,
   `getProjects`, `setProjectPublisher`, `inspectProjectPath`, `initProject`, `setProjectTrust`,
   `setProjectSkillEnabled`, `setProjectGroupEnabled`, `acknowledgeProjectSkills`,
-  `approveProjectMcpServer`, `setProjectMcpOverride`, `grantProjectMcpTool`, `revokeProjectMcpTool`,
-  `setPiTrustSeed`.
+  `approveProjectMcpServer`, `setProjectMcpOverride`, `grantProjectMcpTool`, `revokeProjectMcpTool`.
 - **Allowed deps:** `persistence`; the `git` sub-module (shared `git()` runner, which now owns the
   environment its children spawn under — this module passes none); `contracts` (`Project`, `ProjectPathStatus`);
   `shared/codedError` (the two named open failures); Node/Bun.

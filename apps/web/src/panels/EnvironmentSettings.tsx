@@ -28,7 +28,7 @@ import { SettingsNotice } from "./SettingsNotice";
 const INPUT_CLASS =
 	"w-full min-w-0 rounded-sm border border-control-border-default bg-control-bg px-8 py-4 tr-code-text text-text-default outline-none placeholder:text-text-muted focus-visible:border-control-border-active";
 
-const AGENT_DIR_PLACEHOLDER = "~/.pi/agent";
+const AGENT_DIR_PLACEHOLDER = "~/.omp/agent";
 const NAME_PLACEHOLDER = "NAME";
 const VALUE_PLACEHOLDER = "value";
 const AGENT_DIR_VAR = "PI_CODING_AGENT_DIR";

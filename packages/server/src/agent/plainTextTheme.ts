@@ -1,8 +1,6 @@
-import { Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
+import { Theme, type ThemeBg, type ThemeColor } from "@oh-my-pi/pi-coding-agent";
 
-type ThemeBg = Parameters<Theme["bg"]>[0];
-
-const FG_COLORS: ConstructorParameters<typeof Theme>[0] = {
+const FG_COLORS: Record<ThemeColor, string> = {
 	accent: "",
 	border: "",
 	borderAccent: "",
@@ -13,9 +11,8 @@ const FG_COLORS: ConstructorParameters<typeof Theme>[0] = {
 	muted: "",
 	dim: "",
 	text: "",
+	assistantMessageText: "",
 	thinkingText: "",
-	scrollbarTrack: "",
-	scrollbarThumb: "",
 	userMessageText: "",
 	customMessageText: "",
 	customMessageLabel: "",
@@ -51,23 +48,42 @@ const FG_COLORS: ConstructorParameters<typeof Theme>[0] = {
 	thinkingXhigh: "",
 	thinkingMax: "",
 	bashMode: "",
+	pythonMode: "",
+	statusLineSep: "",
+	statusLineModel: "",
+	statusLinePath: "",
+	statusLineGitClean: "",
+	statusLineGitDirty: "",
+	statusLineContext: "",
+	statusLineSpend: "",
+	statusLineStaged: "",
+	statusLineDirty: "",
+	statusLineUntracked: "",
+	statusLineOutput: "",
+	statusLineCost: "",
+	statusLineSubagents: "",
 };
 
-const BG_COLORS: ConstructorParameters<typeof Theme>[1] = {
+const BG_COLORS: Record<ThemeBg, string> = {
 	selectedBg: "",
 	userMessageBg: "",
 	customMessageBg: "",
 	toolPendingBg: "",
 	toolSuccessBg: "",
 	toolErrorBg: "",
+	statusLineBg: "",
 };
 
 class PlainTextTheme extends Theme {
 	constructor() {
-		super(FG_COLORS, BG_COLORS, "truecolor", { name: "thinkrail-web" });
+		super(FG_COLORS, BG_COLORS, "truecolor", "unicode", {});
 	}
 
 	override fg(_color: ThemeColor, text: string): string {
+		return text;
+	}
+
+	override fgResolved(_color: ThemeColor, text: string): string {
 		return text;
 	}
 
@@ -75,7 +91,11 @@ class PlainTextTheme extends Theme {
 		return text;
 	}
 
-	override style(text: string): string {
+	override bgFill(_color: ThemeBg, text: string): string {
+		return text;
+	}
+
+	override fgOnBg(_color: ThemeColor, _background: ThemeBg, text: string): string {
 		return text;
 	}
 
@@ -105,6 +125,18 @@ class PlainTextTheme extends Theme {
 
 	override getBgAnsi(_color: ThemeBg): string {
 		return "";
+	}
+
+	override getFgOnBgAnsi(_color: ThemeColor, _background: ThemeBg): string {
+		return "";
+	}
+
+	override getContrastFgAnsi(_fillColor: ThemeColor): string {
+		return "";
+	}
+
+	override getLangIconStyled(lang: string | undefined): string {
+		return this.getLangIcon(lang);
 	}
 }
 

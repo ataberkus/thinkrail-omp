@@ -944,9 +944,9 @@ const handlers: WsHandlers = {
 	"workspace.setSkillOverride": (p) => {
 		return setWorkspaceSkillOverride(p.id, p.name, p.override);
 	},
-	"workspace.setSubagentsOverride": (p) => {
+	"workspace.setSubagentsOverride": async (p) => {
 		const workspace = setWorkspaceSubagentsOverride(p.id, p.override);
-		refreshSubagentTools(p.id);
+		await refreshSubagentTools(p.id);
 		return workspace;
 	},
 	"workspace.setSubagentMaxConcurrent": (p) => {

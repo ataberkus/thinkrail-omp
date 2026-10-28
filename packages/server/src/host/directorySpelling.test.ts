@@ -11,10 +11,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { parseSessionContent, SessionManager } from "@oh-my-pi/pi-coding-agent";
 import type { HistoryScope, Workspace } from "@thinkrail/contracts";
+import {
+	createFauxCore,
+	fauxAssistantMessage,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import {
 	admissionContextFor,
 	configurePiRuntime,
@@ -24,6 +28,7 @@ import {
 	ensureSessionAttached,
 	getSessionResources,
 	listSessions,
+	ModelRuntime,
 	promptSession,
 	removeSession,
 	renameSession,
@@ -57,8 +62,8 @@ const faux = createFauxCore({
 	models: [model],
 	tokensPerSecond: 10000,
 });
+let isolatedAgentDir: IsolatedAgentDir | undefined;
 const saved = {
-	agent: process.env.PI_CODING_AGENT_DIR,
 	data: process.env.THINKRAIL_DATA_DIR,
 	offline: process.env.PI_OFFLINE,
 };
@@ -96,7 +101,8 @@ function transcriptOf(sessionId: string): string {
 }
 
 function headerCwd(sessionId: string): string {
-	const header = JSON.parse(readFileSync(transcriptOf(sessionId), "utf8").split("\n")[0] ?? "{}");
+	const [header] = parseSessionContent(readFileSync(transcriptOf(sessionId), "utf8")).entries;
+	if (header?.type !== "session") throw new Error(`no session header for ${sessionId}`);
 	return header.cwd;
 }
 
@@ -161,11 +167,11 @@ async function expectFullChatLifecycle(workspace: Workspace): Promise<void> {
 }
 
 beforeAll(async () => {
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	isolatedAgentDir = isolateAgentDir(agentDir);
 	process.env.THINKRAIL_DATA_DIR = join(root, "data");
 	process.env.PI_OFFLINE = "1";
 	const runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
+		inMemoryCredentials: true,
 		modelsPath: null,
 		allowModelNetwork: false,
 	});
@@ -193,8 +199,7 @@ afterAll(async () => {
 	await settleSessionsForShutdown();
 	disposeAllSessions();
 	configurePiRuntime(null);
-	if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = saved.agent;
+	isolatedAgentDir?.restore();
 	if (saved.data === undefined) delete process.env.THINKRAIL_DATA_DIR;
 	else process.env.THINKRAIL_DATA_DIR = saved.data;
 	if (saved.offline === undefined) delete process.env.PI_OFFLINE;

@@ -1,10 +1,6 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionFactory,
-} from "@earendil-works/pi-coding-agent";
-import type { ResourceContextInput } from "pi-delegation";
-import { Type } from "typebox";
+import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
+import type { DelegationThinkingLevel, ResourceContextInput } from "pi-delegation";
+import { type TSchema, Type } from "typebox";
 import { Check } from "typebox/value";
 import {
 	ControlSchema,
@@ -16,6 +12,7 @@ import {
 	DecisionSchema,
 	ReadQuerySchema,
 	RequestSchema,
+	toolParameters,
 } from "../domain/index.ts";
 
 export interface DagExtensionOptions {
@@ -27,7 +24,32 @@ const closed = { additionalProperties: false };
 const createProperties = RequestSchema.anyOf[0].properties;
 const mutationEnvelope = Type.Omit(RequestSchema.anyOf[1], ["command"]).properties;
 const editProperties = RequestSchema.anyOf[1].properties.command.anyOf[0].properties;
+const CreateParameters = Type.Object(
+	{
+		commandId: createProperties.commandId,
+		definition: createProperties.command.properties.definition,
+	},
+	closed,
+);
+const EditParameters = Type.Object({ ...mutationEnvelope, edits: editProperties.edits }, closed);
+const ControlParameters = Type.Object({ ...mutationEnvelope, command: ControlSchema }, closed);
+const DecideParameters = Type.Object({ ...mutationEnvelope, command: DecisionSchema }, closed);
+const ReadParameters = Type.Object({ query: ReadQuerySchema }, closed);
 const toolNames = new Set(["dag_create", "dag_edit", "dag_control", "dag_decide", "dag_read"]);
+const THINKING_LEVELS: readonly DelegationThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
+function checked<T extends TSchema>(schema: T, value: unknown) {
+	if (!Check(schema, value)) throw new Error("Invalid DAG tool arguments");
+	return value;
+}
 const revoked: DagResult<never> = {
 	ok: false,
 	error: { code: "revoked", message: "DAG conversation binding is no longer current" },
@@ -40,13 +62,14 @@ function present(result: DagResult<unknown>) {
 	};
 }
 
-function registryContext(ctx: ExtensionContext): ResourceContextInput {
+function registryContext(pi: ExtensionAPI, ctx: ExtensionContext): ResourceContextInput {
+	const engineLevel = String(pi.getThinkingLevel());
+	const thinkingLevel = THINKING_LEVELS.find((level) => level === engineLevel);
 	return {
-		kind: "registry",
 		modelRegistry: ctx.modelRegistry,
 		cwd: ctx.cwd,
 		...(ctx.model ? { model: { provider: ctx.model.provider, id: ctx.model.id } } : {}),
-		thinkingLevel: ctx.thinkingLevel,
+		...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
 	};
 }
 
@@ -60,7 +83,7 @@ interface Conversation {
 export function installDagAdapter(
 	pi: ExtensionAPI,
 	serviceFor: (ctx: ExtensionContext) => DagService,
-	project: NonNullable<DagExtensionOptions["executionContext"]> = registryContext,
+	project: NonNullable<DagExtensionOptions["executionContext"]> = (ctx) => registryContext(pi, ctx),
 	close?: () => Promise<void>,
 ): void {
 	let conversation: Conversation | undefined;
@@ -75,7 +98,7 @@ export function installDagAdapter(
 		conversation = undefined;
 	};
 
-	pi.on("session_start", (_event, ctx) => {
+	const start = (ctx: ExtensionContext) => {
 		revoke();
 		const life: Conversation = {
 			sessionId: ctx.sessionManager.getSessionId(),
@@ -109,13 +132,16 @@ export function installDagAdapter(
 				},
 			},
 		});
-	});
-	pi.on("agent_settled", (_event, ctx) => {
+	};
+	pi.on("session_start", (_event, ctx) => start(ctx));
+	pi.on("session_switch", (_event, ctx) => start(ctx));
+	pi.on("agent_end", (event, ctx) => {
+		if (event.willContinue) return;
 		if (current(conversation, ctx)) for (const listener of conversation.listeners) listener();
 	});
-	pi.on("session_shutdown", async (event) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		revoke();
-		if (event.reason === "quit" || event.reason === "reload") await close?.();
+		if (ctx.agent.kind === "main") await close?.();
 	});
 	pi.on("tool_result", (event) => {
 		const details: unknown = event.details;
@@ -183,48 +209,54 @@ export function installDagAdapter(
 		label: "Create DAG",
 		description:
 			"Create a paused durable DAG. Preserve commandId for exact replay; ACK is not worker completion.",
-		parameters: Type.Object(
-			{
-				commandId: createProperties.commandId,
-				definition: createProperties.command.properties.definition,
-			},
-			closed,
-		),
-		execute: (id, { commandId, definition }, signal, _update, ctx) =>
-			execute(id, { commandId, command: { kind: "create", definition } }, signal, ctx),
+		parameters: toolParameters(CreateParameters),
+		loadMode: "essential",
+		execute: (id, params, signal, _update, ctx) => {
+			const { commandId, definition } = checked(CreateParameters, params);
+			return execute(id, { commandId, command: { kind: "create", definition } }, signal, ctx);
+		},
 	});
 	pi.registerTool({
 		name: "dag_edit",
 		label: "Edit DAG",
 		description:
 			"Apply atomic DAG edits at the explicit expectedVersion. Reuse commandId only for identical replay.",
-		parameters: Type.Object({ ...mutationEnvelope, edits: editProperties.edits }, closed),
-		execute: (id, { edits, ...envelope }, signal, _update, ctx) =>
-			execute(id, { ...envelope, command: { kind: "edit", edits } }, signal, ctx),
+		parameters: toolParameters(EditParameters),
+		loadMode: "essential",
+		execute: (id, params, signal, _update, ctx) => {
+			const { edits, ...envelope } = checked(EditParameters, params);
+			return execute(id, { ...envelope, command: { kind: "edit", edits } }, signal, ctx);
+		},
 	});
 	pi.registerTool({
 		name: "dag_control",
 		label: "Control DAG",
 		description:
 			"Control a durable DAG as this controller, using the explicit commandId and expectedVersion. ACK records intent, not completion.",
-		parameters: Type.Object({ ...mutationEnvelope, command: ControlSchema }, closed),
-		execute: (id, request, signal, _update, ctx) => execute(id, request, signal, ctx),
+		parameters: toolParameters(ControlParameters),
+		loadMode: "essential",
+		execute: (id, params, signal, _update, ctx) =>
+			execute(id, checked(ControlParameters, params), signal, ctx),
 	});
 	pi.registerTool({
 		name: "dag_decide",
 		label: "Decide DAG",
 		description:
 			"Record a controller decision at expectedVersion. Human-only gates require a confirmed human operator, never this tool.",
-		parameters: Type.Object({ ...mutationEnvelope, command: DecisionSchema }, closed),
-		execute: (id, request, signal, _update, ctx) => execute(id, request, signal, ctx),
+		parameters: toolParameters(DecideParameters),
+		loadMode: "essential",
+		execute: (id, params, signal, _update, ctx) =>
+			execute(id, checked(DecideParameters, params), signal, ctx),
 	});
 	pi.registerTool({
 		name: "dag_read",
 		label: "Read DAG",
 		description:
 			"Read DAG lists, complete current topology/gates, immutable outputs or paged history without starting workers. Bulk bodies have readable captured-file references.",
-		parameters: Type.Object({ query: ReadQuerySchema }, closed),
-		async execute(_id, { query }, signal, _update, ctx) {
+		parameters: toolParameters(ReadParameters),
+		loadMode: "essential",
+		async execute(_id, params, signal, _update, ctx) {
+			const { query } = checked(ReadParameters, params);
 			if (!current(conversation, ctx)) return present(revoked);
 			return present(
 				await invoke(

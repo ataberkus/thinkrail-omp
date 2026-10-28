@@ -1,14 +1,15 @@
 # ThinkRail
 
-The agentic IDE that gets better every time you use it, built around the `pi` coding agent. The app is
-a thin host that runs `pi` and bridges it to a rich UI; `pi` owns models, skills, compaction, cost, and
-session state.
+The agentic IDE that gets better every time you use it, built around the `omp` (oh-my-pi) coding agent.
+The app is a thin host that runs the engine and bridges it to a rich UI; the engine owns models, skills,
+compaction, cost, and session state. Code identifiers and file names still say `pi` for the engine
+(`piRuntime`, `pi-faux`, `pi-extensions/`); read them as "the engine", which is now `@oh-my-pi/*`.
 
 ## Read context proportionally
 
 - Use `goal-and-requirements.md` for the product's goal, principles, capabilities, and non-goals.
 - Use `architecture.md` for system topology, cross-module decisions, and repo-wide invariants.
-- For a pi upgrade or a host workaround around pi, read `pi-compatibility.md`: verify every applicable
+- For an engine (`@oh-my-pi/*`) upgrade or a host workaround around it, read `pi-compatibility.md`: verify every applicable
   removal gate against the installed SDK, update the registry, and report what was removed or retained.
 - Read the owning `SPEC.md` when work is governed by or may alter a module boundary, contract,
   invariant, documented behavior, or architecture decision.
@@ -29,13 +30,17 @@ Clear, fractal module boundaries are a top-priority requirement:
 
 ## Engine and architecture
 
-- Run `pi` in-process through `@earendil-works/pi-coding-agent` (`createAgentSession`), never as a
+- Run `pi` in-process through `@oh-my-pi/pi-coding-agent` (`createAgentSession`), never as a
   subprocess and never through a second agent runtime. Fatal provider/agent faults can take down the
   host; that lack of crash isolation is accepted.
 - The three rings are engine host (`packages/server` + `packages/shared`), typed wire
   (`packages/contracts`), and independently shippable UI (`apps/web`). `apps/cli` and `apps/desktop`
   are thin launchers over the same host.
-- Use only the `@earendil-works/*` package scope. `@mariozechner/*` is deprecated.
+- Use only the `@oh-my-pi/*` package scope, from package roots or the subpaths in their `exports` maps.
+  Never import omp's `extensibility/legacy-pi-*` compatibility shims; `@earendil-works/*` (upstream pi)
+  and `@mariozechner/*` are not dependencies.
+- omp is Bun-only (≥ 1.3.14) and resolves `PI_CODING_AGENT_DIR` when its modules load: tests isolate the
+  agent dir with `pi-faux`'s `isolateAgentDir`, never by assigning the variable after imports.
 
 ## Repo-wide invariants
 
@@ -44,7 +49,7 @@ Clear, fractal module boundaries are a top-priority requirement:
 - User-facing UI text is a key in `packages/locales/en.json` rendered through `@thinkrail/locales/react`;
   the lint gate rejects hardcoded JSX text and text attributes.
 - Never value-import `pi` into browser-bundled code. Import types only from the `pi-ai` /
-  `pi-agent-core` package roots; `@earendil-works/pi-coding-agent` is server-only.
+  `pi-agent-core` package roots; `@oh-my-pi/pi-coding-agent` is server-only.
 - One id model: UI tab id versus `session.sessionId`; there is no separate pi UUID.
 - `pi` owns state. The host exposes what pi reports rather than recomputing cost, stats, or state.
 - Streaming semantics: `text_delta` / `thinking_delta` append;
@@ -137,8 +142,8 @@ Green gates are necessary but not sufficient:
 
 ## Stack
 
-Bun + Turbo monorepo · TypeScript strict · React 19 + Zustand + Tailwind v4 · in-process `pi`
-(Node >= 22.19). App state lives under `~/.thinkrail`.
+Bun + Turbo monorepo · TypeScript strict · React 19 + Zustand + Tailwind v4 · in-process `omp`
+(Bun-only engine). App state lives under `~/.thinkrail`; the engine's under `~/.omp/agent`.
 
 Dependencies pin exact versions. Cross-cutting dependencies are pinned once in the root
 `workspaces.catalog` and referenced through `catalog:`; peer dependencies and local protocols are the

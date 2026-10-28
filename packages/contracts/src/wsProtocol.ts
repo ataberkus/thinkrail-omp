@@ -1106,8 +1106,7 @@ export type WsErrorCode =
 	| "UNSUPPORTED_CHANGE"
 	| "LOGIN_NOT_OWNER"
 	| "MCP_CONFIG_INVALID"
-	| "MCP_PATH_UNSAFE"
-	| "MCP_HANDLED_ELSEWHERE";
+	| "MCP_PATH_UNSAFE";
 
 export interface WsResponse {
 	id: string;

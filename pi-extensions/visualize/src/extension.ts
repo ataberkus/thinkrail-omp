@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 import { comparisonMarkdown, fileMarkdown, mermaidFence } from "./markdown.ts";
 import { probeRenderability } from "./probe.ts";
 import { type VisualizeParams, VisualizeSchema } from "./schema.ts";
@@ -25,16 +25,19 @@ const DESCRIPTION =
 	"code), or a before/after diff of two files when `before` is set. Use for architecture and flow " +
 	"diagrams, for weighing options or trade-offs, and for showing UI mockups.";
 
-const PROMPT_SNIPPET =
-	"Show diagrams (raw mermaid), option comparisons, and files/mockups (rendered, or before/after) as rich cards — prefer over ASCII art or markdown tables for architecture, flows, trade-offs, and UI proposals.";
+const TOOL_NAME = "visualize";
 
-function promptGuidelines(scratchDir: string | undefined): string[] {
+export function promptGuidelines(scratchDir: string | undefined): string[] {
 	const where = scratchDir
 		? `under \`${scratchDir}\``
 		: "in a scratch location outside version control";
 	return [
 		`When you propose or ask about a visual/UI change, write a self-contained HTML mockup ${where} (inline CSS and data: images only — hosts may strip scripts, form controls and external resources, so draw buttons and inputs with styled elements) and show it with visualize type 'file'; set \`before\` to a mockup of the current UI to show the change. Hosts render a file's current content, so editing a mockup updates every place it was shown; to keep an earlier proposal visible, copy it and pass the copy as \`before\`.`,
 	];
+}
+
+export function promptGuidelinesSection(guidelines: readonly string[]): string {
+	return [`Guidelines for ${TOOL_NAME}:`, ...guidelines.map((line) => `- ${line}`)].join("\n");
 }
 
 function errorMessage(error: unknown): string {
@@ -86,14 +89,18 @@ export function createVisualizeExtension(
 ): ExtensionFactory {
 	const validate = options.validateMermaid ?? probeRenderability;
 	const { checkFile } = options;
+	const guidelines = promptGuidelinesSection(promptGuidelines(options.scratchDir));
 	return (pi: ExtensionAPI): void => {
+		pi.on("before_agent_start", (event) => {
+			if (!pi.getActiveTools().includes(TOOL_NAME)) return undefined;
+			return { systemPrompt: [...event.systemPrompt, guidelines] };
+		});
 		pi.registerTool({
-			name: "visualize",
+			name: TOOL_NAME,
 			label: "Visualize",
 			description: DESCRIPTION,
-			promptSnippet: PROMPT_SNIPPET,
-			promptGuidelines: promptGuidelines(options.scratchDir),
 			parameters: VisualizeSchema,
+			loadMode: "essential",
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				validateShape(params);
 				for (const { location, source } of mermaidSources(params)) {

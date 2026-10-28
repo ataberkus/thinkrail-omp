@@ -27,7 +27,6 @@ import {
 	refreshRecentProjectFolders,
 	renameProject,
 	revokeProjectMcpTool,
-	setPiTrustSeed,
 	setProjectMcpOverride,
 	setProjectPublisher,
 	setProjectTrust,
@@ -91,7 +90,6 @@ beforeEach(() => {
 
 afterEach(() => {
 	setProjectPublisher(null);
-	setPiTrustSeed(null);
 	rmSync(dataDir, { recursive: true, force: true });
 	if (savedDataDir === undefined) delete process.env.THINKRAIL_DATA_DIR;
 	else process.env.THINKRAIL_DATA_DIR = savedDataDir;
@@ -415,28 +413,17 @@ test("a record that predates pi-level trust is not grandfathered: it stays as st
 	makeRepo(repo);
 	const root = realpathSync(repo);
 	writeProjects([{ id: "legacy", name: "legacy", path: root, slug: "legacy", lastOpened: 1 }]);
-	const asked: string[] = [];
-	setPiTrustSeed((path) => {
-		asked.push(path);
-		return true;
-	});
 	expect(getProjects()[0]?.piResourceTrust).toBeUndefined();
 	expect(storedProjects()[0]?.piResourceTrust).toBeUndefined();
 	expect(openProject(repo)).toMatchObject({ id: "legacy" });
 	expect(storedProjects()[0]?.piResourceTrust).toBeUndefined();
-	expect(asked).toEqual([]);
 });
 
-test("a newly added project starts untrusted unless pi already trusts its path", () => {
+test("a newly added project starts untrusted, since omp keeps no trust decision to seed it from", () => {
 	const plain = join(dataDir, "plain");
-	const piTrusted = join(dataDir, "pi-trusted");
 	makeRepo(plain);
-	makeRepo(piTrusted);
-	const trustedRoot = realpathSync(piTrusted);
-	setPiTrustSeed((path) => realpathSync(path) === trustedRoot);
-
 	expect(openProject(plain).piResourceTrust).toBe("untrusted");
-	expect(openProject(piTrusted).piResourceTrust).toBe("granted");
+	expect(storedProjects()[0]?.piResourceTrust).toBe("untrusted");
 	expect(initProject(plain).piResourceTrust).toBe("untrusted");
 });
 

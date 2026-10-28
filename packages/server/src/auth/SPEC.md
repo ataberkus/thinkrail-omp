@@ -14,7 +14,7 @@ tags: [auth, pi]
 Everything about **model-provider credentials**: the read side the Welcome strip renders
 (`provider.status`) and the write side that configures them from inside the app — OAuth sign-in,
 interactive API-key entry (both over the **same login channel**, issue #97), and logout. All of it goes
-through the shared `ModelRuntime` (pi's model/auth facade); we never parse `auth.json` / `models.json`
+through the shared host `ModelRuntime` (over omp's `AuthStorage` + `ModelRegistry`); we never parse `agent.db` / `models.yml`
 ourselves and never surface a credential value over the wire.
 
 ## Boundary
@@ -24,7 +24,9 @@ ourselves and never surface a credential value over the wire.
     (pi's `hasAuth`-family truth, so env-var auth counts) + auth `kind` (oauth / api-key / env /
     other) + display name + the in-app-login capability flags **`canOAuth`/`canApiKey`**,
     configured-first. It **revalidates on every read through `agent`'s current runtime facade**: local
-    config/auth availability refreshes with network disabled, so an external PI login becomes visible.
+    config/auth availability refreshes with network disabled, so an external PI login becomes visible. The
+    read must stay cheap, because the Central card polls it while `configuring`; the runtime rebuilds omp's
+    catalog only when local inputs changed ([[submodule-server-agent]] `modelRuntime`).
     Central is not inferred from model URLs: status combines `shared/jbcentral`'s executable/version/artifact
     postconditions and closed auth/proxy observations with the synchronizer's latest desired/applied generation.
     Watcher drift schedules a rebuild; status is `configuring` until the newest candidate applies and
@@ -56,12 +58,12 @@ ourselves and never surface a credential value over the wire.
       stored credential can outlive its models. `canOAuth` = the row's provider carries OAuth auth (so
       `provider.loginStart(row.id)` uses the credential id pi will actually store under); its row name
       prefers `auth.oauth.name` (more specific for oauth-only rows). `canApiKey` =
-      **`Provider.auth.apiKey.login` exists** — pi's public api-key-login truth and *nothing else*
-      (issue #97: the interactive login channel parks every prompt the provider asks, so multi-prompt
-      creds — bedrock/vertex/azure — and OAuth+key providers — github-copilot — just work; the
-      hand-maintained exclusion sets are gone; `openai-codex` reports `false` because pi's provider has
-      no key auth, not because we said so). `canLogout` = the id has a stored
-      **auth.json** credential (`credentialProviders`) — the only auth the host can remove; env / models.json-
+      **`HostProvider.auth.apiKey.login`** — the host runtime's api-key-login truth and *nothing else*
+      (issue #97: the interactive login channel parks every prompt the flow asks). omp has no per-provider
+      key-login declaration, so the runtime derives it from omp's env-key fallbacks (rule in the agent
+      spec's `modelRuntime` bullet); `openai-codex` reports `false` because its only env fallback is an
+      OAuth token. `canLogout` = the id has a stored
+      stored **`agent.db`** credential (`credentialProviders`) — the only auth the host can remove; env / models.yml-
       keyed auth report `false` (Sign-out would no-op, so the strip hides it). Central's own lifecycle is only
       the dedicated closed `jbcentral` status, never a row; the `central` kind on a replaced built-in is an
       identity fact, never inferred from model URLs or configuration.
@@ -71,15 +73,18 @@ ourselves and never surface a credential value over the wire.
       type, interaction, piLoginOptions)` runs **detached** (a flow can take minutes — awaiting it would blow the client
       request timeout and block the WS pump). **One bridge, both auth types** (issue #97): `"oauth"` and
       `"api_key"` (the provider-owned interactive key entry — one secret prompt for most providers,
-      multi-prompt for azure/vertex-style creds). `piLoginOptions` (agent barrel) supplies pi's stable
-      installation `deviceId` from the global settings, which pi's openai "Sign in with ChatGPT" flow
-      requires (it throws without one); like pi's CLI it is created on first use, never for other flows. pi's `AuthInteraction` is wired to `LoginFrame` pushes
+      multi-prompt for azure/vertex-style creds). `piLoginOptions` (agent barrel) is passed through but
+      empty: omp's ChatGPT sign-in (`openai-codex`) needs no host-supplied installation id, unlike pi's
+      openai flow. The host `AuthInteraction` (agent barrel; the runtime adapts omp's OAuth callbacks to
+      it: `onAuth`→`auth_url`, `onProgress`→`progress`, `onPrompt`→`text`/`secret`,
+      `onManualCodeInput`→`manual_code`) is wired to `LoginFrame` pushes
       on the `provider.login` channel: `notify` `auth_url`→`authUrl`, `device_code`→`deviceCode`,
       `progress`/`info`→`progress` (info links appended as plain URLs); `prompt`
-      `select`→a parked `select` frame, `text`/`secret`/`manual_code`→a parked `prompt` frame awaiting a
-      reply (a `secret` prompt is flagged on the frame so the dialog masks the input). A prompt's own
-      `signal` abort (pi cancelling the loser of its browser-vs-paste race) settles
-      the parked input — identity-guarded so a late abort can't clear a newer parked prompt. pi persists
+      `select`→a parked `select` frame (omp's OAuth flows never ask one; only a host flow could),
+      `text`/`secret`/`manual_code`→a parked `prompt` frame awaiting a reply (a `secret` prompt is flagged
+      on the frame so the dialog masks the input; only `text` admits an empty reply). A prompt's own
+      `signal` abort (omp cancelling the loser of its browser-vs-paste race) settles
+      the parked input — identity-guarded so a late abort can't clear a newer parked prompt. omp persists
       the credential **and refreshes availability inside `login()`**, so success just pushes `success`;
       on throw, `error`.
     - `resolveLogin({ loginId, value })` — the browser's reply resolves the parked interaction.
@@ -143,7 +148,7 @@ ourselves and never surface a credential value over the wire.
   runtime-changed publisher seams, and the explicit `resetJbcentralStateForTests` lifecycle seam used by
   sibling host tests.
 - **Allowed deps:** `contracts` (wire types); `shared/jbcentral`; the **`agent` barrel** for the current
-  runtime/auth facade plus candidate prepare/activate; `@earendil-works/pi-ai` (auth interaction **types** only).
+  runtime/auth facade (including the host auth interaction types) plus candidate prepare/activate.
 - **Forbidden:** reaching into `agent` internals (runtime and generation changes only through its barrel); importing `host`,
   `settings`, or any other sibling; deep-importing pi's TUI (`modes/interactive/*`) for its private provider constants;
   ever putting a credential **value** on the wire.

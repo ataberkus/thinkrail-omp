@@ -1,13 +1,15 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import {
 	type FileEntry,
 	migrateSessionEntries,
 	parseSessionEntries,
 	type SessionEntry,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { logger } from "../log";
+import { convertPiSessionText, isPiSessionText } from "./piMigration";
+import { usagePurposeParts } from "./usagePurpose";
 
 const log = logger("agent");
 
@@ -109,12 +111,30 @@ export function createRunUsageRecorder(
 	};
 }
 
+function isUsage(value: unknown): value is Usage {
+	if (typeof value !== "object" || value === null) return false;
+	const cost: unknown = Reflect.get(value, "cost");
+	return (
+		typeof Reflect.get(value, "input") === "number" &&
+		typeof cost === "object" &&
+		cost !== null &&
+		typeof Reflect.get(cost, "total") === "number"
+	);
+}
+
+function taskUsage(details: unknown): Usage | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const usage: unknown = Reflect.get(details, "usage");
+	return isUsage(usage) ? usage : undefined;
+}
+
 function spentUsage(entry: SessionEntry): Usage | undefined {
-	if (entry.type === "usage") return entry.usage;
-	if (entry.type === "compaction" || entry.type === "branch_summary") return entry.usage;
+	if (entry.type === "model_usage") return entry.usage;
 	if (entry.type !== "message") return undefined;
 	const { message } = entry;
-	if (message.role === "assistant" || message.role === "toolResult") return message.usage;
+	if (message.role === "assistant") return message.usage;
+	if (message.role === "toolResult" && message.toolName === "task")
+		return taskUsage(message.details);
 	return undefined;
 }
 
@@ -130,8 +150,17 @@ function emptyTotals(): Totals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 }
 
+function ompShaped(childSessionId: string, content: string): string {
+	if (!isPiSessionText(content)) return content;
+	try {
+		return convertPiSessionText(content, childSessionId);
+	} catch {
+		return content;
+	}
+}
+
 export function childFileUsage(childSessionId: string, content: string): SubagentUsage | undefined {
-	const entries: FileEntry[] = parseSessionEntries(content);
+	const entries: FileEntry[] = parseSessionEntries(ompShaped(childSessionId, content));
 	const header = entries[0];
 	if (header?.type !== "session" || header.parentSession !== undefined) return undefined;
 	migrateSessionEntries(entries);
@@ -144,7 +173,7 @@ export function childFileUsage(childSessionId: string, content: string): Subagen
 		if (usage) add(totals, usage);
 		if (entry.type === "message" && entry.message.role === "assistant") {
 			provider = entry.message.provider;
-			model = entry.message.responseModel ?? entry.message.model;
+			model = entry.message.upstreamModel ?? entry.message.model;
 		}
 	}
 	return tokensOf(totals) === 0 && totals.cost === 0
@@ -155,10 +184,12 @@ export function childFileUsage(childSessionId: string, content: string): Subagen
 function recordedSubagentUsage(entries: readonly SessionEntry[]): Map<string, Totals> {
 	const recorded = new Map<string, Totals>();
 	for (const entry of entries) {
-		if (entry.type !== "usage" || entry.kind !== SUBAGENT_USAGE_KIND || !entry.note) continue;
-		const totals = recorded.get(entry.note) ?? emptyTotals();
+		if (entry.type !== "model_usage") continue;
+		const { kind, note } = usagePurposeParts(entry.purpose);
+		if (kind !== SUBAGENT_USAGE_KIND || !note) continue;
+		const totals = recorded.get(note) ?? emptyTotals();
 		add(totals, entry.usage);
-		recorded.set(entry.note, totals);
+		recorded.set(note, totals);
 	}
 	return recorded;
 }

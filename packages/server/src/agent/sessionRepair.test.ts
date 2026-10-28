@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
-import type { Message } from "@thinkrail/contracts";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { fauxAssistantMessage, fauxToolCall } from "pi-faux";
 import { type InteractiveTools, interactiveTools } from "../extensions";
 import { repairDanglingToolCalls } from "./sessionRepair";
 import { TOOL_RESPONSE_PENDING_TEXT } from "./toolResponses";
@@ -23,47 +24,44 @@ const QUESTION = {
 const assistantWithCalls = (
 	calls: { id: string; name: string; args?: Record<string, unknown> }[],
 	stopReason: "toolUse" | "error" | "aborted" | "length" = "toolUse",
-): Message =>
-	({
-		role: "assistant",
-		content: calls.map((c) => ({
-			type: "toolCall",
-			id: c.id,
-			name: c.name,
-			arguments: c.args ?? {},
-		})),
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "test",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		stopReason,
-		timestamp: Date.now(),
-	}) as unknown as Message;
+): AssistantMessage =>
+	fauxAssistantMessage(
+		calls.map((c) => fauxToolCall(c.name, c.args ?? {}, { id: c.id })),
+		{ stopReason },
+	);
 
-const assistantText = (text: string): Message =>
-	({
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "test",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		stopReason: "stop",
-		timestamp: Date.now(),
-	}) as unknown as Message;
+const assistantText = (text: string): AssistantMessage => fauxAssistantMessage(text);
 
-const toolResult = (toolCallId: string, toolName: string): Message =>
-	({
-		role: "toolResult",
-		toolCallId,
-		toolName,
-		content: [{ type: "text", text: "ok" }],
-		isError: false,
-		timestamp: Date.now(),
-	}) as unknown as Message;
+const toolResult = (toolCallId: string, toolName: string): ToolResultMessage => ({
+	role: "toolResult",
+	toolCallId,
+	toolName,
+	content: [{ type: "text", text: "ok" }],
+	isError: false,
+	timestamp: Date.now(),
+});
 
-const user = (text: string): Message =>
-	({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }) as Message;
+const user = (text: string): UserMessage => ({
+	role: "user",
+	content: [{ type: "text", text }],
+	timestamp: Date.now(),
+});
+
+test("omp strips a dangling call from the rebuilt context, so a reopened chat would silently lose it without the repair", () => {
+	const sm = SessionManager.inMemory("/tmp/repair-test");
+	sm.appendMessage(user("decide"));
+	sm.appendMessage(assistantWithCalls([{ id: "q1", name: "ask_user_question", args: QUESTION }]));
+	const hasCall = () =>
+		sm
+			.buildSessionContext()
+			.messages.some(
+				(m) =>
+					m.role === "assistant" && m.content.some((b) => b.type === "toolCall" && b.id === "q1"),
+			);
+	expect(hasCall()).toBe(false);
+	repairDanglingToolCalls(sm, INTERACTIVE);
+	expect(hasCall()).toBe(true);
+});
 
 test("a healthy transcript is untouched", () => {
 	const sm = SessionManager.inMemory("/tmp/repair-test");

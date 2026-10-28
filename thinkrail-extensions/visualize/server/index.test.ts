@@ -2,13 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import extension from "./index";
 
 type ExecResult = { content: Array<{ type: string; text: string }>; details: unknown };
 type CapturedTool = {
 	name: string;
-	promptGuidelines?: string[];
 	execute: (
 		id: string,
 		params: unknown,
@@ -18,12 +17,20 @@ type CapturedTool = {
 	) => Promise<ExecResult>;
 };
 
+type BeforeAgentStart = (event: { systemPrompt: string[] }) => unknown;
+
+let beforeAgentStart: BeforeAgentStart | undefined;
+
 function loadTool(): CapturedTool {
 	let captured: CapturedTool | undefined;
 	const fakePi = {
 		registerTool: (def: CapturedTool) => {
 			captured = def;
 		},
+		on: (event: string, handler: BeforeAgentStart) => {
+			if (event === "before_agent_start") beforeAgentStart = handler;
+		},
+		getActiveTools: () => ["visualize"],
 	};
 	const factory = extension.extensions[0];
 	if (!factory) throw new Error("server half declares no extension factory");
@@ -159,6 +166,9 @@ describe("visualize server half", () => {
 	});
 
 	test("points the mockup guideline at the gitignored scratch directory", () => {
-		expect(loadTool().promptGuidelines?.[0]).toContain("`.thinkrail/context/mockups/`");
+		loadTool();
+		expect(JSON.stringify(beforeAgentStart?.({ systemPrompt: [] }))).toContain(
+			"`.thinkrail/context/mockups/`",
+		);
 	});
 });

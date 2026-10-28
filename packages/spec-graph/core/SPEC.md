@@ -13,7 +13,7 @@ The pi-free spec model: the is-a-spec rule, frontmatter parse/serialize and in-p
 `yaml` library, with link/metadata lists inline), the derived graph (parent tree +
 `depends-on`/`references`/`implements` DAG + reverse edges), the on-demand in-memory read index, content
 grep with metadata filters, bounded graph slices, and structural validation. Imports **no
-`@earendil-works/*`**, so it is unit-testable on its own (`core/core.test.ts`).
+`@oh-my-pi/*`**, so it is unit-testable on its own (`core/core.test.ts`).
 
 ## Boundary
 
@@ -25,7 +25,7 @@ grep with metadata filters, bounded graph slices, and structural validation. Imp
   resolver, and glob order comparator in `store.ts`, which pin `resolveSpecPath` and the glob order
   without touching a filesystem.
 - **Allowed deps:** `yaml`; Node built-ins.
-- **Forbidden:** any `@earendil-works/*` (this is what keeps `core/` isolated and unit-testable) and any
+- **Forbidden:** any `@oh-my-pi/*` (this is what keeps `core/` isolated and unit-testable) and any
   `@thinkrail/*` package.
 
 ## Leaves & the dependency graph
@@ -43,7 +43,7 @@ Acyclic and one-way: `parse` is the root, `graph` builds on it, and `query`/`val
 
 ## Invariants
 
-- No `@earendil-works/*` import anywhere under `core/`.
+- No `@oh-my-pi/*` import anywhere under `core/`.
 - Grep pagination skips a zero-based match offset in source order and returns a continuation only
   when another match exists. Callers may bound formatted bytes as well as count; one oversized first
   match is admitted so the tool layer can preserve it outside context instead of stalling pagination.
@@ -116,7 +116,7 @@ Acyclic and one-way: `parse` is the root, `graph` builds on it, and `query`/`val
   the `SPEC_TYPES` vocabulary constrains only the `spec_create` authoring surface, never the graph.
 - Finite vocabularies (`SPEC_TYPES`, `SPEC_STATUSES`, `SLICE_DIRECTIONS`, `LINK_KINDS`, `IDENTITY_FIELDS`)
   and frontmatter field names (the `FIELDS` registry) are single-sourced `as const` — no duplicated literal lists, so a
-  rename is a one-line change. `core/` stays typebox-free; only `tools/` wraps the tuples in `StringEnum`.
+  rename is a one-line change. `core/` stays schema-library-free; only `tools/` wraps the tuples in `z.enum`.
 - Reads coerce frontmatter to a scalar/string-array dialect (lossy — nested maps and comments are
   dropped), which is fine for the derived model. The write path (`updateFrontmatterText`) is **lossless**:
   it mutates a live `yaml` Document in place, so untouched fields keep their order and any comments /

@@ -3,7 +3,7 @@ import type {
 	ExtensionError,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import type { ExtUiRequest, ExtUiResponse } from "@thinkrail/contracts";
 import { plainTextTheme } from "./plainTextTheme";
 
@@ -164,7 +164,8 @@ export function createWebUiContext(
 		bridgeDialog(sessionId, { ...request, ...anchor() }, opts);
 
 	return {
-		async select(title, options, opts) {
+		async select(title, items, opts) {
+			const options = items.map((item) => (typeof item === "string" ? item : item.label));
 			const v = await dialog({ id: nextId(), sessionId, kind: "select", title, options }, opts);
 			return typeof v === "string" ? v : undefined;
 		},
@@ -213,9 +214,6 @@ export function createWebUiContext(
 
 		onTerminalInput: () => () => {},
 		setWorkingMessage: () => {},
-		setWorkingVisible: () => {},
-		setWorkingIndicator: () => {},
-		setHiddenThinkingLabel: () => {},
 		setFooter: () => {},
 		setHeader: () => {},
 		custom: (() => Promise.resolve(undefined)) as ExtensionUIContext["custom"],
@@ -226,9 +224,9 @@ export function createWebUiContext(
 		setEditorComponent: () => {},
 		getEditorComponent: () => undefined,
 		theme: plainTextTheme,
-		getAllThemes: () => [],
-		getTheme: () => undefined,
-		setTheme: () => ({ success: true }),
+		getAllThemes: () => Promise.resolve([]),
+		getTheme: () => Promise.resolve(undefined),
+		setTheme: () => Promise.resolve({ success: true }),
 		getToolsExpanded: () => false,
 		setToolsExpanded: () => {},
 	} satisfies ExtensionUIContext;

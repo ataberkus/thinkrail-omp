@@ -9,6 +9,7 @@ import { useT } from "@thinkrail/locales/react";
 import { CodeBlock } from "./CodeBlock";
 import { Collapsible, countLines } from "./Collapsible";
 import { ToolFileLink } from "./ToolFileLink";
+import { detailsOf, stringField } from "./toolDetails";
 
 export function WriteCard({
 	toolCallId,
@@ -23,13 +24,14 @@ export function WriteCard({
 	const content = strArg(args, "content");
 	const lang = languageFromPath(path);
 	const message = resultText(result);
+	const linkPath = (status === "done" && stringField(detailsOf(result), "resolvedPath")) || path;
 
 	return (
 		<div data-testid="tool-write" className="flex flex-col gap-4">
 			<div className="flex items-center gap-4 tr-text-metadata">
 				<FilePlus className="size-12 shrink-0 text-feedback-success" />
 				<ToolFileLink
-					path={path}
+					path={linkPath}
 					workspaceRoot={workspaceRoot}
 					onOpenFile={onOpenFile}
 					disabled={status !== "done"}

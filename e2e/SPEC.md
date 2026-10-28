@@ -19,7 +19,9 @@ explicit, authenticated, on-demand runs.
 ## Execution model
 
 `bun run e2e` is the complete no-agent gate. It builds the web bundle once and runs machine-adaptive,
-process-level Playwright shards. A shard owns one host and one Playwright worker; serial execution inside
+process-level Playwright shards. Every runner starts Playwright under Bun (`bun x --bun playwright`): the
+fixtures import omp (`@oh-my-pi/*` ships TypeScript sources and is Bun-only) for its session layout, which
+Node's type stripping refuses under `node_modules`. A shard owns one host and one Playwright worker; serial execution inside
 that lane preserves the suite's destructive reset semantics, while lane-qualified state and ports make
 lanes independent. Playwright splits individual tests across lanes and the parent runner merges their blob
 reports into one normal result. It also merges shard failure ids into Playwright's root last-run file,
@@ -74,9 +76,10 @@ starting Playwright or any host. The hosts also receive the same complete hermet
 suite. This split is load-bearing: build
 tooling may need developer-installed executables and caller environment, while exact-model preflight must
 prove Central without an API key, token, Google ADC/project/location, or AWS profile/key/token/container/
-web-identity/config source making another provider available. A drift canary derives every uppercase
-environment literal from pi-ai's pinned credential-discovery distribution and requires it in the denylist;
-defensive cloud-source extras remain even when that distribution does not currently name them. No host may
+web-identity/config source making another provider available. A drift canary derives every credential
+environment name from omp's pinned discovery sources — the catalog's compiled provider and auth-policy env
+vars plus the literals in pi-ai's env-key resolver and computed env hooks — and requires it in the denylist;
+defensive cloud-source extras remain even when those sources do not currently name them. No host may
 discover a real `central`, `pi`, or editor executable. The compiled-binary and
 packaged-desktop suites remain distinct artifact gates. Each has one lane-free, non-overlapping namespace
 per machine; any artifact run and `e2e:serial` still run sequentially in the same worktree. Artifact
@@ -122,7 +125,7 @@ once that chat reloads, and disabled for that chat from the Resources inspector,
 server's row, reconnects that server per chat once it fails and shows its masked log, and names an
 unreadable user `mcp.json` with an edit hint; and it proves a repository-defined server flags the chat's
 attention marker, waits for Review & approve, and starts once approved. Each test removes the `mcp.json`
-it wrote (the lane's agent dir or the fixture repository's `.pi/`) in `finally`, so no later scenario
+it wrote (the lane's agent dir or the fixture repository's `.omp/`) in `finally`, so no later scenario
 starts servers.
 
 Native wheel probes target the actual transcript viewport again after clicking a floating Latest
@@ -249,7 +252,9 @@ the out-of-band host mutations — installing/uninstalling the fake by moving it
 directory, and running it directly as a user's own shell would. A host-side invocation deliberately inherits
 none of the host's PATH, so a spec can never reach a real `central`. Because that same log records both
 sides, a spec that injects a host invocation asserts *counts* rather than mere presence — that is what
-distinguishes "the app reacted to an external change" from "the app re-ran the action".
+distinguishes "the app reacted to an external change" from "the app re-ran the action". The status-probe
+TTL runs from a probe's completion while the log records its start, so the re-probe helper keeps refreshing
+past the TTL until a new `status` invocation appears instead of refreshing once.
 
 A second spec covers the lifecycle a user actually walks, one test per situation: Central absent, installed
 but signed out, uninstalled while connected, PI disconnected in-app and again on the host, and a host-side
@@ -278,8 +283,8 @@ one indistinguishable card.
 The real-Central agent mode is explicit and read-only. Its setup takes the already-authorized global Central
 extension as an opaque source and stages one permission-restricted copy under the lane's isolated HOME; the
 host still resolves only the test-owned Central executable, and that executable refuses every mutating
-action in this mode. The isolated PI agent directory receives `settings.json` only — never the developer's
-`auth.json` or `models.json` — so Central is the sole provider source and unrelated local models cannot enter
+action in this mode. The isolated PI agent directory receives `config.yml` (the pinned default model) only — never the
+developer's `agent.db` credentials or `models.yml` — so Central is the sole provider source and unrelated local models cannot enter
 the picker. Setup waits for the watched runtime generation to report configured over the public wire, then
 requires `model.default` to equal the exact `THINKRAIL_E2E_MODEL` pair (the deterministic suite default is
 used when the variable is absent). A missing artifact, failed generation, or unavailable exact pair aborts
@@ -336,8 +341,8 @@ focus endpoints, and rail/header geometry that matches the workbench across a wo
 
 ## Isolation contract
 
-The no-agent setup seeds a test-owned empty `models.json` and never reads or copies developer
-`auth.json` or `models.json`; provider scenarios use synthetic fixtures, and the separately authorized
+The no-agent setup seeds a test-owned empty `models.yml` (omp's model configuration) and never reads or
+copies developer `agent.db` credentials or `models.yml`; provider scenarios use synthetic fixtures, and the separately authorized
 real-Central mode keeps its opaque-artifact-only credential contract above. Ambient credential environment
 variables still reach the no-agent host, so a check that depends on whether any provider is connected reads
 the host's `provider.status` over the wire first, never a one-shot snapshot of UI still loading it. Model-context

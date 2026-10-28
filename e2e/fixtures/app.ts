@@ -59,7 +59,7 @@ function resetState(): void {
 		removeCentralModeLocalSeeds();
 	} else {
 		rmSync(E2E_CENTRAL_ARTIFACT, { force: true });
-		const modelsPath = join(E2E_PI_AGENT_DIR, "models.json");
+		const modelsPath = join(E2E_PI_AGENT_DIR, "models.yml");
 		if (existsSync(E2E_PI_MODELS_SEED)) copyFileSync(E2E_PI_MODELS_SEED, modelsPath);
 		else rmSync(modelsPath, { force: true });
 		rmSync(`${modelsPath}.bak`, { force: true });

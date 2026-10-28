@@ -1,6 +1,12 @@
-import type { AuthInteraction, AuthPrompt, AuthType } from "@earendil-works/pi-ai";
 import type { LoginFrame, LoginPush, LoginReply } from "@thinkrail/contracts";
-import { type PiRuntimeGeneration, piLoginOptions, usePiRuntime } from "../agent";
+import {
+	type AuthInteraction,
+	type AuthPrompt,
+	type AuthType,
+	type PiRuntimeGeneration,
+	piLoginOptions,
+	usePiRuntime,
+} from "../agent";
 
 let publish: (push: LoginPush, generation?: PiRuntimeGeneration) => void = () => {};
 export function setLoginPublisher(

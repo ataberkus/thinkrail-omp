@@ -11,94 +11,46 @@ tags: [templates, public-surface-checked]
 ## Responsibility
 
 File CRUD over pi's two sanctioned prompt-template directories (global + project-scoped): list / get /
-save / delete `.md` files, surfacing pi's own frontmatter (`description`, `argument-hint`) as metadata.
+save / delete `.md` files, surfacing frontmatter `description` and `argument-hint` as metadata.
 Consumed by the `template.*` host handlers; this module owns no WS surface itself — an optional `cwd` is
 passed in by the caller after resolving either a live workspace or a pre-session project's current checkout,
 never looked up here.
 
-## pi facts (`@earendil-works/pi-coding-agent`, the catalog-pinned version)
+## omp facts (`@oh-my-pi/pi-coding-agent` + `@oh-my-pi/pi-utils`, the catalog-pinned version)
 
-Verified by reading `dist/core/prompt-templates.js` (`loadTemplateFromFile` / `loadTemplatesFromDir` /
-`loadPromptTemplates`), `dist/core/resource-loader.js` (`dedupePrompts`, `updatePromptsFromPaths`), and
-`dist/utils/frontmatter.js` + `dist/utils/text.js` in the installed package — source of truth over
-assumption; re-verify on a pi bump.
+Verified by reading `config/prompt-templates.ts` (`loadPromptTemplates`, `loadTemplatesFromDir`),
+`sdk.ts` (`discoverPromptTemplates`) and pi-utils `dirs.ts` / `frontmatter.ts`; re-verify on a bump.
 
-- **Directories:** global = `join(agentDir, "prompts")`; project = `resolve(cwd, CONFIG_DIR_NAME,
-  "prompts")` (`CONFIG_DIR_NAME = ".pi"`, pi root export) — exactly `templateDirs`'s two fields.
-- **Frontmatter keys:** `description` (string) and `argument-hint` (kebab-case; pi's own loader maps it
-  to a camelCase `argumentHint` field via `...(frontmatter["argument-hint"] && { argumentHint:
-  frontmatter["argument-hint"] })`). No other frontmatter keys are read by pi's loader.
-- **Name derivation:** `basename(filePath).replace(/\.md$/, "")` — filename minus a trailing `.md`
-  suffix, once (a name with an embedded dot like `foo.bar.md` derives `foo.bar`).
-- **No name validation in pi's loader, at all.** `loadTemplatesFromDir` accepts any directory entry
-  where `entry.isFile()` (or a symlink resolving to a file) `&& entry.name.endsWith(".md")` — no regex,
-  no traversal guard, and no dot-leading filter either (pi would list a hand-placed `.hidden.md`).
-  Path-traversal safety for **our** by-name paths (`saveTemplate` / `getTemplate` / `deleteTemplate`) is
-  entirely this module's own `isValidTemplateName` gate; pi gives us nothing to lean on there.
-- **`loadTemplatesFromDir`'s error handling is two-layered, at two different granularities.** The whole
-  `readdirSync` call plus the loop around it sits inside one `try { … } catch { return { templates,
-  diagnostics }; }` — an unreadable directory returns whatever had already been collected rather than
-  throwing out of the function. Independently, each file goes through `loadTemplateFromFile`, which now
-  has *two* separate inner `try/catch`es — one around the read, one around `parseFrontmatter` — and on
-  either failure returns `{ template: null, diagnostics: [{ type: "warning", message, path }] }` instead
-  of silently returning `null` (upstream PR #9830: a malformed file used to vanish with no trace; as of
-  0.87 it produces a resource diagnostic pi's own callers can surface). This module's `listDir` mirrors
-  the two-layer *structure* only — its own per-file/per-scan `catch {}` still swallows silently, since
-  this module never calls `loadPromptTemplates`/`loadTemplatesFromDir` and has no diagnostics channel to
-  populate; see "Design" below. The whole-scan wrapper is what protects `listTemplates` from an EACCES
-  (or similar) blanking every scope's results, not just the bad one's.
-- **`parseFrontmatter`'s real signature** (`dist/utils/frontmatter.d.ts`): `parseFrontmatter<T extends
-  Record<string, unknown> = Record<string, unknown>>(content: string): { frontmatter: T; body: string
-  }` — a plain sync function, generic over the frontmatter shape (unvalidated at runtime; the generic
-  is the caller's own assertion, exactly as pi's own loader trusts it). We use the default
-  `Record<string, unknown>` and narrow with `typeof` before trusting a value as a `string`.
-- **No-frontmatter files parse to `{ frontmatter: {}, body: <normalized content> }`.** Reading
-  `frontmatter.js` itself: one leading UTF-8 BOM is stripped and newlines are normalized (`\r\n`/`\r` →
-  `\n`) before fence detection; if the remaining content doesn't start with `"---"`, or a `"---"`
-  opener never finds a closing `"\n---"`, that normalized content becomes `body`, un-trimmed. Only a
-  *successfully closed* frontmatter block yields a `body` that's `.trim()`ed. This module never reads
-  pi's `body` at all (see "content" below), so none of that BOM/trim/normalize behavior leaks into
-  `Template.content` — it only matters for the metadata-extraction path.
-- **pi's loader synthesizes a fallback `description`** from the body's first non-empty line (truncated
-  to 60 chars + `"…"`) when frontmatter has none — used for pi's own `/` menu blurbs. We deliberately do
-  **not** replicate this: `TemplateInfo.description` is optional on the wire (`contracts/domain.ts`), so
-  a template with no `description` frontmatter key surfaces `description: undefined` (key omitted),
-  never a manufactured value pi never wrote to disk.
-- **Precedence is not decided inside `loadPromptTemplates` itself.** Its `includeDefaults` branch just
-  concatenates `[...global, ...project]` with **no dedup at all** at that layer. Real precedence is
-  resolved later, in `resource-loader.js`'s `dedupePrompts` — a `Map` keyed by name where the **first**
-  prompt registered for a name wins (subsequent same-name entries become a `collision` diagnostic, not
-  an overwrite) — over a `promptPaths` list built from project config merge order we did not trace
-  further (out of this module's bounded investigation, and irrelevant: none of `loadPromptTemplates` /
-  `dedupePrompts` is root-exported — the sealed exports map gives us only `parseFrontmatter` /
-  `stripFrontmatter` / `getAgentDir` / `CONFIG_DIR_NAME`, so we can't call pi's version even if we
-  wanted to). **"Project shadows global" here is our own product decision** (design spec §2.2, "scope
-  omitted → pi precedence: project wins over global" — matching the brief), implemented independently
-  in `listTemplates`/`getTemplate` with a `Map` keyed by name where global is inserted first and project
-  second (`Map.set` on an existing key overwrites the value) — the mirror image of pi's own first-wins
-  `dedupePrompts`, chosen deliberately because "more specific scope wins" is the behavior the product
-  spec calls for, not because pi's internals resolve it that way for us.
-- **`stripFrontmatter` (also root-exported) is not used by this module.** `Template.content` is "the
-  full file text: frontmatter + body" (`contracts/domain.ts`), and design spec §2.4 confirms it end to
-  end: "The client assembles the markdown (frontmatter + body); the server writes it verbatim." So
-  `content` is always the raw `readFileSync` result — never pi's parsed/stripped `body` — and
-  `stripFrontmatter` has no field to feed. (A later task's slot parser, over in `apps/web`, will need
-  its own tiny non-pi frontmatter strip if it wants pi's `body` shape — it can't import pi's at all,
-  browser-bundled code included, per the root architecture invariant.)
+- **Directories:** global = `join(agentDir, "prompts")` (`discoverPromptTemplates` passes
+  `getAgentDir()`); project = pi-utils `getProjectPromptsDir(cwd)` = `<cwd>/.omp/prompts`
+  (`CONFIG_DIR_NAME = ".omp"`). Both helpers and `parseFrontmatter` are public pi-utils root exports;
+  omp's coding-agent root re-exports only `getAgentDir`. pi 1.x used `<cwd>/.pi/prompts`; this repo's
+  own templates moved to `.omp/prompts/`.
+- **Parsing:** omp reads a file with `Bun.file().text()` (one leading BOM dropped) and calls
+  `parseFrontmatter(text, { source })` with its defaults: CRLF normalized, leading HTML comments before
+  the fence dropped, kebab-case keys normalized to camelCase (`argument-hint` → `argumentHint`), and
+  **malformed YAML never rejects the file** — after a quoting repair it falls back to a line-by-line
+  `key: value` read and logs a warning. A block with no closing `\n---` is plain body.
+- **What the loader reads:** `description` (any value, stringified) else the body's first non-empty line
+  (60 chars + `...`), with the source label appended (`(user)`, `(project:<subdir>)`); it never reads
+  `argument-hint`. Templates are rendered through omp's Handlebars-style `prompt.render`, so `{{…}}` in a
+  body is template syntax.
+- **Scan:** recursive `**/*` under each dir; the name is the basename minus `.md` (so `sub/foo.md` is
+  `foo`), symlinks followed. Errors per file and per scan are logged and skipped.
+- **Precedence:** `loadPromptTemplates` returns global then project with no dedup, and expansion takes
+  the **first** name match — omp's `/name` prefers the global template.
 
 ## Design
 
 - `templateDirs(cwd?, agentDir = getAgentDir())` → `{ globalDir, projectDir? }` — pure path arithmetic,
   no filesystem access. `agentDir`'s default is a **default-parameter expression**, evaluated at call
-  time, not a module-level constant — `getAgentDir()` reads `PI_CODING_AGENT_DIR` live (history/SPEC.md
-  pins this same fact for pi's `SessionManager` path), so caching it at import time would go stale the
-  moment a test (or the e2e seeder) sets the env var after this module has already loaded.
+  time, not a module-level constant — omp's resolver snapshots `PI_CODING_AGENT_DIR` when pi-utils loads
+  but is re-pointed at runtime (`setAgentDir`, `refreshDirsFromEnv` — host environment changes and test
+  isolation use them), so caching the value here would miss that.
 - `listTemplates` re-reads both directories **on every call** — no cache, anywhere in this module. This
-  is the "/ menu freshness" rule (design spec §2.2): pi's own `session.promptTemplates` getter reads
-  through `ResourceLoader.getPrompts()`, populated once at session load and only refreshed by an
-  explicit resource reload — a **create-time snapshot** that goes stale the moment a template is saved
-  mid-session (confirmed by reading `agent-session.js`'s `get promptTemplates()` /
-  `resource-loader.js`'s `updatePromptsFromPaths`). A template saved through `template.save` must show
+  is the "/ menu freshness" rule (design spec §2.2): omp's own `session.promptTemplates` is the list the
+  session was created with — a **create-time snapshot** that goes stale the moment a template is saved
+  mid-session. A template saved through `template.save` must show
   up the next time any client asks (`template.list`, the web `/` menu, the Templates settings panel), so
   this module never memoizes; the cost is a couple of small `readdir`s per call, which is cheap enough.
 - `isValidTemplateName` is the **traversal gate**: applied to every caller-supplied `name` before it's
@@ -113,7 +65,7 @@ assumption; re-verify on a pi bump.
   from `template.list` and is refused by get/save/delete; deliberate, since the name cannot survive a
   Windows checkout, and list/get parity holds because `listTemplates` filters through the same gate.
   This matters because pi's own loader performs **no sanitization at all** when deriving a name from a
-  filename (see "pi facts" above), so a narrower rule breaks **list/get parity**: a name `listTemplates`
+  filename (see "omp facts" above), so a narrower rule breaks **list/get parity**: a name `listTemplates`
   can show but `getTemplate`/`saveTemplate`/`deleteTemplate` refuse is a user-visible bug, not a safety
   improvement.
   (This gate originally used an `/^[a-z0-9][a-z0-9-_]*$/i` allowlist regex — safe, but over-restrictive:
@@ -133,20 +85,20 @@ assumption; re-verify on a pi bump.
   nothing touched on disk), `deleteTemplate` reports it not-found; `listDir` already skips symlinks
   structurally (a symlink dirent's `isFile()` is false, and no follow-up `stat` is taken). This is a
   **deliberate divergence from pi's own scanner**, which explicitly follows a file symlink
-  (`loadTemplatesFromDir` stats it and loads a file target — "pi facts" above): pi's loader is a
+  (`loadTemplatesFromDir` stats it and loads a file target — "omp facts" above): pi's loader is a
   read-only, local convenience, while this module is a *write-capable CRUD surface over the wire* —
-  following `.pi/prompts/linked.md → ~/somewhere` would let `template.get` disclose the target and
+  following `.omp/prompts/linked.md → ~/somewhere` would let `template.get` disclose the target and
   `template.save` overwrite it, so a checked-out repo could plant a link and turn a routine template
   edit into a file write outside the worktree. Cost: a legitimately symlinked individual template that
   pi's own `/` menu would offer doesn't appear in ThinkRail's — acceptable, and already the listing's
-  behavior before this gate existed. The same rule applies **one level up**: a symlinked `<cwd>/.pi` or
-  `<cwd>/.pi/prompts` *directory* (the repo controls those path components) makes the project dir
+  behavior before this gate existed. The same rule applies **one level up**: a symlinked `<cwd>/.omp` or
+  `<cwd>/.omp/prompts` *directory* (the repo controls those path components) makes the project dir
   untraversable for **every** project-scope operation — `listTemplates`/`getTemplate` treat it as having
   no templates (list and get share one predicate, `readableProjectDir`, so they can never disagree),
   while `saveTemplate`/`deleteTemplate` refuse loudly (a write must fail visibly, never silently no-op).
   Without the read half, `template.list`/`template.get` would still disclose the link target's `.md`
   files over the wire — the same escape the file-level gate closes. The **global** dir is exempt on
-  purpose: `~/.pi/agent/prompts` is
+  purpose: `~/.omp/agent/prompts` is
   user-owned (an attacker writing there has already won) and dotfile managers routinely symlink it. The
   `lstat`-then-write gap is a TOCTOU race only a concurrent local process could exploit — out of scope
   for an owner-scoped host (such a process could write the target directly). Pinned by the symlink
@@ -155,38 +107,36 @@ assumption; re-verify on a pi bump.
   `content`) and does bounded work per file regardless of what a checkout dropped in the dir:
   `readTemplateMeta` reuses the no-follow `lstat` as a size gate (a file over **`MAX_TEMPLATE_BYTES`**,
   1 MiB, is silently skipped — list/get parity: neither surfaces it usefully) and reads only the first
-  `FRONTMATTER_SCAN_BYTES` (8 KiB) of the head for the frontmatter — pi's `extractFrontmatter` treats a
+  `FRONTMATTER_SCAN_BYTES` (8 KiB) of the head for the frontmatter — omp's `parseFrontmatter` treats a
   truncated block with no closing fence as plain content, so a pathological >8 KiB frontmatter degrades
   to "no metadata," never an error or a full-file read (the by-name path still sees such metadata — a
   documented asymmetry of the bounded listing, pinned in tests). The **full text** travels only on the
   by-name `template.get`/`template.save` path (`Template`), where an oversized file/payload fails
   **loudly** (read: before `readFileSync`; save: before anything touches disk) — a directly-named
   operation deserves a loud answer, the same loud-vs-skip asymmetry as malformed frontmatter. This is
-  what keeps one huge checked-in `.pi/prompts/*.md` from blocking the shared in-process host on every
+  what keeps one huge checked-in `.omp/prompts/*.md` from blocking the shared in-process host on every
   `/`-menu open or bloating a single WS response with every file's body.
-- Two layers of failure containment inside `listDir` (the directory scan `listTemplates` calls twice),
-  each mirroring a different pi behavior at a different granularity: **(1)** a per-file read/parse
-  failure (unreadable file, malformed YAML frontmatter) is caught and that one file is skipped — mirrors
-  the *shape* of pi's own `loadTemplateFromFile` (its per-file catches still return a null template on
-  failure; since 0.87 they additionally push a warning diagnostic, but this module has no diagnostics
-  channel and simply drops the file, as before). **(2)** the *directory scan
+- Metadata uses omp's parse exactly (pi-utils `parseFrontmatter`, level `off` so a listing logs nothing):
+  one leading BOM is dropped first, as omp's file read does, and a file whose YAML omp can only read
+  through its line fallback lists and gets **with that fallback metadata** — omp still offers it, so
+  hiding it here would break parity (pi 1.x skipped such a file in its listing and its `get` threw).
+- Two layers of failure containment inside `listDir` (the directory scan `listTemplates` calls twice):
+  **(1)** a per-file read failure (unreadable file) is caught and that one file is skipped, as omp's
+  loader skips it. **(2)** the *directory scan
   itself* — the `readdirSync` call plus the loop around it — is also wrapped, so an unreadable directory
   (EACCES, or, deterministically, a path that turns out not to be a directory at all) returns whatever
-  had already been collected instead of throwing out of `listTemplates` entirely — mirrors pi's own
-  `loadTemplatesFromDir`, whose try/catch wraps the *whole* scan, not just each file. (Layer (2) was
-  itself a fix: an earlier version had only layer (1), so an unreadable directory propagated straight
-  through `listTemplates` and could blank the *other* scope's results too, not just the bad one's.)
-  `getTemplate` makes no such allowance for a *directly named* file: a parse failure there propagates,
-  since the caller asked for that one file specifically and deserves to know something's wrong with it
-  (covered by a dedicated test — the documented asymmetry against `listTemplates`'s swallow).
-- `saveTemplate` parses the incoming `content`'s frontmatter *before* writing anything. Building the
-  return value already called `parseFrontmatter` via `readTemplateFile` after the write — which meant a
-  syntactically-invalid `---`-fenced block would land the file on disk and *then* throw, orphaning a file
-  that's invisible to `listTemplates` (layer (1) above swallows it) and un-`get`-able (propagates there,
-  by design) — present on disk but unreachable through this module. Validating first turns a rejected
-  save into a no-op on the filesystem: nothing is written, `mkdirSync`/`writeFileSync` never run. The
+  had already been collected instead of throwing out of `listTemplates` entirely — mirrors omp's
+  `loadTemplatesFromDir`, whose try/catch wraps the *whole* scan. (Layer (2) was itself a fix: without
+  it an unreadable directory could blank the *other* scope's results too.)
+- `saveTemplate` validates the incoming `content`'s frontmatter *before* writing anything, with
+  `parseFrontmatter` at level `fatal`: YAML omp could read only through its warning fallback is
+  refused, so ThinkRail never writes a template whose metadata omp would have to guess. A rejected save
+  is a no-op on the filesystem: nothing is written, `mkdirSync`/`writeFileSync` never run. The
   read-back after a successful write can in principle still fail, but only for a filesystem race at that
   point, not a content problem — an acceptable residual this function doesn't try to eliminate.
+- Only each directory's top-level `.md` files are templates here; omp's scan also recurses into
+  subdirectories (a `sub/foo.md` it names `foo`). A by-name `join(dir, name.md)` cannot address those
+  files, so listing them would break list/get parity; they stay omp-only.
 - `listTemplates`'s result is sorted by `name` — `readdir` order isn't guaranteed across platforms, and
   every consumer of a template *list* (the `/` menu, the Templates settings panel) wants a stable order
   more than it wants filesystem-arrival order.
@@ -199,8 +149,8 @@ assumption; re-verify on a pi bump.
   only `join(dir, \`${name}.md\`)` after `name` has passed `isValidTemplateName`.
 - **Public surface (barrel):** `templateDirs`, `TemplateDirs`, `listTemplates`, `getTemplate`,
   `saveTemplate`, `deleteTemplate`, `isValidTemplateName`.
-- **Allowed deps:** `@earendil-works/pi-coding-agent` (`getAgentDir`, `CONFIG_DIR_NAME`,
-  `parseFrontmatter` — root exports only), `@thinkrail/contracts` (`TemplateInfo`, `TemplateScope`),
+- **Allowed deps:** `@oh-my-pi/pi-utils` (`getAgentDir`, `getProjectPromptsDir`, `parseFrontmatter` —
+  root exports only), `@thinkrail/contracts` (`TemplateInfo`, `TemplateScope`),
   `node:fs`, `node:path`.
 - **Forbidden:** importing `workspaces` / `projects` — stays registry-free like `history`; the
   `template.*` handler resolves the read request's one optional `workspaceId` / `projectId` location to `cwd`

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import defaultFactory, {
 	ASK_ACK_TEXT,
 	ASK_UNAVAILABLE_TEXT,
@@ -10,6 +10,11 @@ import defaultFactory, {
 	DEFAULT_DESCRIPTION,
 	DEFAULT_PROMPT_GUIDELINES,
 } from "./index.ts";
+import {
+	DISCARDED_CALL_REASON,
+	NOT_MODEL_CALL_REASON,
+	promptGuidelinesSection,
+} from "./src/extension.ts";
 
 type ExecResult = {
 	content: { type: string; text: string }[];
@@ -20,10 +25,7 @@ type ExecResult = {
 interface CapturedTool {
 	name: string;
 	description: string;
-	promptSnippet?: string;
-	promptGuidelines?: string[];
-	executionMode?: string;
-	exposure?: string;
+	loadMode?: string;
 	execute: (
 		id: string,
 		params: unknown,
@@ -33,22 +35,27 @@ interface CapturedTool {
 	) => Promise<ExecResult>;
 }
 
-type MessageEndHandler = (event: { message: unknown }) => { message: unknown } | undefined;
+type Handler = (event: Record<string, unknown>) => unknown;
 
-function load(options?: AskUserQuestionExtensionOptions) {
+function load(options?: AskUserQuestionExtensionOptions, activeTools = ["ask_user_question"]) {
 	let tool: CapturedTool | undefined;
-	const handlers = new Map<string, MessageEndHandler>();
+	const handlers = new Map<string, Handler>();
 	const pi = {
 		registerTool: (definition: CapturedTool) => {
 			tool = definition;
 		},
-		on: (event: string, handler: MessageEndHandler) => {
+		on: (event: string, handler: Handler) => {
 			handlers.set(event, handler);
 		},
+		getActiveTools: () => activeTools,
 	} as unknown as ExtensionAPI;
 	(options ? createAskUserQuestionExtension(options) : defaultFactory)(pi);
 	if (!tool) throw new Error("the extension registered no tool");
-	return { tool, handlers };
+	const emit = (event: string, payload: Record<string, unknown>) => handlers.get(event)?.(payload);
+	const systemPrompt = () => emit("before_agent_start", { systemPrompt: ["base"] });
+	const toolCall = (toolName: string, toolCallId: string) =>
+		emit("tool_call", { type: "tool_call", toolName, toolCallId, input: {} });
+	return { tool, emit, systemPrompt, toolCall };
 }
 
 const args: AskUserQuestionArgs = {
@@ -67,49 +74,52 @@ const args: AskUserQuestionArgs = {
 const text = (result: ExecResult): string => result.content.map((block) => block.text).join("");
 
 describe("ask_user_question extension", () => {
-	test("registers a sequential, model-only ask_user_question with the default guidance", () => {
-		const { tool, handlers } = load();
+	test("registers an essential ask_user_question and appends the default guidelines to the system prompt", () => {
+		const { tool, systemPrompt } = load();
 		expect(tool.name).toBe("ask_user_question");
-		expect(tool.executionMode).toBe("sequential");
-		expect(tool.exposure).toBe("model-only");
+		expect(tool.loadMode).toBe("essential");
 		expect(tool.description).toBe(DEFAULT_DESCRIPTION);
-		expect(tool.promptGuidelines).toEqual([...DEFAULT_PROMPT_GUIDELINES]);
-		expect(tool.promptSnippet).toBeUndefined();
-		expect(handlers.has("message_end")).toBe(true);
+		expect(systemPrompt()).toEqual({
+			systemPrompt: ["base", promptGuidelinesSection(DEFAULT_PROMPT_GUIDELINES)],
+		});
+		expect(load(undefined, ["read"]).systemPrompt()).toBeUndefined();
 	});
 
-	test("guidance replaces the description, snippet and guidelines", () => {
-		const { tool } = load({
-			guidance: { description: "Host wording", promptSnippet: "Ask", promptGuidelines: ["one"] },
+	test("guidance replaces the description and guidelines", () => {
+		const { tool, systemPrompt } = load({
+			guidance: { description: "Host wording", promptGuidelines: ["one"] },
 		});
 		expect(tool.description).toBe("Host wording");
-		expect(tool.promptSnippet).toBe("Ask");
-		expect(tool.promptGuidelines).toEqual(["one"]);
+		expect(systemPrompt()).toEqual({
+			systemPrompt: ["base", "Guidelines for ask_user_question:\n- one"],
+		});
 	});
 
-	test("the message_end hook keeps the first ask as the batch's only tool call", () => {
-		const { handlers } = load();
+	test("the batch hooks keep the first ask as the batch's only executed tool call", () => {
+		const { emit, toolCall } = load();
 		const message = {
 			role: "assistant",
+			stopReason: "toolUse",
 			content: [
 				{ type: "toolCall", id: "read-1", name: "read" },
 				{ type: "toolCall", id: "ask-1", name: "ask_user_question" },
+				{ type: "toolCall", id: "ask-2", name: "ask_user_question" },
 			],
 		};
-		expect(handlers.get("message_end")?.({ message })).toEqual({
-			message: {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "ask-1", name: "ask_user_question" }],
-			},
+		expect(emit("assistant_message", { message })).toBeUndefined();
+		expect(toolCall("read", "read-1")).toEqual({ block: true, reason: DISCARDED_CALL_REASON });
+		expect(toolCall("ask_user_question", "ask-2")).toEqual({
+			block: true,
+			reason: DISCARDED_CALL_REASON,
 		});
-		expect(
-			handlers.get("message_end")?.({ message: { role: "user", content: "hi" } }),
-		).toBeUndefined();
+		expect(toolCall("ask_user_question", "ask-1")).toBeUndefined();
+		emit("assistant_message", { message: { role: "user", content: "hi" } });
+		expect(toolCall("read", "read-2")).toBeUndefined();
 	});
 
-	test("the message_end hook announces only the executable ask call it keeps", () => {
+	test("the assistant_message hook announces only the executable ask call it keeps", () => {
 		const announced: string[] = [];
-		const { handlers } = load({ announce: (toolCallId) => announced.push(toolCallId) });
+		const { emit } = load({ announce: (toolCallId) => announced.push(toolCallId) });
 		const batch = (stopReason: string) => ({
 			role: "assistant",
 			stopReason,
@@ -118,11 +128,19 @@ describe("ask_user_question extension", () => {
 				{ type: "toolCall", id: "ask-2", name: "ask_user_question" },
 			],
 		});
-		handlers.get("message_end")?.({ message: batch("toolUse") });
+		emit("assistant_message", { message: batch("toolUse") });
 		for (const stopReason of ["length", "error", "aborted"])
-			handlers.get("message_end")?.({ message: batch(stopReason) });
-		handlers.get("message_end")?.({ message: { role: "user", content: "hi" } });
+			emit("assistant_message", { message: batch(stopReason) });
+		emit("assistant_message", { message: { role: "user", content: "hi" } });
 		expect(announced).toEqual(["ask-1"]);
+	});
+
+	test("an ask the model did not issue directly, such as an eval script's, is blocked", () => {
+		const { toolCall } = load();
+		expect(toolCall("ask_user_question", "js-ask_user_question-1")).toEqual({
+			block: true,
+			reason: NOT_MODEL_CALL_REASON,
+		});
 	});
 
 	test("without UI the built-in asker reports that it cannot ask", async () => {

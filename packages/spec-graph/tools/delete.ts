@@ -1,10 +1,9 @@
 import { rmSync } from "node:fs";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { errorResult, getIndex, textResult } from "./shared.ts";
 
-const parameters = Type.Object({
-	id: Type.String({ description: "Id of the spec to delete." }),
+const parameters = z.object({
+	id: z.string().describe("Id of the spec to delete."),
 });
 
 export function registerSpecDelete(pi: ExtensionAPI): void {
@@ -13,7 +12,7 @@ export function registerSpecDelete(pi: ExtensionAPI): void {
 		label: "Spec Delete",
 		description:
 			"Delete a spec file by id. Other specs may still reference it afterward — run spec_validate to find dangling links.",
-		promptSnippet: "spec_delete — delete a spec file by id.",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const index = getIndex(ctx.cwd);

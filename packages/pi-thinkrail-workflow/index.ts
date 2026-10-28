@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent";
 
 export const WORKFLOW_SECTION = "pi-thinkrail-workflow";
 
@@ -8,10 +8,14 @@ export const WORKFLOW_RULE = [
 	"Continue work already routed to a workflow without routing it again.",
 ].join("\n");
 
+export const WORKFLOW_BLOCK = `<${WORKFLOW_SECTION}>\n${WORKFLOW_RULE}\n</${WORKFLOW_SECTION}>`;
+
 const factory: ExtensionFactory = (pi: ExtensionAPI) => {
-	pi.on("before_agent_start", (event) => {
-		event.systemPromptOptions.sections[WORKFLOW_SECTION] = WORKFLOW_RULE;
-	});
+	pi.on("before_agent_start", (event) =>
+		event.systemPrompt.includes(WORKFLOW_BLOCK)
+			? undefined
+			: { systemPrompt: [...event.systemPrompt, WORKFLOW_BLOCK] },
+	);
 };
 
 export default factory;

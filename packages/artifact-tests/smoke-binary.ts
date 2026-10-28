@@ -136,6 +136,27 @@ try {
 	if (existsSync(join(cache, "thinkrail"))) {
 		throw new Error("exit-only subcommand staged embedded assets");
 	}
+	const worker = Bun.spawnSync([binary, "__omp_worker_thinkrail_probe"], {
+		env: hostEnvironment({
+			XDG_CACHE_HOME: cache,
+			HOME: home,
+			USERPROFILE: home,
+			THINKRAIL_NO_ANALYTICS: "1",
+			CI: "1",
+		}),
+		stdout: "pipe",
+		stderr: "pipe",
+		cwd: project,
+		timeout: 30_000,
+	});
+	if (worker.exitCode !== 1 || !worker.stderr.toString().includes("unknown worker selector")) {
+		throw new Error(
+			`an engine worker selector did not reach the engine's worker host: exit ${worker.exitCode}, ${worker.stderr}`,
+		);
+	}
+	if (existsSync(join(cache, "thinkrail"))) {
+		throw new Error("an engine worker selector booted the ThinkRail host");
+	}
 	await runArtifactHostProbes(adapter);
 	console.log(`smoke OK: ${binary} passed CLI-only and shared artifact probes.`);
 } catch (error) {

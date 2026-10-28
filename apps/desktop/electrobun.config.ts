@@ -25,6 +25,7 @@ export default {
 		copy: {
 			"../web/dist": "views/web",
 			".stage/runtime": "runtime",
+			".stage/native": "native",
 		},
 		mac: { bundleCEF: false, icons: "../../packages/shared/assets/icon.iconset" },
 		linux: { bundleCEF: false, icon: "../../packages/shared/assets/icon.png" },

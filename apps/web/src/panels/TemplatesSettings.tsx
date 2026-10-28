@@ -381,7 +381,7 @@ function TemplateRow({
 
 	const openAsFile = () => {
 		if (!workspaceId) return;
-		void openFileInTab(workspaceId, `.pi/prompts/${template.name}.md`, "keep");
+		void openFileInTab(workspaceId, `.omp/prompts/${template.name}.md`, "keep");
 		useAppStore.getState().closeSettings();
 	};
 

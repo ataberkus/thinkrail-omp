@@ -40,8 +40,8 @@ function resolveKind(facts: ProviderAuthFacts): ProviderAuthKind {
 function resolveDetail(facts: ProviderAuthFacts): string | undefined {
 	if (facts.central) return undefined;
 	if (facts.label) return facts.label;
-	if (facts.source === "models_json_key") return "models.json";
-	if (facts.source === "models_json_command") return "models.json (command)";
+	if (facts.source === "models_json_key") return "models.yml";
+	if (facts.source === "models_json_command") return "models.yml (command)";
 	return undefined;
 }
 

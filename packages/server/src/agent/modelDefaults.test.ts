@@ -1,36 +1,47 @@
 import { expect, test } from "bun:test";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { PI_DEFAULT_MODEL_PER_PROVIDER, preferredDefaultModel } from "./modelDefaults";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { createFauxModelRegistry } from "pi-faux";
+import { preferredDefaultModel } from "./modelDefaults";
 
-const piDist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
-const piResolver = (await import(join(piDist, "core", "model-resolver.js"))) as {
-	defaultModelPerProvider: Record<string, string>;
-};
+const { modelRegistry } = await createFauxModelRegistry();
+const catalog = modelRegistry.getAll();
 
-test("the default-model preference mirrors pi's provider defaults, in pi's order", () => {
-	expect(Object.entries(PI_DEFAULT_MODEL_PER_PROVIDER)).toEqual(
-		Object.entries(piResolver.defaultModelPerProvider),
+function model(provider: string, id: string): Model<Api> {
+	const found = catalog.find((candidate) => candidate.provider === provider && candidate.id === id);
+	if (!found) throw new Error(`omp's catalog has no ${provider}/${id}`);
+	return found;
+}
+
+function providerDefault(provider: keyof typeof DEFAULT_MODEL_PER_PROVIDER): Model<Api> {
+	return model(provider, DEFAULT_MODEL_PER_PROVIDER[provider]);
+}
+
+function otherThanDefault(provider: keyof typeof DEFAULT_MODEL_PER_PROVIDER): Model<Api> {
+	const other = catalog.find(
+		(candidate) =>
+			candidate.provider === provider && candidate.id !== DEFAULT_MODEL_PER_PROVIDER[provider],
+	);
+	if (!other) throw new Error(`omp's catalog has only the default ${provider} model`);
+	return other;
+}
+
+test("omp's provider default wins over catalog order", () => {
+	const openai = providerDefault("openai");
+	expect(preferredDefaultModel([otherThanDefault("openai"), openai])).toBe(openai);
+});
+
+test("a signed-in provider's default beats one that is only ambiently available", () => {
+	const bedrock = providerDefault("amazon-bedrock");
+	const anthropic = providerDefault("anthropic");
+	expect(preferredDefaultModel([bedrock, anthropic])).toBe(bedrock);
+	expect(preferredDefaultModel([bedrock, anthropic], (provider) => provider === "anthropic")).toBe(
+		anthropic,
 	);
 });
 
-test("the preferred default follows pi's provider order before falling back to the first model", () => {
-	const available = [
-		{ provider: "openai", id: "gpt-4" },
-		{ provider: "openai", id: "gpt-5.5" },
-		{ provider: "anthropic", id: "claude-opus-4-8" },
-	];
-	expect(preferredDefaultModel(available)).toEqual({
-		provider: "anthropic",
-		id: "claude-opus-4-8",
-	});
-	expect(preferredDefaultModel(available.slice(0, 2))).toEqual({
-		provider: "openai",
-		id: "gpt-5.5",
-	});
-	expect(preferredDefaultModel([{ provider: "custom", id: "local" }])).toEqual({
-		provider: "custom",
-		id: "local",
-	});
+test("without any provider default the first available model is chosen; none yields nothing", () => {
+	const first = otherThanDefault("openai");
+	expect(preferredDefaultModel([first, otherThanDefault("anthropic")])).toBe(first);
 	expect(preferredDefaultModel([])).toBeUndefined();
 });

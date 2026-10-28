@@ -27,17 +27,11 @@ re-opened transcripts provider-valid.
     `usePiRuntime()` callback to capture the current generation rather than receiving a mutable singleton;
     host boot initializes it before any model work, while later Central artifact changes prepare and atomically
     activate a fresh generation. Tests configure the factory before initialization. Every runtime is created
-    with **ambient network OFF** —
-    `allowModelNetwork: false` **plus a scoped `PI_OFFLINE` around construction** (pi 0.81 derives the
-    runtime's ambient-network default from that env at construction; the option now gates only the
-    create-time refresh — in 0.80.x it fed both; the scoped value is restored immediately, a user-set
-    one untouched — pinned by `piRuntime.test.ts`): catalog reads stay local (builtins + models.json +
-    the persisted models-store), because a network-enabled `refresh()` (pi 0.82 folded the old
-    `reloadConfig()` into it) awaits remote pi.dev catalog
-    checks with no timeout — on the `provider.status` and host-boot paths that stalls wherever
-    egress is slow or blocked. The one deliberate opt-in to
-    live catalogs is the single-flighted **`refreshCatalogs(runtime)`** (issue #98, mirroring pi's own
-    `/model`) behind two triggers: a detached task from `model.list` only
+    with **ambient network OFF** (`allowModelNetwork: false`: the registry loads offline from builtins,
+    `models.yml` and omp's model cache), because a network refresh awaits remote catalog fetches with no
+    timeout — on the `provider.status` and host-boot paths that stalls wherever egress is slow or
+    blocked. The one deliberate opt-in to
+    live catalogs is the single-flighted **`refreshCatalogs(runtime)`** (issue #98) behind two triggers: a detached task from `model.list` only
     (`listAvailableModels` fires it, then serves the current snapshot — the picker read never awaits the
     network; broader triggers — `model.default`, new-chat default resolution, host boot — were considered
     and declined, so those read the snapshot through `listSettledModels`) and
@@ -47,22 +41,21 @@ re-opened transcripts provider-valid.
     client as `RefreshedModels.complete`, because a capped wait can only promise a *current* list, not a
     settled one, and catalog authority must key on the difference). Per-call `refresh({ allowNetwork: true, force })`,
     where **`force` is the caller's intent, not a constant**: an *implicit* trigger (`model.list`, opening
-    the picker) leaves it off and pi's **4h provider freshness throttle** decides whether anything is
-    fetched, while a *user-initiated* refresh (the picker's Refresh row → `model.refresh({force:true})`)
-    bypasses it — inside that window pi returns early **before issuing any request at all** (its
-    `If-None-Match` revalidation included), so an unforced explicit refresh would fetch nothing at all. **Single-flight per runtime instance** (pi's
-    `refresh()` doesn't dedupe concurrent calls) **keyed with the kind**: an implicit caller joins any
-    pass, a forced caller never joins a throttled one (it would inherit the no-op) and instead queues
-    behind it. The **15s budget** (pi's model-selector one) is applied **twice**, both on **unref'd**
-    timers (must not hold a shutting-down host or a test process open): as `models.refresh`'s **abort**
-    signal (a hung refresh must self-expire or single-flight would wedge) *and* as the ceiling on what a
-    **caller awaits**, because the signal bounds neither pi's unsignalled `forceRefreshAvailability()`
-    fan-out after it nor a forced pass queued behind a throttled one — without it one slow provider leaves
-    every picker's refresh row spinning. A timed-out caller serves the registry as it stands (reporting
+    the picker) leaves it off and omp's `online-if-uncached` strategy fetches only providers without a
+    fresh cached catalog (24h), while a *user-initiated* refresh (the picker's Refresh row →
+    `model.refresh({force:true})`) uses omp's `online` strategy, so an explicit refresh always fetches.
+    **Single-flight per runtime instance keyed with the kind**: an implicit caller joins any pass, a
+    forced caller never joins an unforced one (it would inherit the cache hit) and instead queues behind
+    it. The **15s budget** is applied **twice**, both on **unref'd** timers (must not hold a
+    shutting-down host or a test process open): as the refresh's **abort** signal (a hung refresh must
+    self-expire or single-flight would wedge) *and* as the ceiling on what a **caller awaits**, because
+    omp's registry refresh takes no signal (the abort only ends the wait) and the signal does not bound a
+    forced pass queued behind an unforced one — without it one slow provider leaves every picker's
+    refresh row spinning. A timed-out caller serves the registry as it stands (reporting
     `completed: false`) while single-flight keeps tracking the unbounded pass (so it cannot start a second concurrent refresh); failures emit only a closed generic/count warn log (never provider ids or errors) + are swallowed, never the picker's problem; **`PI_OFFLINE`**
-    (pi's env convention) disables it — resolving as a *completed* pass, since with nothing fetchable the
-    registry as it stands is the settled answer; the e2e webServer env and the manager's unit suite set it for
-    hermeticity. The **provider-credential surface** over this runtime —
+    — a host-only switch omp does not read — keeps `refreshCatalogs` and `ModelRuntime.refresh` offline,
+    resolving as a *completed* pass, since with nothing fetchable the registry as it stands is the settled
+    answer; the e2e webServer env and the manager's unit suite set it for hermeticity. The **provider-credential surface** over this runtime —
     `provider.status` + in-app login — lives in the sibling `auth` module (which consumes the shared
     `usePiRuntime` callback), **not** here.
 
@@ -70,7 +63,7 @@ re-opened transcripts provider-valid.
     composition root's invariant generation initializer (the source-mode e2e host uses it for its gated fake
     providers), records that pre-opaque provider-id allowlist for `provider.status` together with each id's
     display name at that moment, and then applies the opaque
-    extensions once through PI's public headless loader. The generation separately records ids introduced
+    extensions once through omp's public headless `loadExtensions`. The generation separately records ids introduced
     or replaced by that loader (`opaqueProviderIds`) through opaque registration-identity comparison, never
     configuration values. The allowlist stays the full pre-opaque set: a novel Central id was never in it
     and so never becomes a row, while a replaced built-in (`anthropic`, `openai`, …) stays visible and
@@ -100,39 +93,63 @@ re-opened transcripts provider-valid.
     no separate fallback warning. With no available model, the transcript remains readable and no
     placeholder model is persisted as a replacement.
 
-    Every models **read** goes through **`settledAvailableModels(runtime)`** — pi's
-    `getAvailableSnapshot()` narrowed by `modelAvailability`, **never `getAvailable()`**: that one awaits `refreshAvailability()`, which
-    returns the pending per-provider auth fan-out *or starts one*, all unsignalled — so reading through it
-    would hand `model.list` (whose contract is to answer without touching the network), `model.default` and
-    every inbound model-ref check an unbounded wait, and would escape the refresh deadline one line after
-    applying it. The snapshot is what pi's last *settled* pass concluded (written at `create()`, after every
-    `refresh()`, and on login/logout), plus a provisional entry pi writes the moment a provider with a stored
-    credential or configured key is registered — config and native (`registerNativeProvider`) registrations
-    alike, so a Central or delegation-mirrored provider is readable before its availability pass lands. Being
-    the one read makes the picker, default, and model resolution agree within a generation.
-  - `modelAvailability` — narrows that snapshot to what the **connection** serves; pi's catalogs are
-    per-provider, not per-account, so a provider pi calls configured can still 400 on most of its catalog.
-    Two rules, each scoped by `baseUrl` so custom or rerouted models are untouched: **Sign in with ChatGPT**
-    (`openai` + OAuth against `api.openai.com/v1`) keeps only ids in pi's own `openai-codex` catalog — the
-    ChatGPT backend rejects the API-only rest (`gpt-4`, `gpt-4o`, `o1`, …) with `model_not_found`; and an
+    Every models **read** goes through **`settledAvailableModels(runtime)`** — `getAvailableSnapshot()`
+    (omp's synchronous `ModelRegistry.getAvailable()`: a configured-auth check over the current catalog,
+    with no token refresh or network) narrowed by `modelAvailability` — so `model.list`, `model.default`
+    and every inbound model-ref check answer without waiting, and the picker, default and model resolution
+    agree within a generation.
+  - `modelAvailability` — narrows that snapshot to what the **connection** serves; omp's catalogs are
+    per-provider, not per-account, so a provider omp calls configured can still 400 on most of its catalog.
+    One rule, scoped by `baseUrl` so custom or rerouted models are untouched (pi's ChatGPT-sign-in
+    allowlist is gone, [[pi-compatibility]]): an
     **opaque (Central) provider** keeps the ids its proxy advertises on `GET /models` (OpenAI wire) or
     `GET /v1/models` (Anthropic wire), an alias matching a listed `-YYYYMMDD` / `-YYYY-MM-DD` dated id
-    (the proxy resolves `gpt-4o` to `gpt-4o-2024-11-20`). Listings are read with pi's resolved auth beside
+    (the proxy resolves `gpt-4o` to `gpt-4o-2024-11-20`). Listings are read with omp's resolved auth beside
     `refreshCatalogs` (detached on `model.list`, awaited and forced on `model.refresh`), single-flighted,
     5s-bounded end to end (one deadline covers credential resolution and the fetch, so a stalled OAuth
     refresh cannot wedge the single flight), throttled to 60s per runtime, and a change publishes
     `provider.changed` so the picker re-reads; an unknown wire or a never-read listing filters nothing,
     and a failed re-read keeps the last listing. Failures log only a closed count, never provider ids or
-    the provider's error text. Direct API keys and other subscriptions keep pi's catalog: no listing was verified to
-    agree with pi's aliases there.
-  - `modelDefaults` — `preferredDefaultModel(available)`: pi's `defaultModelPerProvider` in pi's order,
-    then any available model whose id is one of those defaults, else the first available model. Pi does
-    not export that map, so the host mirrors it under a parity test against the installed dist; the first
-    pass is what pi's own `findInitialModel` would pick. The same-id pass covers a provider whose own
-    default the account filter removed: Sign in with ChatGPT serves `openai` models from the
-    `openai-codex` set, so it lands on the Codex default instead of catalog order.
-  - `modelContext` — a narrow settings adapter for the `contextWindow` override in pi's shared
-    `getAgentDir()/models.json`, not a second model registry. It lists the OpenAI Responses / Codex
+    the provider's error text. Direct API keys and subscriptions keep omp's catalog: no listing was verified to
+    agree with omp's aliases there.
+  - `modelDefaults` — `preferredDefaultModel(available, hasConcreteAuth?)` delegates to omp's exported
+    startup picker `pickDefaultAvailableModel` (an account or provider default first, signed-in providers
+    ahead of ambient ones, else the first model), so new-chat, reviewer and one-shot fallbacks are omp's
+    own pick.
+  - `modelRuntime` provider metadata the host derives because omp does not carry it: API-key entry is
+    offered for a builtin provider with an env-key fallback (`listProvidersWithEnvKey`) unless that
+    fallback is an OAuth access token (`*_OAUTH_TOKEN`, e.g. `openai-codex`) or the provider authenticates
+    without a key (`allowsMissingApiKey`, e.g. `bedrock-mantle`); **subscription** sign-ins are the
+    host's `SUBSCRIPTION_SIGN_INS` (pi's `isSubscription` providers under their omp ids: `anthropic`,
+    `openai-codex`, `github-copilot`, `kimi-code`, `xai-oauth`, `muse-code`), which feed
+    `HostProvider.auth.oauth.isSubscription` and `isUsingSubscription`. A `NativeProvider` with only a
+    key-entry flow is registered with that flow as its omp `oauth.login` (returning the key, which omp
+    stores as an API-key credential): omp otherwise demands `apiKey` or `oauth` for a provider with
+    models, and a configured `apiKey` reference shadows the stored key. The synthetic login is not
+    reported as an OAuth sign-in.
+
+    **Local refresh is input-gated.** `refresh()` always reloads stored credentials (an external omp login
+    becomes visible), but runs omp's registry `refresh` offline only when the models config file's identity
+    (path, inode, size, mtime) or the stored-credential rows changed since the last rebuild, or when the
+    caller forces or allows the network. omp's offline rebuild recomposes every catalog (hundreds of ms), and
+    its per-provider `refreshProvider` repeats a static reload plus every other runtime discovery per call.
+    `provider.status` revalidates on every read and the Central card polls it every 500 ms while
+    `configuring`; the pi-era per-provider loop cost seconds per read under omp, starved the host and kept
+    the rebuild drain from settling ([[central-integration]] post-mortem).
+
+    **A registered model list replaces the provider's catalog.** For a provider registered with an explicit
+    `models` list (no `fetchDynamicModels`, no OAuth `modifyModels`), every host read (`getModels`,
+    `getModel`, `getAvailableSnapshot`, `getAvailable`, `getAuth`) serves exactly those ids. omp documents
+    that contract but applies it only when its registry holds a full snapshot at registration time; any later
+    static reload re-merges the built-in catalog with the registered overlays, which would surface built-ins
+    beside a Central replacement with the replacement's key installed for the provider ([[pi-compatibility]]).
+  - `modelContext` — a narrow settings adapter for the `contextWindow` override in omp's shared models
+    config, not a second model registry. The file is the one the runtime's registry reads:
+    `ModelRuntime.modelsConfigPath` (`<agentDir>/models.yml` unless a path was given) resolved through
+    omp's own `ModelsConfigFile.relocate(path).path()` — `models.yml`, else an existing `models.yaml`;
+    omp migrates a pi-era `models.json` into `models.yml` on its first load, and every read and save
+    refreshes the runtime first, so the JSON file is never edited. A runtime that ignores local model
+    configuration (`modelsPath: null`) refuses both. It lists the OpenAI Responses / Codex
     Responses models from `settledAvailableModels` whose effective budget still equals the contracts'
     272K editing minimum (the cap this setting exists to lift), plus any model that already carries an
     override so it can always be reverted; each entry pairs pi's effective `contextWindow` with the
@@ -140,12 +157,13 @@ re-opened transcripts provider-valid.
     from a model-id list, so catalog defaults above 1M stay untouched by a bulk save. A save validates
     the contracts' 272K–1M range first, patches `providers.<p>.modelOverrides.<id>.contextWindow` for the
     target — or, for `available`, every eligible pair the contracts' `isSharedModelContextTarget` admits, so
-    a shared save never rewrites an override outside the range that only a targeted save can touch — with
-    `jsonc-parser` so comments, BOM and unrelated
-    configuration survive, prunes override objects it empties (never `providers`), refuses invalid JSON
-    or a read-only file rather than patching it, then writes a temp file beside the resolved target with
+    a shared save never rewrites an override outside the range that only a targeted save can touch — on a
+    `yaml` `Document` so comments, a BOM and unrelated configuration survive (the document is re-rendered,
+    so spacing and quoting may normalize; values and comments do not change), prunes override objects it
+    empties (never `providers`), refuses YAML that does not parse to a mapping or a read-only file rather
+    than patching it, then writes a temp file beside the resolved target with
     the original's mode (`0o600` for a new file) and renames it into place — following a symlinked
-    `models.json` to its target, and creating a dangling link's target rather than replacing the link. Saves are serialized in-process; a changed file is followed by one
+    models file to its target, and creating a dangling link's target rather than replacing the link. Saves are serialized in-process; a changed file is followed by one
     network-disabled `runtime.refresh` on the current generation and the host's `provider.changed`
     signal; a no-op save does neither. Every read also refreshes locally first so external pi CLI edits
     appear. Live sessions keep the model they were created with; new chats resolve the updated metadata.
@@ -154,24 +172,25 @@ re-opened transcripts provider-valid.
     after its refresh serves the old budget until the next read refreshes it.
   - `agentSessionManager` — sessions keyed by `session.sessionId` (each `Entry` also tracks its
     `workspaceId`), `createSession({ cwd, workspaceId, model?, thinkingLevel? })` → `createAgentSession(...)`
-    with a per-session `SessionManager` **and `buildSessionSettings(cwd, projectTrusted)`** (the user's
-    real settings + an in-memory `images.autoResize:false` override — never persisted — so the `read` tool
-    sends image files **raw**, bypassing pi's photon/WASM resizer that the single-file binary can't bundle;
-    the web UI downsizes user-attached images itself at attach time — `apps/web`'s `chat/imageAttachment`
-    caps the long edge at 1568px — and the `imageGuard` extension below is the in-context second line of
-    defense). The override is **re-applied after every `settings.reload()`**: pi's `SettingsManager.reload()`
-    rebuilds settings from disk and drops `applyOverrides`, and the resource loader reloads settings on every
-    `reload()` — including inside `createAgentSession` — so a one-shot override never reached a prompt. Since
-    pi 0.87 the same setting also governs prompt-attached and tool-result images, so the override is what keeps
-    pi from rewriting user text with `[Image omitted…]` hints (which would defeat the client's optimistic-echo
-    dedup). Delegated children run on the same settings: `delegation` binds `buildSessionSettings` as the
+    with a per-session `SessionManager`, the chat's omp `Settings` from **`buildSessionSettings(cwd,
+    projectTrusted)`** (`loadHostSettings` in `piSettings`: the user layer, plus the project layer only
+    when trusted; `isolatedHostSettings` serves probes and catalogues) and the resources
+    `buildSessionResources` builds (see `extensions`). The user's `images.autoResize` applies (omp resizes
+    with `Bun.Image` in every artifact); the web UI downsizes attached images itself (`apps/web`'s
+    `chat/imageAttachment`, long edge 1568px) and `imageGuard` is the in-context second line of defense.
+    Delegated children run on the same settings: `delegation` binds `buildSessionSettings` as the
     core's `buildChildSettings`, which receives the trust the parent context's `isProjectTrusted`
-    answers (`liveParentContext`; pi-delegation decision #31, issue #604). A shared `registerSession`
+    answers (`liveParentContext`; pi-delegation decision #31, issue #604), and binds `childSystemPrompt`
+    so a child without its own prompt in an untrusted project gets the same user-level system prompt as
+    its parent (see `extensions`). A shared `registerSession`
     publishes each event
-    tagged with its id + `bindExtensions({ mode:'rpc', uiContext })`. The event projection retains the
+    tagged with its id + `initializeExtensions(session, { mode:'rpc', uiContext, … })`. The event projection retains the
     final `agent_end` assistant's reported terminal metadata and attaches it to `agent_settled`, so the
     wire has one authoritative automatic-work terminal even when compaction/retry happens between those
-    events; it forwards rather than re-derives pi's result. A `compaction_end` is separately projected to
+    events; it forwards rather than re-derives pi's result. omp has no settle event: the host emits
+    `agent_settled` once omp's `waitForSessionSettlement` holds, checked two macrotasks after the
+    subscriber `agent_end` or idle run state (as omp's RPC settle checker does), because omp flushes the
+    deferred `agent_end` while the prompt's admission is still unwinding. A `compaction_end` is separately projected to
     a **fresh allowlisted event**: its `result` carries only `tokensBefore` and optional
     `estimatedTokensAfter`, never pi's summary, entry id, usage, or extension details. Tool
     `tool_execution_end` / `tool_execution_update` frames drop `structuredContent` from the (partial)
@@ -182,32 +201,62 @@ re-opened transcripts provider-valid.
     that settlement in `SessionSummary.lastSettlement` for reconnect after Pi removed a failed attempt from its rebuilt
     context; a new `agent_start` exposes explicit `null` (no current terminal) so an older persisted failure
     cannot reappear mid-run, while disk sessions remain transcript-authoritative. A live summary also
-    carries pi's queue snapshot (`SessionQueueState`, only when non-empty): `queue_update` fires only on
+    carries omp's queue snapshot (`SessionQueueState`, only when non-empty): `queue_update` fires only on
     changes, so this is the read-side seed that lets a client attaching mid-run render messages queued
-    before it connected. Each queue lane also retains the complete content of browser-queued messages only
-    while Pi reports the corresponding text entry pending. That transient mirror exists solely because Pi's
-    destructive queue API returns text but drops image blocks; Pi's queue events remain authoritative for
-    membership/order. The host projects only a conservative `hasImages` aggregate into summaries/events, so
-    image bytes do not ride the ordinary read stream.
+    before it connected. Lanes are derived from omp's own queues (`peekLiveSteeredMessages` +
+    `peekSteeringQueue`, `peekFollowUpQueue`) filtered by `isUserAuthoredQueuedMessage`; the host keeps no
+    mirror of their membership or order. `queuePrompt` only records, per queued `AgentMessage` that omp
+    reports through `onPromptQueued`, the text and images the user submitted (`queuedPrompts`, a
+    `WeakMap`), because omp's queued message carries the expanded prompt (or "[Image]" for an image-only
+    one). Removal drops a message group by identity (`dropQueuedMessages`), and Stop's restore uses
+    `clearQueue({ forInterrupt: true })`, which also withdraws input a live-steered response already took.
+    The host projects only a conservative `hasImages` aggregate into summaries/events, so image bytes do
+    not ride the ordinary read stream. Image-only queued messages need no compensation (omp's queue is
+    identity based); the image-only steer/follow-up tests pin that.
 
-    **One membership override compensates for a Pi defect: a delivered image-only (empty-text) queued
-    message is never cleared.** Pi keys its on-delivery queue removal on the delivered user message's text
-    (`contentText`), so a message queued with images but no text stays in Pi's `_steeringMessages` /
-    `_followUpMessages` forever and its "Steering"/"Follow-up" chip never disappears. The manager therefore
-    counts such deliveries per lane (`stuckEmptyDeliveries`): on a user `message_start` whose text is empty,
-    whose content carries an image, and for which Pi still reports more empty-text entries in a lane than
-    already counted, it increments that lane's counter and **synthesizes the emptying `queue_update`** Pi
-    withheld. Every place that reads a lane for display — the projected `queue_update`, the transient-mirror
-    sync, and `queueStateOf` — first drops that many empty-text entries from Pi's list, so a later genuine
-    `queue_update` cannot resurrect the phantom. The counter is per live entry only (Pi's ephemeral queues
-    never survive a process restart) and resets whenever `clearQueue()` empties both lanes.
+    **Prompts settle before they resolve.** pi's `prompt()` resolved after its `agent_settled`; omp's
+    resolves at the end of the run, and the host reports `agent_settled` itself. `promptSession` and an
+    idle `followUpSession` therefore wait for the run they started to settle (and for the tool selection
+    that settlement applies), so a caller's next prompt sees settle-time effects (deferred tool policy,
+    pending reloads, the completion record). Disposal releases the wait. An idle prompt also waits for a
+    pending tool selection before it starts.
 
-    **Remove this whole override on the pi bump that ships the upstream fix** (earendil-works/pi#8612,
-    still open when last checked). Once Pi clears empty-text image deliveries natively, drop
-    `stuckEmptyDeliveries`, `displayedLane`, the synthesized `queue_update`, and the `effectivePendingCount`
-    adjustment. The removal gate is the installed code, not the PR state: on every pi bump grep the installed
-    `agent-session.js` for the `if (messageText)` guard around `this._steeringMessages.indexOf` — while that
-    guard is present the workaround is still required; when it is gone the fix has shipped.
+    **The extension `input` event is the host's.** omp emits it only from its own front ends (its rpc mode
+    calls `emitInput` before every prompt, steer and follow-up), never from `prompt`/`steer`/`followUp`.
+    The host runs it for every user send (`promptSession`, `steerSession`, `followUpSession`, queued
+    nudges) with source `rpc`, skipping extension commands as pi did; `handled` drops the message before
+    it reaches omp, so nothing is queued, no dialog is dismissed and no question is superseded. Re-queues
+    inside `removeQueuedSession` do not run it again.
+
+    **Chat lifecycle on omp.** `createSession` resolves `cwd` before building the chat's `SessionManager`:
+    omp records a transcript's `cwd` verbatim (pi resolved it), and stored directories, listing and
+    deletion compare that recorded spelling with resolved workspace paths (architecture Decision 22). Each
+    chat registers in omp's process-wide agent registry under its own session id (`agentId`); omp's
+    default id `Main` would make two chats created or reloaded concurrently replace each other's
+    registration ("Agent \"Main\" was replaced during session initialization"). Registration re-checks
+    project trust after `session_start` and reloads into the current grant before the chat is returned.
+    Reattaching a chat (`getSessionMessages`, `ensureSessionAttached`) first awaits a teardown still
+    running for that id, so a closing engine finishes its transcript writes before a new one opens the
+    file; resource reads (`withSessionResources`) instead fail closed while that teardown runs. A
+    transcript read while a reload has shut the old engine down and not yet adopted its replacement reads
+    the transcript file, because omp releases a disposed session's entries. **Closing is split from engine shutdown**: `closeSessionResources` closes commands,
+    subagents, hidden children and the MCP load, and `shutdownEngine` disposes the engine session once the
+    children have closed (omp's `dispose()` is the only way to emit `session_shutdown`, and it aborts the
+    run). Removal, archive and deletion close resources first, run Stop's accepted-answer grace and abort,
+    then shut the engine down; polite `settleSessionsForShutdown` shuts down every engine whose run has
+    stopped (after `waitForIdle`) but leaves one with a preserved question (`expected`/`waiting`) running
+    and unanswered for restart repair. Completion delivery is held while a manual or automatic compaction
+    runs and released at its end. Background commands receive the chat's current `shellCommandPrefix`
+    (omp registers it for extensions and does not apply it to its own shell) and `off` for a model without
+    reasoning. A registry tool counts as a disabled extension's only in a chat that loaded that
+    extension, so a same-name package tool in a chat created with ours off stays active. omp only drains
+    its queues inside a run; when a prompt or follow-up queues while omp is preparing an idle drain (busy,
+    no run started) or a queue edit cancels that drain, the host waits for the drain to resolve and
+    prompts whatever it left parked (`deliverStrandedQueue`). A reload whose chat starts closing while the new engine session is being built or is in
+    `session_start` rejects with "The chat is closing." and shuts that session (MCP first) down; the
+    chat's own closing cascade covers the session it adopted. A preparation that fails before an entry
+    exists shuts down the MCP load it created and then the engine session; one whose entry was never
+    registered is abandoned through the entry's own closing cascade.
 
   - **Normalized session state** is one host projection over orthogonal facts, never a second agent runtime.
     Live derivation reads Pi execution/queue state, the question phase registry's exact expected/waiting id,
@@ -264,9 +313,9 @@ re-opened transcripts provider-valid.
     back to `steer`), and pi's `followUp()` only *enqueues* into a queue that a run already in flight
     drains (so on an idle session it falls back to `prompt`, else the message parks forever — the way a
     `review.sendBatch` into a re-attached review chat marked its comments sent to an agent that never
-    saw them) / **`clearQueueSession`** (Pi's `clearQueue()`: drains both queues but returns only text,
-    while the host snapshots its reconciled transient mirror first and returns complete per-message text +
-    images. Pi emits the emptying `queue_update`). Its optional text-only precondition rejects before
+    saw them) / **`clearQueueSession`** (returns each user-queued message's submitted text + images,
+    read through `queuedPrompts` before omp's `clearQueue()` empties both lanes; omp emits the emptying
+    `queue_update`). Its optional text-only precondition rejects before
     touching Pi whenever either tracked lane has queued images; manual compaction uses that guard, while
     **`abortSession(..., true)`** synchronously claims the Stop and drains the queue in one manager operation.
     If an accepted question result is still persisting, Stop grants it a bounded grace period before signalling
@@ -274,14 +323,12 @@ re-opened transcripts provider-valid.
     fast path. It drains once more immediately before abort and appends those late arrivals to their original
     lanes; it then waits for idle and returns the complete ordered queue, so deferred Stop cannot race a
     continuation or lose images /
-    **`removeQueuedSession(sessionId, kind, index)`** — per-item queue removal, which Pi's
-    API lacks (queues are bare string arrays, `clearQueue` is all-or-nothing): drain via the complete-content
-    path, drop `lane[index]` (out-of-range → `removed: null`, everything re-queued), and re-queue each keeper
-    with its images in order (`steer()`/`followUp()` per lane — each re-queue emits its own `queue_update`, so
-    clients converge by events alone). **No-loss guarantee:** if the run settled during the operation the
-    re-queued keepers would park forever (Pi's queues only drain inside a run), so the idle case drains them
-    through the same idle-delivery fallback as `followUpSession` — the first becomes a `prompt`, the rest
-    steer into the run it starts; delivery timing may degrade across that race window, content is never lost
+    **`removeQueuedSession(sessionId, kind, index)`** — per-item queue removal: omp's
+    `dropQueuedMessages` removes exactly that displayed message's group (out-of-range, or input a
+    live-steered response already took → `removed: null`). **No-loss guarantee:** if the run settled during
+    the operation the keepers would park forever (omp's queues only drain inside a run), so
+    `deliverStrandedQueue` prompts what is left through the same idle-delivery fallback as
+    `followUpSession`; delivery timing may degrade across that race window, content is never lost
     (pinned by the idle-fallback unit test) —
     `setModel` / `setThinkingLevel` / **manual `compact` guarded per session** (a second overlapping request
     is rejected before Pi can overwrite its one compaction controller; an active Pi compaction also blocks
@@ -290,7 +337,7 @@ re-opened transcripts provider-valid.
     pair — `model.clampThinking`; the host uses it so defaults and live-session effort changes follow Pi).
     Earlier, #394 showed ThinkRail's `available[0]` differed from Pi's pick and hit a proxy 400. ThinkRail
     now resolves new-chat defaults host-side from `AppConfig`, falling back to `preferredDefaultModel`
-    (pi's provider default, then the first available model) when the saved default is unavailable,
+    (omp's startup pick) when the saved default is unavailable,
     without rewriting that setting. `available[0]` alone was catalog order — `openai/gpt-4`, an 8K-context
     model, for a fresh OpenAI connection. An explicitly requested unavailable model is rejected rather
     than silently substituted. The host passes the chosen model explicitly so the UI and session agree.
@@ -323,7 +370,10 @@ re-opened transcripts provider-valid.
     that model is unavailable, PI selects the current default without persisting a model change on open;
     PI records the replacement when the user sends a message. Legacy transcripts with no persisted model
     reference also use PI's model resolver—then returns `{ summary, messages }` —
-    `TranscriptMessage[]`: the pi-canonical subset **plus
+    `TranscriptMessage[]` from omp's display transcript (`buildTranscriptSessionContext` collapsed to the
+    latest compaction, in-flight calls kept while streaming), never the agent's model context, which drops
+    `error`/`aborted` turns and would hide a final failure (and its Try again) once the chat is reopened:
+    the pi-canonical subset **plus
     `custom` messages**, which carry the `tool-response` replies (and the retired `ask-user-answers` form in
     older transcripts) an interactive tool's card pairs by tool call id, **plus `compactionSummary`**, pi's durable marker for the messages compaction summarized away —
     kept precisely because pi's resolved transcript is all that survives, so dropping it would hand the
@@ -403,22 +453,26 @@ re-opened transcripts provider-valid.
     names the id) rather than starting a rival one — two owners of the shared tombstone would let the
     loser's failure roll it back mid-move and briefly re-open the chat — and **only the transaction that
     installed the tombstone clears it on failure**, so an earlier successful deletion's permanent tombstone
-    survives a later spurious re-delete. Abort a live turn if needed but retain the live entry, resolve a
-    live transcript from that session's own `SessionManager` (never a lossy directory listing), otherwise
-    use the same strict disk lookup above, move the exact matching-cwd transcript to the OS trash via
-    `trashFile`, then dispose the live entry and publish `SessionDeletedPayload` for client convergence;
-    a newly created empty live chat whose reserved JSONL path has not materialized has nothing recoverable to
-    trash and is disposed directly. Any lookup or trash failure throws, rolls back the tombstone it installed,
-    restores command access to the same
-    transcript/live entry, and publishes nothing; there is deliberately no permanent-unlink fallback behind
-    a recoverable UI action);
+    survives a later spurious re-delete. Abort a live turn if needed, resolve a live transcript from that
+    session's own `SessionManager` (never a lossy directory listing), otherwise use the same strict disk
+    lookup above; flush the live chat's pending transcript writes and await any teardown already in flight
+    for the id, move the exact matching-cwd transcript to the OS trash via `trashFile`, then **seal** the
+    live chat's `SessionManager` before disposing the entry and publish `SessionDeletedPayload` for client
+    convergence. omp's `dispose()` appends a `session_exit` entry and flushes, so without the seal the
+    trashed transcript would be recreated at its old path; sealing turns that write into a no-op. A newly
+    created empty live chat whose reserved JSONL path has not materialized has nothing recoverable to trash
+    and is only disposed. Any lookup or trash failure throws, rolls back the tombstone it installed,
+    restores command access to the same transcript/live entry (still running, with its background work),
+    and publishes nothing; there is deliberately no permanent-unlink fallback behind a recoverable UI
+    action);
     `setSessionPublisher` + `setSessionCreatedPublisher` (broadcast the initial `SessionSummary` after
     `createSession` registers a new host-owned session—not when an existing transcript reattaches—so peer
     frontends discover it without inheriting placement) +
     `setSessionDeletedPublisher` + `setSessionManagerFactory` seams.
   - `oneshot` — one-shot LLM completions **without** an `AgentSession` (no tools/extensions/disk):
     `completeOnce(request)` picks a model from the shared runtime's authenticated set and dispatches a
-    single `runtime.completeSimple()` — pi's canonical provider-agnostic request path, which resolves
+    single `runtime.completeSimple()` (the system text travels as omp's one-block `systemPrompt: string[]`)
+    — the provider-agnostic request path, which resolves
     the model's auth itself (OAuth refresh included) and also serves providers that only implement
     `streamSimple` (extension-registered ones). `pickModel(tier)` = the model choice: `cheap` prefers a
     curated small/fast allowlist ∩ the authenticated set, else the cheapest priced model by per-token cost (an unpriced catalog entry is a free, preview,
@@ -427,78 +481,85 @@ re-opened transcripts provider-valid.
     (plan summaries, PR drafting) run on — the only place model **dispatch** happens outside a session.
   - `webUiContext` — `createWebUiContext(sessionId, currentToolCall?)` builds the `ExtensionUIContext` pi
     calls (dialogs round-trip to the browser, fire-and-forget methods push). A dialog names the tool call
-    it is about (`toolCallId`) so the web asks on that call's card: the manager passes pi's own
-    `agent.state.pendingToolCalls` and a dialog anchors only while **exactly one** call is running (the
-    common gate-before-a-tool case; parallel calls stay unanchored rather than guess), and
+    it is about (`toolCallId`) so the web asks on that call's card: a dialog anchors only while **exactly
+    one** tool call of the latest response is outstanding (the common gate-before-a-tool case; parallel
+    calls stay unanchored rather than guess). Outstanding means running (`agent.state.pendingToolCalls`) or
+    named by the latest assistant message (including omp's `streamMessage`, since omp runs `tool_call`
+    hooks before that message ends and before `tool_execution_start`) without a result yet; and
     `selectForToolCall` anchors explicitly and carries the call's `toolInput` (the MCP guard). `setExtUiPublisher`
     (server→client push seam; an optional `ExtUiAudience` narrows a push to clients below a protocol
-    version), `resolveExtUi` (browser reply), `cancelExtUiForSession` (on dispose, and once pi accepts a
-    user message — a steer or follow-up pi `"queued"`, or an idle prompt whose `preflightResult` says
-    `"started"`/`"queued"` — which then answers every pending dialog of that chat; a message an input
-    extension `"handled"`, or one preflight rejects (no model, no credentials), leaves the dialog open, and
-    the queue's own re-queuing in `removeQueuedSession` cancels nothing),
+    version), `resolveExtUi` (browser reply), `cancelExtUiForSession` (on dispose, and once omp accepts a
+    user message — a steer or follow-up omp reports queued through `onPromptQueued`, or an idle prompt
+    omp admits through `onPromptAdmitted`, except an extension command — which then answers every pending
+    dialog of that chat; a message the host's `input` run marks handled, or one omp rejects (no model, no
+    credentials), leaves the dialog open, and the queue's own re-queuing in `removeQueuedSession` cancels
+    nothing),
     `notifyExtUi`, `notifyExtensionError` (pi's `ExtensionError` → one client-visible `error` notify
     carrying extension + event + cause — the cause capped at 500 chars because `error.error` is
     remote-shaped, and the extension named by its **directory** when its file is an anonymous
     entrypoint (`SKILL.md`, `index.ts`), never "Extension SKILL.md failed"; a bare
     "An extension failed." is what made #277 unreadable from the UI alone). The manager's
-    `bindExtensions({onError})` wraps it in `reportExtensionError`, which does **two** things the notify
+    `initializeExtensions({ reportRuntimeError, reportSendError })` wraps it in `reportExtensionError`, which does **two** things the notify
     cannot: for a live entry, it writes one `warn` to the rotated host log carrying the **full**
     `extensionPath` and the extension's own `stack` (rehydrated onto an `Error` so it lands in the structured `err` field — the
     chat gets the short name, the log gets the unambiguous one, and a crash stays findable after the tab
     is closed), and it **gates the client push** on `entry.registered`, the explicit flag
     `registerSession` sets when it puts the entry in the map. The event path's `sessions.get(id) === entry`
-    cannot be reused: `bindExtensions` runs inside `prepareSessionEntry`, *before* registration, so the
+    cannot be reused: `initializeExtensions` runs inside `attachEngineSession`, *before* registration, so the
     stricter form would suppress the `session_start` failure #277 is about. Nor can *absence* from the map
     stand in for "not registered yet" — `disposeSession` deletes without leaving a tombstone, so a disposed
     entry is indistinguishable from an unregistered one, and a late error would be pushed at a client that
     can never drain it. The log is never gated for a live entry, but an entry the host has **disposed**
     (`entry.disposed`, set before `session.dispose()` in every teardown path) downgrades the report to a
-    single `debug` line with no stack and no client push: pi 0.87's `finishTurn` agent-loop hook outlives
-    `AgentSession.dispose()` and still dispatches `turn_end`/`context` boundaries into the runner we just
-    invalidated, so its “stale ctx” and “could not resolve the persisted assistant entry ID” reports are
-    echoes of our own teardown, not extension crashes; pi 0.86 disconnected from the agent first, so they
-    never surfaced. For a live entry, it attaches an `Error` **only when pi supplied a stack**: several of
-    pi's own `emitError` sites omit it (`runner.js` message_end, `agent-session.js` command/`<runtime>`),
-    and synthesising one there would record the *host's* stack — pointing the reader at
+    single `debug` line with no stack and no client push: reports dispatched into a runner the host has
+    just invalidated (pi's `finishTurn` hook outlived `dispose()` this way) are echoes of our own teardown,
+    not extension crashes. For a live entry, it attaches an `Error` **only when the engine supplied a
+    stack**: several engine `emitError` sites omit it, and synthesising one there would record the
+    *host's* stack — pointing the reader at
     `prepareSessionEntry` instead of the extension, which is the opposite of why the line exists.
     **Members split three ways, not two.** *Untranslatable* ones are inert no-ops and rightly so — they take a
     TUI `Component` factory a web host cannot render (`setFooter`, `setHeader`, `setEditorComponent`,
     `custom`, `setWidget`'s factory overload; the string-array overload **is** rendered).
     *Translatable* ones must behave: **`theme` is a real `Theme`** (`plainTextTheme`) whose every
-    decorator returns its input unchanged. *Translatable but unimplemented* is the third group and is named
+    decorator returns its input unchanged, and `select` offers each `ExtensionUISelectItem` by its label
+    (the wire's options are strings, so an item's `description` is not shown) and answers with that label,
+    as omp's contract requires. *Translatable but unimplemented* is the third group and is named
     here so the split does not read as exhaustive: `setEditorText` / `pasteToEditor` are forwarded to the
-    host by pi's own rpc mode and a web composer could honour them; ours stay inert until something needs
+    host by omp's own rpc mode and a web composer could honour them; ours stay inert until something needs
     them. What separates the theme from that group is the cost of being inert — an unimplemented editor
-    call loses one feature, an unimplemented theme kills the whole extension on its first line. `getAllThemes: []` / `getTheme: undefined` match pi's own
-    rpc mode; `setTheme`'s `{success:true}` is a known lie, tracked separately — a web host has no TUI
-    theme to switch to, so pi's rpc-mode form (`{success:false}`) is the honest answer.
-    `plainTextTheme` subclasses pi's `Theme` and overrides `fg`/`bg`/`style`/`bold`/`italic`/`underline`/
-    `inverse`/`strikethrough`/`getFgAnsi`/`getBgAnsi`; `getThinkingBorderColor` /
-    `getBashModeBorderColor` stay plain only because pi routes them through `this.fg` — an inherited
-    guarantee, so `webUiContext.test.ts` pins them explicitly. **Three inherited members still answer for
-    the terminal, as data rather than escapes:** `getColorMode` (`truecolor`, from the constructor — pi's
-    `ColorMode` is `"truecolor" | "256color"` with no "renders no colour" value), and the `colors` /
-    `appearance` getters, which resolve every `""` token to pi's guessed terminal defaults (for example
-    `colors.accent` is an RGB value) and report pi's detected light/dark appearance. No honest plain
+    call loses one feature, an unimplemented theme kills the whole extension on its first line. `getAllThemes` resolving `[]` /
+    `getTheme` resolving `undefined` match omp's own rpc mode; `setTheme`'s `{success:true}` is a known lie, tracked separately — a web host has no TUI
+    theme to switch to, so omp's rpc-mode form (`{success:false}`) is the honest answer.
+    `plainTextTheme` subclasses omp's `Theme` (pi-tui) and overrides every member that turns a colour into
+    an escape: `fg`/`fgResolved`/`bg`/`bgFill`/`fgOnBg`/`bold`/`italic`/`underline`/`inverse`/
+    `strikethrough`/`getFgAnsi`/`getBgAnsi`/`getFgOnBgAnsi`/`getContrastFgAnsi`/`getLangIconStyled`;
+    `getThinkingBorderColor` / `getBashModeBorderColor` / `getPythonModeBorderColor` / `styledSymbol` stay
+    plain only because omp routes them through `this.fg` — an inherited guarantee, so
+    `webUiContext.test.ts` calls **every** prototype method (the test fails when omp adds one it does not
+    call) and reads every getter, rejecting any escape byte. **Some inherited members still answer for
+    the terminal, as data rather than escapes:** `getColorMode` (`truecolor`, from the constructor — omp's
+    `ColorMode` is `"truecolor" | "256color"` with no "renders no colour" value), and the hex accessors
+    (`getColorHex`, `getBgHex`, `getAllThemeColorHexes`, `getMajorThemeColorHexes`, `getAccentColorHex`,
+    `isLight`, `accentSurfaceLuminance`, `sessionAccentInputs`), which resolve every `""` token to omp's
+    default terminal colours (for example `getColorHex("accent")` is `#e5e5e7`). No honest plain
     answer exists for any of them. They cost nothing while an extension colours *through* the theme —
     every such path returns plain text — and only bite one that reads a mode or colour and then emits ANSI
     on its own, which is the unsanitised-bridge gap tracked outside this module. Its colour table exists
     **only** to satisfy the constructor signature: every method that would turn a colour into an escape is
-    overridden, and the members that still answer for the terminal read the constructor's *mode* or pi's
-    terminal guesses, never an escape. A pi
+    overridden, and the members that still answer for the terminal read the constructor's *mode* or omp's
+    default colours, never an escape. An omp
     bump that changes the palette breaks the build as a *notice that the theme surface moved*, not as a
     defect.
     **Rejected alternatives** (the one place these decisions are recorded): (1) `{} as
     ExtensionUIContext["theme"]` — the #277 bug itself. It assumed the TUI members are unreachable in
-    `rpc` mode, but `ctx.ui.theme` is called by the **extension**, not by pi's renderer, and pi's own rpc
+    `rpc` mode, but `ctx.ui.theme` is called by the **extension**, not by the engine's renderer, and omp's own rpc
     mode hands out a live theme. (2) An object literal implementing `Theme` structurally — impossible
     without a cast: `Theme` carries private fields. (3) A real `Theme` built from blank colours, no
-    overrides — pi maps `""` to the *default-colour* escape (`\x1b[39m`), not to nothing, so status text
-    would reach the browser as literal escape bytes. (4) Forwarding pi's exported `theme` singleton — it
-    is a `Proxy` that throws `Theme not initialized` until `initTheme()` runs, and `initTheme` is called
-    only from pi's own CLI entrypoints, never when pi is embedded via `createAgentSession`. Every
-    embedder of pi-as-a-library hits this; an upstream fix would not reach us until a deliberate pi bump.
+    overrides — omp maps `""` to the *default-colour* escape (`\x1b[39m`), not to nothing, so status text
+    would reach the browser as literal escape bytes. (4) Forwarding omp's exported `theme` binding (what
+    its rpc mode and its no-UI runner context hand out) — it stays `undefined` until `initTheme()` /
+    `initThemeSync()` runs, which only omp's CLI entrypoints do, never `createAgentSession`; and an
+    initialized terminal theme would emit escapes anyway.
   - `toolResponses` — the host half of **interactive tools** (tools whose `execute` waits for the person):
     the per-session response mailbox (`ToolResponseWaiters`), respondability, restart repair support and
     late responses. The mailbox is **tool-agnostic**: every entry is keyed by `toolCallId`, the response is
@@ -525,8 +586,9 @@ re-opened transcripts provider-valid.
     - `agent` imports nothing from an extension: the pending marker and its guard are `contracts`', the
       pending and stopped texts are the host's own, and the late-response wording comes from the
       descriptor's `describeResponse` (else a generic preface plus the response as JSON).
-    - A same-name tool from a user package loses to ours through the loader's `preferRegistryTools` order
-      ([[submodule-server-extensions]], registered in [[pi-compatibility]]). That keeps the structured
+    - A same-name tool from a user package loses to ours with no host ordering: omp loads discovered
+      extension paths before the host's inline factories and resolves a tool name to its last
+      registration ([[pi-compatibility]]). That keeps the structured
       card and its answer channel paired: an installed terminal questionnaire must not replace execution
       with `ui.input` while the web client renders our card. Its other tools, commands and hooks stay
       available.
@@ -593,13 +655,25 @@ re-opened transcripts provider-valid.
     type only — a second interactive tool, or a third party's, could announce a call the web could never
     answer).
   - `sessionRepair` — `repairDanglingToolCalls(sessionManager, interactiveTools)`: the restart safety net (rationale under
-    the manager bullet above). Pure over pi's `SessionManager` (compaction-aware via
+    the manager bullet above). Pure over omp's `SessionManager` (compaction-aware via
     `buildSessionContext`; idempotent; appends only missing results from the active tail batch) —
     unit-tested against `SessionManager.inMemory`, including failed-attempt and historical-gap replay.
+    omp's `buildSessionContext` strips every tool call with no paired result from the rebuilt context, so
+    the repair passes the latest assistant's call ids as `inFlightToolCallIds` to see the tail batch at all;
+    without the repair a reopened chat silently loses an unanswered ask instead of bricking. omp's own exit
+    recovery (`createInterruptedToolResults` on open, `restoreInterruptedTurn`) needs a recorded
+    `session_exit` or re-runs the turn, so it covers neither a host crash nor the answerable-ask ack.
   - `imageGuard` — the oversized-image guard: an inline extension (`oversizedImageGuard`, one of
-    `buildResourceLoader`'s shared factories and the whole delegated-child base set) hooked on pi's
+    `buildSessionResources`' shared factories and the whole delegated-child base set) hooked on omp's
     **`context` event** (fired before every LLM
-    call, live sessions included). **Anthropic-family only**: the caps are Anthropic's model-level rules,
+    call, live sessions included). It reads the active model from `ctx.model`, which omp only supplies once
+    the session's extensions are initialized (`initializeExtensions`, as the manager and pi-delegation do);
+    an unbound runner reports no model and the guard passes everything through. omp's `anthropic-messages`
+    provider now clamps over-cap images itself by re-encoding them (`prepareAnthropicImageContext`: 8000px,
+    2000px past 20 images, a 10MB base64 block), but only after extension `context` hooks run and only on
+    that wire; the guard still runs first, so a too-large image is replaced by a note rather than resized,
+    and it remains the only cover for unsupported media types, the request-wide budget and Claude behind
+    other wires. **Anthropic-family only**: the caps are Anthropic's model-level rules,
     so the handler gates on the context's active model (`isAnthropicFamilyModel` — native
     `anthropic`/`anthropic-messages`, or a Claude model id through Bedrock/Vertex/aggregators; unknown
     model ⇒ no-op) and every other provider's image context passes through untouched. It sniffs each image block's pixel dimensions straight from the base64
@@ -619,24 +693,24 @@ re-opened transcripts provider-valid.
     **request-wide `REQUEST_IMAGE_BASE64_BUDGET`** (24MB of base64, headroom under Anthropic's 32MB
     per-request cap — several per-image-legal blocks can still overflow the whole request), enforced by
     stripping survivors **largest-first until the aggregate fits**. This is what un-bricks a session poisoned by an oversized image
-    (history is re-sent every turn, so one bad image 400s forever): sessions are append-only and the host
-    has no image codec (the autoResize tradeoff above), so the guard transforms the **outgoing context
+    (history is re-sent every turn, so one bad image 400s forever): sessions are append-only and the guard
+    carries no image codec, so it transforms the **outgoing context
     only** — session file and transcript stay untouched, and a stuck chat recovers on its very next
-    message. The count-aware cap also degrades a raw >2000px `read`-tool image to a note instead of a
-    brick once a session crosses 21 images. Pure core (`guardOversizedImages`, `imageDimensions`)
+    message. The count-aware cap also degrades a >2000px `read`-tool image (sent unresized when the user
+    turned `images.autoResize` off) to a note instead of a brick once a session crosses 21 images. Pure core (`guardOversizedImages`, `imageDimensions`)
     unit-tested with hand-built header bytes.
   - `delegation` — ThinkRail's embedding of the portable **`pi-delegation`** core +
     **`pi-subagents`** layer ([[module-pi-delegation]], [[module-pi-subagents]]): binds what only
     the host knows — the delegation root under the data dir (`<dataDir>/delegation`),
     `scope = workspaceId`, and the manager's `liveParentContext` projection (`ParentContext`, core
-    decision #23), including the exact `ModelRuntime` retained by that parent session. Existing
+    decision #23), including the exact `ModelRegistry` retained by that parent session (`modelRegistry`). Existing
     parents and their children therefore stay on their runtime generation across a Central change,
     while parents created afterward project the new generation. The host-wide `getPiRuntime` resolver
     is passed as the core's dynamic fallback rather than captured at service creation. One
     `DelegationService` per workspace is cached (`delegationServiceFor`, synchronous — nothing awaits
-    at bind time). A parented run's spend is appended to the live parent as pi `usage` entries
-    (`kind: "subagent"`, `note` = child session id; only the cost total is known), each publishing
-    `entry_appended { entryType: "usage" }`: every `run-progress` (after each child response or tool
+    at bind time). A parented run's spend is appended to the live parent as omp `model_usage` entries
+    (`purpose: "subagent:<child session id>"` via `usagePurpose`; only the cost total is known), each
+    publishing `entry_appended { entryType: "model_usage" }`: every `run-progress` (after each child response or tool
     start) appends the increment of the run's usage delta over a per-run watermark, and `run-terminal`
     appends the remainder, so the toolbar follows a running subagent and pi's own session totals include
     delegated spend for every outcome and consumer (Agent, `request_review`), independent of completion
@@ -651,12 +725,14 @@ re-opened transcripts provider-valid.
     delegated spend's only accounting channel: delegation tools must never return `AgentToolResult.usage`,
     which pi would sum a second time. The write is best-effort, like pi's cache warmer: a failed append is
     logged and never fails the child run. `recordSessionUsage` reports only whether pi took the usage into
-    its session; persistence stays uncertain. pi moves the leaf to a new entry before persisting it, so a
-    failed append restores the previous leaf (later entries must never chain to an unpersisted id, or a
-    reopened chat loses its history before it) and truncates an existing transcript back to its pre-append
-    size (a torn partial line would swallow the next entry); pi's initial file creation is outside this
-    repair. A usage entry pi kept only in memory counts in this process and is restored on disk by
-    reconciliation after the chat is reopened. Closing
+    its session; persistence stays uncertain. omp owns failed writes: its writer truncates a torn
+    append back (`FileSessionStorageWriter#writeNow`), keeps the entry in memory, and the next append
+    rewrites the whole transcript, so a failed usage write never cuts the reopened history and is
+    restored by the next successful write (tests inject the fault through `fs.writeSync`). A usage entry
+    omp kept only in memory when the chat closed is restored by reconciliation after it is reopened.
+    omp's `dispose()` seals the transcript and drops later appends while still returning an id, so
+    `recordSessionUsage` checks the entry landed, and a closing chat disposes its engine session only
+    after its children settle (bounded by the shutdown budget when one is given). Closing
     a chat keeps its entry writable until its teardown cascade settles, so runs that cascade stops are
     still recorded; attach is refused during teardown, so the transcript keeps one writer. A deletion
     tombstone suppresses the write, because pi's append would recreate the trashed file. Graceful host
@@ -693,41 +769,41 @@ re-opened transcripts provider-valid.
     The plan-review `request_review` tool follows the same live-toggle shape: it is always registered, but
     `setAgentReviewEnabledResolver` (host-injected, global — no `agent` → settings edge) decides whether it
     stays in a session's active set, and `refreshAgentReviewTool(workspaceId?)` applies a change idle-sync /
-    streaming-deferred to `agent_settled`, exactly like the subagent tools. Because `setActiveToolsByName`
-    rebuilds the system prompt from active tools' guidelines, dropping the tool drops its guidance too. Only
+    streaming-deferred to `agent_settled`, exactly like the subagent tools. omp's `ToolDefinition` has no
+    `promptGuidelines`, so the review policy guidance is part of the tool's description (registered with
+    `loadMode: "essential"`, a full top-level schema) and leaves the request with the tool. Only
     the tool is gated — the `startPlanReview` button path is a separate host seam. See `submodule-server-host-plan-review`.
     **Registry extensions** follow the same shape, keyed by extension name instead of workspace. A
     host-injected `setDisabledExtensionsResolver(() => ReadonlySet<string>)` (global — no `agent` →
-    settings edge; a throwing resolver means nothing disabled) is read by `buildResourceLoader` at **every
-    loader reload** (snapshotted beside project trust), so the gated registry factories skip a disabled
-    extension and `extensionsOverride` omits its `<inline:…>` entry — new parents never load it — and by
-    `childExtensionFactories()` when a hidden child's loader runs. `refreshExtensionTools()` updates live
-    sessions: tools whose `sourceInfo.path` belongs to a disabled registry extension leave the active set
+    settings edge; a throwing resolver means nothing disabled) is snapshotted by `buildSessionResources`
+    on **every engine-session build**, so the gated registry factories skip a disabled extension — new
+    parents never load it — and by `childExtensionFactories()` when a hidden child's resources are built.
+    `refreshExtensionTools()` updates live sessions: tools a disabled registry extension registered in
+    this chat (`registryToolOwner`, counted only when the chat loaded that extension) leave the active set
     (remembered per entry so re-enabling restores exactly the withheld tools, never ones that were inactive
     by default) idle-sync / streaming-deferred to `agent_settled`, latest policy wins, and
     `setActiveToolsByName` drops their guidance with them. Hooks of a disabled extension keep running in an
-    open session until its next resource reload — pi cannot unload an extension, and reloading on every
+    open session until its next resource reload — omp cannot unload an extension, and reloading on every
     disable would bust the prompt cache. The reverse is the one reload: an enabled extension the session
     never loaded (created while it was off) and that did not fail to load triggers a gated
     `requestSessionReload`. An extension counts as loadable when it has static or per-session parent
     factories. Registration applies the same reconciliation, and a completed reload reapplies
     it without requesting another reload, so a toggle that lands mid-reload converges. Settings are the
-    source of truth across restarts: Pi ≥ 1.3 restores a resumed chat's recorded tool loadout, keeping
-    recorded removals inactive, so attach first re-activates every tool of an enabled registry extension
-    that Pi's activated-on-registration rule would activate (declarable exposure, not `defaultActive:
-    false`), then withholds disabled ones. Built-in, MCP, subagent and review tools keep Pi's restored
-    selection. A registry tool switched off by anything other than Settings therefore returns after a
-    restart, as it does on Pi `reload()`.
+    source of truth across restarts: attach re-applies the host's tool selection, so a registry tool
+    withheld before a restart returns once its extension is enabled and stays withheld while it is off
+    (registry-tool reconcile, [[pi-compatibility]]).
     The **`set_title`** tool (`titleTool.ts`) is how chats and workspaces get named: the main agent calls it
     with `chat_title?` / `workspace_name?` / `branch?` (English kebab slug). It is always registered and
-    active, and listed via `promptSnippet`; toggling it off after naming would rebuild the system prompt
-    mid-session and bust the prompt cache. Its `promptGuidelines` carry the naming rules: once per
+    active as an `essential` tool (omp's extension default, `discoverable`, would hide it behind tool
+    search); toggling it off after naming would rebuild the system prompt mid-session and bust the prompt
+    cache. omp has no `promptSnippet`/`promptGuidelines`, so its description carries the naming rules: once per
     conversation, as the **first action** of the first turn with a concrete task, even for a one-line answer
     (or right after reading a linked PR/issue/ticket). Names are in the user's language, and a PR/issue/ticket
     uses `<Verb> #<n> <title verbatim>`. Guidelines alone proved too weak (live e2e, Claude Opus: named 1 of
-    3 real-task turns; 0 of 3 when the prompt asked for a one-sentence answer). So while the chat (pi session
-    name) or its workspace is still unnamed, a `before_agent_start` hook adds a state-specific
-    **`pending-naming`** system-prompt section ("this chat has no title yet … call set_title with chat_title
+    3 real-task turns; 0 of 3 when the prompt asked for a one-sentence answer). So while the chat (omp session
+    name) or its workspace is still unnamed, a `before_agent_start` hook appends a state-specific
+    **pending-naming** block to that turn's system prompt (omp's per-turn override, dropped after the turn;
+    omp does not run the hook for custom-message turns, which never need naming) ("this chat has no title yet … call set_title with chat_title
     before your other tool calls … otherwise ignore this note"); with it the same real-task turn named 3 of 3.
     The section and the guidelines name the fields still missing (`workspace_name` and `branch` while the
     workspace is unnamed) because "once" alone let a call name only the chat. Its wording is
@@ -763,7 +839,8 @@ re-opened transcripts provider-valid.
     (a private message-entry loop here once drifted: compaction is an entry *type*, not a message
     role, so a compacted child's transcript lost its `compactionSummary` marker — PR #303 review
     finding, test-pinned; absent after restart/dispose; wire meaning: [[module-contracts]]).
-    Pi writes the first transcript file lazily. A registered child belonging to the requested parent
+    omp writes the first transcript file lazily; `pi-delegation` materializes a child's at its first
+    prompt. A registered child belonging to the requested parent
     therefore returns an empty message list with its authoritative status until that file exists;
     queued/running remains pollable, including before the first provider reply. This is not a
     reconstruction from task text. A missing file without that owned handle throws
@@ -773,50 +850,61 @@ re-opened transcripts provider-valid.
     `@thinkrail/shared/codedError` edge, shared with Chat Resources and mirroring `git`'s use).
     Children opting into extensions
     (`extensions: true` in their definition) get the **curated child set**
-    (`childExtensionFactories` in `extensions`, pi `InlineExtension`s): the headless-search policy +
-    `pi-web-access` + `pi-spec-graph` + every registry extension's `childExtensions` (named inline,
-    from [[submodule-server-extensions]]; none today) — deliberately not the parent's full set
-    (rationale + the listed-children carve-out: core decision #25). **Every** child, opted in or not,
-    also loads the core's base set (`childBaseExtensionFactories`, same decision): just
-    `oversizedImageGuard`, since a child's `read` returns raw images under the shared settings (see the
-    `buildSessionSettings` bullet). Web-access reaches the child set via a **named bundled-seam
-    field** (`BundledExtensions.webAccessFactory`) in the binary and a Bun `require` in dev — its raw
-    third-party `.ts` must stay out of the strict tsc graph.
-  - `extensions` — Pi resource wiring. Candidate generation loads the reviewed external Central path once
-    through a headless `DefaultResourceLoader` to apply provider registrations, without inspecting it.
-    `buildResourceLoader(cwd, settingsManager, getAdmission, excludedPaths, extraFactories?)` then resolves
-    Pi's normal settings/package +
-    `.pi` / `.agents` extension set, removes that exact opaque identity **before loading**, and explicitly loads
-    the remaining paths: sessions use the provider objects already owned by their retained generation, so
-    arbitrary Central factory/errors/UI cannot reach `pi.extensionUi`. The Central identity is always excluded
-    from session discovery—even if the global artifact changes—so a session cannot mutate its generation.
-    That explicit path set is **not frozen at construction**: the loader's public `reload()` is wrapped so
-    every reload first re-resolves the set through the host's own `DefaultPackageManager` (current settings
-    and trust, `builtin:*` entries by name so `-builtin:*` is honoured) and mutates the host-owned array pi
-    reads in place, then relabels discovered-path provenance after the load — pi's `extensionsOverride` is
-    not used because it runs after factories have executed. All other user extensions
-    retain normal discovery. The loader then adds
-    automatic **portable cross-agent skill aliases**, then loads the four bundled pi packages — **`pi-web-access`**
-    (`web_search` + `fetch_content`), **`pi-spec-graph`** (the `spec_*`
-    tools + its `before_agent_start` rule), **`pi-thinkrail-workflow`** (the workflow-router rule +
-    workflow skills), and **`pi-todos`** (the `todo_*` tools + its skill) — and the **ThinkRail extensions
-    from the server registry** ([[submodule-server-extensions]]; today `visualize`, whose server half
-    injects the strict mermaid validator) as named inline extensions. Existing personal aliases are Claude
+    (`childExtensionFactories` in `extensions`): `pi-spec-graph` + every registry extension's
+    `childExtensions` (named inline, from [[submodule-server-extensions]]; none today) — deliberately not
+    the parent's full set (rationale + the listed-children carve-out: core decision #25). **Every** child,
+    opted in or not, also loads the core's base set (`childBaseExtensionFactories`, same decision): just
+    `oversizedImageGuard`, since a child's `read` sends images under the same settings as its parent.
+  - `extensions` — the chat's engine resources. Candidate generation loads the reviewed external Central
+    path once through omp's headless `loadExtensions` and registers the providers it queued, without
+    inspecting it. **`buildSessionResources`** then builds everything else a chat loads and hands it
+    straight to `createAgentSession`, with omp's own discovery off (`disableExtensionDiscovery`), because
+    omp has no project-trust gate ([[pi-compatibility]] "Trust"):
+    - **Paths:** omp's normal extension set (`discoverSessionExtensionPaths` over the chat's settings) and
+      custom tools (`discoverCustomToolPaths`), minus the generation's Central identity and, in an untrusted
+      project, every project-scoped path (`preloadedExtensionPaths` / `preloadedCustomToolPaths`). Sessions
+      use the provider objects their retained generation already owns, so arbitrary Central
+      factory/errors/UI cannot reach `pi.extensionUi`; the Central identity is excluded even if the global
+      artifact changes, so a session cannot mutate its generation.
+    - **Factories:** the three bundled pi packages (paths in source mode, see below) — **`pi-spec-graph`** (the `spec_*` tools + its
+      `before_agent_start` rule), **`pi-thinkrail-workflow`** (the workflow-router rule + workflow skills)
+      and **`pi-todos`** (the `todo_*` tools + its skill) — the **ThinkRail extensions from the server
+      registry** ([[submodule-server-extensions]]; today `visualize`, whose server half injects the strict
+      mermaid validator) as named inline factories, the host's review, `request_review` and `set_title`
+      tools, `oversizedImageGuard`, and the caller's `extraFactories` (per-session bindings: the
+      workspace-bound subagents extension, background commands, the MCP host's `/mcp` command; its
+      `MCPManager` goes through `createAgentSession`'s options — see [MCP servers](#mcp-servers)). omp loads
+      inline factories after paths and resolves a tool name to its last registration, so a registry tool
+      beats a user package's same-name tool with no host ordering.
+    - **Tools and prompt:** `toolNames` is the host's built-in selection (`HOST_BUILTIN_TOOL_NAMES`; web
+      search is omp's own `web_search`); LSP, IRC and the Python preflight are off; `systemPrompt` seeds the
+      bundled packages' rule blocks (`HOST_RULE_BLOCKS`) so turns omp starts without `before_agent_start`
+      (custom-message turns) carry them, and the handlers skip a seeded block.
+    - **Skills, templates, rules:** admitted skills (below); omp's prompt templates, project ones only when
+      trusted; and, in an untrusted project, only user-level `rules` and the user's own system-prompt
+      override (or omp's bundled template) in place of a project `SYSTEM.md` / `SYSTEM_TEMPLATE.md`, which
+      omp would otherwise read whatever the trust. `childSystemPrompt` gives a delegated child the same.
+    omp caches capability file reads for the life of the process; the host calls the capability module's
+    `reset()` before every build and skill listing so a changed file is seen. Nothing reloads in place: a
+    reload replaces the engine session (`replaceEngineSession`), rebuilding settings and resources with the
+    current trust, admission and disabled-extension set. The **portable cross-agent skill aliases**
+    complete the skill set. Existing personal aliases are Claude
     (`${CLAUDE_CONFIG_DIR:-~/.claude}/skills`), Codex (`${CODEX_HOME:-~/.codex}/skills`), Copilot
     (`~/.copilot/skills`), and Gemini (`${GEMINI_CLI_HOME:-~}/.gemini/skills`), **plus each installed Claude
     plugin's `skills/` dir** (read from `~/.claude/plugins/installed_plugins.json` — the resolved `installPath`,
     never a cache sweep, so stale versions and transitive `node_modules/**/skills` are excluded); project-root
     aliases are `.claude/skills`, `.github/skills`, and `.gemini/skills`. The pure
     **`isProjectSkillPath(relativePath)`** predicate is the one server-side definition used by the worktree
-    watcher (injected through `host`): it recognizes those aliases plus Pi's native `.pi/skills` and
-    `.agents/skills`, so capped filesystem batches carry truthful skill-change evidence without making
-    `watch` depend on `agent`. The fixed project/personal alias roots are registered as candidate skill paths
-    **whether or not they exist yet**, so a `loader.reload()` picks up one a branch switch / pull / clone
-    creates mid-session (plugin dirs are the set installed at construction — a plugin added later
-    needs a fresh session); classification still only counts dirs that actually exist. Still never arbitrary
-    dot-directory scanning, plugin caches, commands, or nested downward discovery. Pi remains the parser:
+    watcher (injected through `host`): it recognizes those aliases plus omp's `.omp/skills` and `.agents/skills`,
+    so capped filesystem batches carry truthful skill-change evidence without making
+    `watch` depend on `agent`. The alias roots (and the installed-plugin list) are recomputed on every
+    build, so a reload picks up a root a branch switch / pull / clone creates mid-session or a plugin
+    installed since; classification still only counts dirs that actually exist. Still never arbitrary
+    dot-directory scanning, plugin caches, commands, or nested downward discovery. omp remains the parser:
     vendor-only macros/hooks/models/subagents/metadata are not emulated. First-name-wins precedence is
-    Pi native/configured/shared → ThinkRail-bundled → personal aliases → project aliases, so a repo can
+    omp native (`.omp` / `.agents` discovery and configured `skills.customDirectories`; omp's own reading
+    of other agents' roots is left out so each alias root is read once, with ThinkRail's provider and
+    scope) → ThinkRail-bundled → personal aliases → project aliases, so a repo can
     never shadow your own or ThinkRail's skills; source metadata preserves truthful `project` / `user` scope.
     **Admission gate (`skillAdmission`):** committed **project-scoped** aliases are attacker-controlled for a
     clone and injected into the system prompt, so per-skill they resolve to `load` / `untrusted` /
@@ -826,99 +914,61 @@ re-opened transcripts provider-valid.
     `project`/`personal`/`bundled`/`pi`, or the special `@plugins` — assigned per skill by `skillGroup`, matching
     `SkillCatalogEntry.group`), layered with the workspace's per-skill `skillOverrides` (the trust gate is
     checked before the toggle layer, so an "on" override can never un-gate an untrusted alias, and a per-skill
-    `on` beats a group disable). `skillsGate` filters + relabels in one `skillsOverride`; only `load` skills
-    reach the system prompt / `/skill:` list.
+    `on` beats a group disable). Only `load` skills reach the system prompt / `/skill:` list.
     The host resolves the context via the **`setSkillAdmissionResolver`** seam (keyed by `workspaceId`, fails
-    closed); `buildResourceLoader` takes the resolver as a thunk and `skillsGate` re-resolves **both** the admission
-    context (`getCtx`) **and** the live compatibility source set (fresh discovery) on every `loader.reload()`, so
-    `session.reloadResources` picks up a mid-session trust grant, skill/group toggle, **or a newly-appeared alias
+    closed); every build re-resolves **both** the admission context **and** the compatibility source set, so a
+    reload picks up a mid-session trust grant, skill/group toggle, **or a newly-appeared alias
     dir** — and a late-appearing project alias is still classified + trust-gated, never slipping through as an
     unclassified load. Personal and bundled resources are never trust-gated (only the enable/disable layer), and
-    this gate is scoped to the compatibility aliases. pi-native project resources (`.pi/` settings, extensions,
-    skills, prompts and themes, `SYSTEM.md`, ancestor `.agents/skills`) follow pi-level trust instead: pi gates
-    them on the project-trusted flag ThinkRail derives from `Project.piResourceTrust` and re-applies before
-    every load (MCP servers › Trust).
-    `listSkillCommands(cwd, admission)` reuses the same gated inputs through a short-lived skills-only
-    `DefaultResourceLoader` (no model/session/transcript, no extension factories) for pre-workspace
+    this gate is scoped to the compatibility aliases. omp-native project resources (`.omp/` settings,
+    extensions, hooks, tools, skills, prompts, rules, `SYSTEM.md`, ancestor `.agents/skills`) follow the
+    project's resource trust (`Project.piResourceTrust`) instead, which the host itself enforces —
+    `loadHostSettings` for settings, `buildSessionResources` for the rest — on every build (MCP servers › Trust).
+    `listSkillCommands(cwd, admission)` reuses the same admitted skill discovery (no model/session/transcript,
+    no extension factories) for pre-workspace
     autocomplete, cached briefly per `(cwd, admission)`; **`listSkillCatalog(cwd, admission)`** is the Skills
     manager's unfiltered variant (every discovered skill + its `group` + `decision`) — driven with a workspace
     (via `skills.state`) or a project (via `project.skills`, current checkout, no overrides) — and
-    **`listProjectAliasSkillNames`** is the notice's present-alias count. The full session loader supports
+    **`listProjectAliasSkillNames`** is the notice's present-alias count. The bundled pi packages load in
     **two modes**:
-    - **Run-from-source (default):** `additionalExtensionPaths` pointing at the pi packages' raw `.ts`
-      entries (pi's loader jiti-loads them — no value-import into our typecheck graph), resolved
+    - **Run-from-source (default):** `preloadedExtensionPaths` begins with the pi packages' raw `.ts`
+      entries (omp's extension loader imports them — no value-import into our typecheck graph), resolved
       **lazily on first use** (never at module load: the resolve requires `node_modules`, which a
-      compiled binary lacks). The workspace packages' `pi.skills` manifests aren't auto-discovered for
-      file-path entries — their `skills/` dirs (`pi-spec-graph`, `pi-thinkrail-workflow`, `pi-todos`), the
+      compiled binary lacks). Their `skills/` dirs (`pi-spec-graph`, `pi-thinkrail-workflow`, `pi-todos`), the
       host's own skills (`packages/server/skills`: ThinkRail-only guidance such as
-      `managing-mcp-servers`, which would be wrong under vanilla pi and so cannot live in a portable
-      package) plus the registry extensions' owner-resolved skill roots are wired via
-      **`additionalSkillPaths`**; `build-support`'s `skillRoots` lists the same host root for both bundles.
+      `managing-mcp-servers`, which would be wrong under vanilla omp and so cannot live in a portable
+      package) plus the registry extensions' owner-resolved skill roots are read as bundled skill roots;
+      `build-support`'s `skillRoots` lists the same host root for both bundles.
       Registry extensions themselves are never path-loaded: they are the same named inline factories in
       both modes (one composition mode; `{ name, factory }` keeps `<inline:visualize>` in diagnostics).
     - **Bundled launchers (compiled CLI binary and packaged desktop runtime):** the launcher awaits the
-      **`registerBundledRuntime({ factories, skillsDir, trashHelpers, webAccessFactory })` seam** before the first session — the same four pi packages as
-      **value-imported default-export factories** (pi gives `extensionFactories` full API parity with path loading; what's lost —
-      file-relative `baseDir`, per-reload re-evaluation — none of them use) plus a staged on-disk
-      skills dir (pi reads `SKILL.md` via plain fs, so skills must live on the real filesystem; the
+      **`registerBundledRuntime({ factories, skillsDir, trashHelpers })` seam** before the first session — the same three pi packages as
+      **value-imported default-export factories** (what's lost against path loading — file-relative
+      `baseDir`, per-reload re-evaluation — none of them use) plus a staged on-disk
+      skills dir (omp reads `SKILL.md` from the real filesystem; the
       bundled runtime uses **only** this staged root — it never resolves an extension-owned package from
       the host's `createRequire`). Registry extensions need no seam field: `@thinkrail/server`'s static
-      import of each `@thinkrail/ext-*/server` carries them into the binary and the desktop bundle. The
-      seam also performs the **bundled-artifact pi registrations**: pi hides Node-only provider code behind
-      bundler-opaque variable-specifier dynamic imports (so browser bundles can't reach `node:http`
-      OAuth servers / the AWS SDK), which a single-file binary can't resolve at runtime — every OAuth
-      sign-in died with `Cannot find module './openai-codex.js'`. pi ships static registration seams
-      for exactly this, and we mirror pi's own binary entry (`pi-coding-agent` `dist/bun/cli.js`):
-      **`registerBunOAuthFlows()`** (`@earendil-works/pi-ai/bun-oauth`) + **`setBedrockProviderModule(
-      bedrockProviderModule)`** (`…/compat` + `…/bedrock-provider`). Both load via **dynamic literal
-      imports inside the seam** — literal specifiers are statically bundled by both `bun build --compile`
-      and the desktop server-runtime build, while dev (which never calls the seam) never loads the flow
-      modules or the AWS SDK. Registration
-      lands in the same `pi-ai` instance pi consults at login time because the catalog pins one exact
-      `pi-ai` version repo-wide (one store entry → one bundled module instance). Chat trash has two
+      import of each `@thinkrail/ext-*/server` carries them into the binary and the desktop bundle. Chat trash has two
       artifact seams behind the same registration, both owned by the `trash` module: the procfs parser it
       statically installs, and the `trashHelpers` the launcher stages and `registerBundledRuntime` injects
       through `setBundledTrashHelpers` (rationale: [[submodule-server-trash]]). No platform degrades to
       permanent unlink.
-    The desktop server/factory bundle is built with pi's `PI_BUNDLED_NODE=true` compile-time define. That
-    is pi's own switch for bundled-but-not-compiled distributions: it selects the embedded-modules extension
-    loader (jiti's static entry with Babel bundled in, plus pi's virtual modules). Without it pi treats the
-    bundle as a plain Node runtime and reaches for jiti's lazy `../dist/babel.cjs` relative to a file that
-    does not exist inside a single-file bundle, so the Central candidate fails to load (pi 0.86.0 made the
-    loader choice runtime-dependent; 0.84.x always used the static entry). The candidate loader also forces
-    jiti's transform (`JITI_TRY_NATIVE=false`, plus `JITI_REBUILD_FS_CACHE=1` so a stale transform cache
-    never survives a pi bump): with native import allowed, Bun would resolve an external extension's bare
-    `@earendil-works/pi-coding-agent` import itself — auto-installing a second pi copy, since nothing under
-    `~/.pi/agent/extensions` has `node_modules` — instead of pi's virtual-module mapping onto the bundled
-    instance. Together the define and the forced transform are the tested artifact seam (the shared artifact
-    probe's synthetic extension value-imports pi and fails closed without them); the `server-runtime.ts`
-    filename is only a name.
-    In every mode, the optional Central artifact remains an external filesystem path loaded by PI's public
-    Jiti seam; it is never bundled, staged, or copied into ThinkRail. Both modes append
-    `extensionFactories`: a **headless-search policy** (a `tool_call` hook defaulting
-    `web_search`'s `workflow` to `"none"`, since pi-web-access would otherwise open a browser curator our
-    `rpc` host can't render),
-    `oversizedImageGuard` (the context-level image-size guard, see the `imageGuard` bullet), **and the
-    caller's `extraFactories`** — per-session host bindings (the workspace-bound subagents extension),
-    value-imported so dev and the compiled binary take the same path. pi's own built-in extensions
-    (`llama.cpp`, `codemode`, `tool-search`, `mcp`) are loaded only by pi's CLI; an SDK host opts in per
-    factory. ThinkRail opts into **`mcp` and `tool-search`** with pi's own descriptors
-    (`{ name, factory, replaceable: true, builtin: true }`, so a user-installed `/mcp` extension replaces
-    them and `-builtin:mcp` in pi settings disables them) — registered only once the protections in the MCP
-    section below had landed, so no build ever started servers without them; there is no runtime flag
-    beyond pi's own `-builtin:mcp`. `codemode` and `llama.cpp` are not loaded (codemode needs a
-    QuickJS worker + wasm seam the compiled binary and desktop bundle do not have). See
-    [MCP servers](#mcp-servers).
-    Both session paths pass it as `resourceLoader`. `buildResourceLoader` stays internal; the seam +
-    its types are on the barrel.
+    Both artifacts are built with omp's bundled-mode define (`PI_COMPILED` for the binary, `PI_BUNDLED` for
+    the desktop bundle) and the build-supplied `omp-legacy-pi-modules` virtual module (`buildSupport.ts`),
+    so an external extension's `@oh-my-pi/*` imports resolve to the bundled engine instance
+    ([[pi-compatibility]] "Bundled extension loading"). In every mode, the optional Central artifact
+    remains an external filesystem path loaded by omp's extension loader; it is never bundled, staged, or
+    copied into ThinkRail. `buildSessionResources` stays internal; the seam + its types are on the barrel.
 - **Public surface (barrel):** the manager operations (incl. `respondToTool` +
   `settleSessionsForShutdown`) + `CreateSessionInput`/`CreateSessionResult` + `SessionEventPayload`;
   the runtime-generation facade (`usePiRuntime`, candidate prepare/activate, current generation id, and the
   closed `load-failed` outcome—no manager internals) plus `configurePiRuntime`/factory test seams and the
   pre-bootstrap `configurePiRuntimeGenerationInitializer` composition seam; `listModelContextSettings` /
   `setModelContextWindow` / `setModelContextPublisher` (the `modelContext` adapter and its
-  `provider.changed` seam); `piLoginOptions` (pi login options
-  carrying the lazily created installation device id, for `auth`);
+  `provider.changed` seam); `piLoginOptions` (the options every `auth` login receives — empty, since omp's
+  providers derive their own installation identity); `migratePiAgentDataOnBoot` (the one-time pi data
+  import `host` boot runs, `piMigration.ts`: a pi installation's chats, logins and user MCP servers copied
+  into omp's agent dir; [[pi-compatibility]] "pi data import");
   `completeOnce`/`pickModel` +
   `OneShotRequest`/`OneShotResult`/`ModelTier`; the `webUiContext` seams; the `toolResponses` mailbox
   and pure helpers (`createToolResponseWaiters`/`toolResponseSessionServices`/`assessRespondability`/
@@ -935,28 +985,28 @@ re-opened transcripts provider-valid.
   opens — settlement, the release of an admitted prompt, or a compaction's end; requests coalesce); the **`setSkillAdmissionResolver`** seam (host
   wires `workspaceId` → the admission context, derived once by `admissionContextFor(project, overrides)`);
   the **`setMcpPolicyResolver`** seam (host wires `workspaceId` → the project's MCP approvals, overrides
-  and tool grants, derived by `mcpPolicyOf(project)`) and its writer twin **`setMcpToolGrantWriter`**; the MCP management surface — `listMcpServers`,
-  `mcpOwnershipGuard` (resolves pi settings, then answers synchronously who manages MCP instead of
-  ThinkRail — what `listMcpServers` reports as `handledElsewhere` — so the host checks it in the same call
-  stack as every management mutation), `refreshMcpStatus`,
+  and tool grants, derived by `mcpPolicyOf(project)`) and its writer twin **`setMcpToolGrantWriter`**; the MCP management surface — `listMcpServers`, `refreshMcpStatus`,
   `setMcpStatusPublisher`, `mcpSessionView` / `liveSessionIdsOf`, `dispatchSessionMcpCommand` (with an
   optional `notify` that takes the dispatch's notifications instead of the chat), `reconnectMcpServer`,
-  `readMcpServerLog` (one server's masked lines from pi's shared `mcp.log`),
+  `readMcpServerLog` (one server's masked lines from the host-written `mcp.log` in omp's agent dir),
   `setSessionMcpServerEnabled` (the chat-local disable, applied through the reload gate), the config
   effective-config read `effectiveMcpServerConfig` and the config
   writers `writeMcpServerEntry` / `removeMcpServerEntry` / `mcpEntryFingerprint` /
-  `shareMcpOverrideWithRepo` (pi-rule validation, `MCP_CONFIG_INVALID` / `MCP_PATH_UNSAFE`) and the
+  `shareMcpOverrideWithRepo` (omp-schema validation, `MCP_CONFIG_INVALID` / `MCP_PATH_UNSAFE`) and the
   sign-in probe (`startMcpProbe`, `replyMcpProbe`, `cancelMcpProbe`, `cancelMcpProbesOwnedBy`,
   `cancelAllMcpProbes`, `setMcpLoginPublisher`, `isMcpLoginId`);
   the pi-level trust surface — `applyPiResourceTrust(workspaceIds)`
-  (gated reload of every live session whose trust is stale), `piTrustsProjectPath(path)` (whether pi already
-  trusts a path: its `trust.json` decision by nearest ancestor, else its global `defaultProjectTrust` is
-  `always`; an unreadable store answers `false` — the host's seed for a newly added project) and
+  (gated reload of every live session whose trust is stale; omp records no per-project trust decision and
+  its `isProjectTrusted()` is hard-wired `true`, so ThinkRail's grant is the only trust) and
   `projectTrustSummary(cwd)` (the trust notice's facts: alias names and the `ProjectResourceKind`s present —
-  the `.pi/` entries pi's `hasTrustRequiringProjectResources` gates, ancestor `.agents/skills`, and project
-  definitions from `pi-subagents`' `discoverAgentDefinitions`; the entry list mirrors pi's private one, minus
-  `mcp.json`, whose entries are counted separately as `mcpServers` because each also needs its own approval,
-  so a pi upgrade that gates a new entry must extend it);
+  the project `.omp/` entries omp's native discovery loads (`extensions`, plus `hooks` and `tools`, which
+  load as code and so report as `extensions`; `settings.json` / `config.yml` as `settings`; `skills`;
+  `prompts`; `SYSTEM.md` / `SYSTEM_TEMPLATE.md` / `RULES.md` / `rules/` as `systemPrompt`), ancestor
+  `.agents/skills` and `.omp/skills`, and project definitions from `pi-subagents`' `discoverAgentDefinitions`.
+  omp has no project themes or `APPEND_SYSTEM.md` outside its CLI, so `themes` is never reported. The list
+  mirrors omp's builtin discovery provider (`discovery/builtin.ts`), minus `mcp.json`, whose entries are
+  counted separately as `mcpServers` because each also needs its own approval; `projectTrust.test.ts` checks
+  every entry against omp's own capability loader, so an omp upgrade that moves one fails there);
   the subagent-policy seams
   **`setSubagentsEnabledResolver`** + **`refreshSubagentTools`** (host resolves the effective global default
   plus workspace override; manager owns live-session activation timing) and the concurrency seams
@@ -967,21 +1017,18 @@ re-opened transcripts provider-valid.
   the `set_title` seam (`setTitleToolHost` + `TitleToolHost`/`SET_TITLE_TOOL_NAME`/`SetTitleParams`);
   the bundled-artifact seam (`registerBundledRuntime` +
   `BundledExtensions`/`BundledExtensionFactory`).
-- **Allowed deps:** `@earendil-works/pi-coding-agent` (runtime); `@earendil-works/pi-ai` (types + test
+- **Allowed deps:** `@oh-my-pi/pi-coding-agent` (runtime); `@oh-my-pi/pi-ai` (types + test
   fixtures + **pure catalog helpers value-imported from the package root** — today exactly
   `getSupportedThinkingLevels` + `clampThinkingLevel`, data-only projections over `Model`; *dispatch*
-  still goes through the shared `ModelRuntime`, never pi-ai's stream/complete — plus the `/bun-oauth` + `/bedrock-provider`
-  + `/compat` subpaths, value-imported **only** inside `registerBundledRuntime`'s dynamic imports);
+  still goes through the shared `ModelRuntime`, never pi-ai's stream/complete);
   `pi-delegation` + `pi-subagents` (the portable delegation runtime and Agent-tool composition,
   value-imported by the host embedding); `pi-background-commands` (the session-bound command
-  capability, likewise value-imported by its host embedding); `pi-web-access` + `pi-spec-graph` +
+  capability, likewise value-imported by its host embedding); `pi-spec-graph` +
   `pi-thinkrail-workflow` + `pi-todos` (the bundled pi packages — parent sessions load the set through
-  resource-loader paths or launcher factories; delegated children value-import `pi-spec-graph` and receive
-  the named `pi-web-access` factory through the bundled runtime seam; the source-mode equivalent loads it
-  lazily through `jiti` — the loader pi uses for extension paths — so a parent never pays for it and the
-  barrel stays Node-loadable for the workflow harness ([[module-workflow-tests]])); the sibling `extensions` registry module (the ThinkRail extensions' inline factories and
-  skill roots — `agent` never imports an `@thinkrail/ext-*` package or its pi package directly); `jiti` (the source-mode child `pi-web-access` load above); `typebox` (the host tools' parameter schemas); `jsonc-parser` (targeted
-  `models.json` edits in `modelContext`); `trash` (reached only through the
+  extension paths or launcher factories, and `extensions` value-imports their rule blocks; delegated
+  children value-import `pi-spec-graph`); the sibling `extensions` registry module (the ThinkRail extensions' inline factories and
+  skill roots — `agent` never imports an `@thinkrail/ext-*` package or its pi package directly); `typebox` (the host tools' parameter schemas); `yaml` (targeted
+  `models.yml` edits in `modelContext`); `trash` (reached only through the
   sibling **`trash` module** — see [[submodule-server-trash]]: one path, globbing disabled, allowed to
   throw, never degraded to `unlink`; the launcher's staged-helper and procfs-parser seams live there too,
   because `changes`' whole-file revert needs the same primitive);
@@ -1000,9 +1047,23 @@ Portable tools own bounded model-facing output ([[submodule-spec-graph-tools]],
 read/bash/MCP limits remain authoritative. Structured result details are presentation metadata;
 measure model-facing content, not the serialized transcript or SDK context object.
 
-Pi owns aggregate budgeting, compaction and recovery; bounded tool output does not guarantee
-whole-request admission. The host adds no compaction overrides or retry loop. Known upstream
-context-budget limitations and their upgrade checks live in [[pi-compatibility]].
+The engine (omp) owns aggregate budgeting, compaction and recovery; bounded tool output does not guarantee
+whole-request admission. The host adds no compaction overrides or retry loop. omp recovers a context
+overflow, and a `length` stop whose prompt exhausted the window, by compacting and retrying once; a
+recurrence ends the run with a warning notice instead of looping (`piLengthRecovery.test.ts` pins both on
+omp's session). A restored length-truncated call is replayed with its paired error result rather than
+omitted. Known upstream context-budget limitations and their upgrade checks live in [[pi-compatibility]].
+
+`compactionEvents.test.ts` is the engine canary for the lifecycle the host projects. omp compacts a
+completed turn before its terminal `agent_end` (start/end after `turn_end`; the host's `agent_settled`
+follows), its end event carries no `reason` or `estimatedTokensAfter` (post-compaction size is
+`getContextUsage()`), and a manual `compact()` emits no events. With the default `compaction.asyncEnabled`
+an over-threshold turn is handed to a silent background speculation spliced in at the next boundary, and
+the default method order (`remote`, `snapcompact`, `handoff`, `shake`, `soft`) emits one start/end pair per
+attempted method and falls back to other authenticated models. The canary therefore pins `soft`, disables
+async and mid-turn maintenance, disables ambient env-credential providers, and grows the context with one
+large tool result (a lone reply stays in the kept tail and cannot create headroom). omp accepts a
+`length`-stopped summary as a successful compaction; its canary stays red until the engine rejects it.
 
 ## Session titles
 
@@ -1037,7 +1098,7 @@ still carries it so a client can show the title and keep the prompt as a tooltip
 ## Chat Resources integration
 
 The manager retains one [[module-pi-background-commands]] service per parent chat alongside its Pi
-session and injects its extension through the normal resource-loader path. The same binding supplies
+session and injects its extension among `buildSessionResources`' per-session factories. The same binding supplies
 live session context, effective shell settings and lifecycle in source and packaged hosts. The
 first version loads this capability into parent chats only, not the curated hidden-child extension
 set; ordinary child Bash remains visible in its transcript.
@@ -1081,19 +1142,24 @@ temporary and does not dispose either owner. Resource reload retains the command
 `Subagents` owner and rebinds their completion senders. The manager stores no completion queue. The
 SessionManager exists before SDK session creation, giving the service its immutable identity. Its
 context reads the current session's
-cwd/model/thinking/session file and effective SettingsManager shell path/prefix at launch. Completion
-requires that exact registered owner, no deletion tombstone, no resource closure and no recoverable
-live question. A non-waking user-stop notice must not append behind an unanswered tool call and break
-tail-only restart repair. Resource inspection and cancellation remain available while delivery waits
-in the existing portable owners. The native `turn_end` result boundary clears the question phase and
-flushes both owners with `{ atTurnEnd: true }` — the last safe point where a result can still join the
-next request of the running parent — and `compaction_end` flushes them once pi is no longer
-compacting, as do registration, resource reload and deletion rollback; while the parent is busy any
-other flush is a no-op, because the owners deliver at step boundaries ([[module-pi-subagents]] Result
-delivery). `closeSessionResources` synchronously disposes
+cwd/model/thinking/session file and the shell command prefix from the chat's omp `Settings` at launch. Completion
+requires that exact registered owner, no deletion tombstone, no resource closure and no live question
+still awaiting its response (`awaitsResponse`: an expected or waiting call). A non-waking user-stop
+notice must not append behind an unanswered tool call and break tail-only restart repair. Once the
+response is accepted the gate opens: the call's result is then the tool's own return, and the owners
+only send asides from the batch's last `tool_result` (or a later boundary), which omp injects after
+every result of the batch, so the notice follows the answer in the request right after the batch.
+Waiting for the native `turn_end` instead was one request late on omp: the host's `turn_end`
+subscriber and extension `turn_end` handlers run after omp's step poll may already have run
+(`agent-loop.ts:780-800`, `1805-1809`; `agent-session.ts:3815-3850`), so the host no longer flushes
+there; `turn_end` only settles the question phase (`persistTurn`). Resource inspection and cancellation
+remain available while delivery waits in the existing portable owners. `compaction_end` flushes both
+owners once pi is no longer compacting, as do registration, resource reload and deletion rollback;
+while the parent is busy those flushes are no-ops, because the owners deliver at step boundaries
+([[module-pi-subagents]] Result delivery). `closeSessionResources` synchronously disposes
 the subagent owner before child cancellation or any await, including preparation failures. Permanent
-closure survives shutdown-budget expiry and suppresses late outcomes; Pi disposal does not emit extension
-shutdown, so the cascade emits `session_shutdown` itself after the synchronous owner disposal (see
+closure survives shutdown-budget expiry and suppresses late outcomes; omp's `dispose()` emits
+`session_shutdown` once, after the synchronous owner disposal and MCP closure (see
 [MCP servers](#mcp-servers)). The existing cached resource cascade remains the sole teardown owner. Both
 SDK creation and entry preparation failures close the owners. A failure after registration also
 removes that exact entry through the normal teardown path, rather than leaving a disposed session
@@ -1106,43 +1172,56 @@ A restarted host has no control handles or retained command output to reconstruc
 before it ends, and a test publisher (process-global) ignores other chats' notices and keeps any read it
 starts handled: a late `stopped` notice once reached the next test's publisher, whose rejected read became
 an unhandled rejection that bun charged to every following test while that publisher stayed installed.
+Tests hold or fail the attach window through `fixtures/extensionBinding.ts`, which wraps omp's
+`initializeExtensions` with `mock.module`. omp
+settles an aborted run without waiting for the provider stream (`agent-loop.ts` races the stream against
+the abort), so a gated child is already `aborted` when shutdown returns; a teardown that must stay open is
+held by a `session_shutdown` handler instead. A child's first request no longer precedes its parent's next
+one, so scripted replies for a parent and its child route by request content, not queue order.
 Its only new external dependency is `pi-background-commands`; there is no `agent` → `terminal`, `subprocess`,
 settings or workspaces edge. The owning parent graph records this package dependency.
 
 ## MCP servers
 
-pi's built-in MCP is the only MCP engine: connections, OAuth, exposure, resources, result truncation and
-the `/mcp` command stay pi's; ThinkRail owns what a multi-session GUI host owes around it.
+omp's MCP client (`@oh-my-pi/pi-coding-agent/mcp`) does the protocol work — transports, OAuth flows,
+credential rows in `AuthStorage`, tool bridging, result truncation; ThinkRail owns which servers a chat
+loads, their lifecycle, the call guard, status, sign-in and the server log
+([[submodule-server-agent-mcp]]).
 
-- **Registration.** The two built-in descriptors above, per parent session only, built by the session's
-  `createMcpSessionHost` together with the call guard and a status invalidation callback. The manager
-  injects the guard's two ports — `askForToolCall` (→ `selectForToolCall(sessionId, { toolCallId, toolInput }, …)`,
-  so the approval is anchored to its call even among parallel calls and lists the call's input) and `grantTool` (→ the grant-writer
-  seam) — and the host injects the workspace's project policy (`setMcpPolicyResolver` → `Project.mcpApprovals` / `mcpOverrides` /
-  `mcpToolGrants`, fail-closed to none). Child (subagent) sessions load neither — the curated child set carries no engine —
-  and the `Agent` tool's description says subagents cannot call MCP tools.
-  Parent chats make pi's `openUrl` a no-op (a remote client must never get a browser opened on the host
-  machine); pi's rpc-mode `/mcp login` still shows the URL and the paste-back dialog. In the
-  Central-exclusion loader mode both built-ins go through the per-reload path re-resolution described
-  under `extensions`, so `-builtin:*` applies there too.
-- **Configuration** ([[submodule-server-agent-mcp]]). pi's `mcp.json` files are the source of truth
-  (`~/.pi/agent/mcp.json`, trusted `.pi/mcp.json`). The loader ThinkRail supplies is a port of pi's
-  `loadMcpConfig` + validation (parity tests run the same fixtures through pi's installed loader, re-checked
-  on every pi bump) because pi does not export them; it also applies
-  the project record's enablement/exposure overrides, drops repo-defined entries the user has not approved,
-  and normalizes `codemode` exposure to `deferred` in memory while codemode is absent. Config writers are
-  ThinkRail's (synchronous temp-file rename, unknown keys kept, only the defining file touched, no symlinked
-  `.pi/` paths, secret literals masked in every UI). Servers registered by third-party extensions bypass
-  the loader; the `mcp` descriptor's factory registers its own `session_start` / `mcp_servers_change`
-  handlers ahead of pi's so `tool_search` is active before pi checks reachability whenever
-  `pi.getMcpServers()` is non-empty (no "neither is active" warning, and nothing to do when another
-  extension replaced the built-in).
-- **Trust.** Every `SettingsManager` the host builds for a project passes its real pi-level trust
-  (`Project.piResourceTrust`, [[submodule-server-projects]]) instead of a forced `true`.
-  - **Sites.** Sessions (`buildSessionSettings`), pre-session loaders and child sessions. The alias-name
-    listing alone passes `false`: alias roots are explicit paths, so it never needs project settings.
-  - **Every load.** The session loader's `reload()` applies the admission context's current trust
-    (`setProjectTrusted`) before every load, so any reload — a grant, a config change or a manual reload — loads exactly
+- **Registration.** Per parent session only, `createMcpSessionHost({ cwd, policy, projectTrusted,
+  onCommandSettled, askForToolCall, grantTool })`. Every engine-session load spreads
+  `mcpHost.sessionOptions()` into `createAgentSession` (a fresh omp `MCPManager` with the host loader, or
+  `enableMCP: false` when no server is enabled) and adds `mcpHost.extensions` (the host's `/mcp` command
+  and full-output marker); after `initializeExtensions` the manager calls `mcpHost.attach(session)`,
+  which connects the servers and delivers their tools. The manager injects the guard's ports —
+  `askForToolCall` (→ `selectForToolCall(sessionId, { toolCallId, toolInput }, …)`, anchored to its call
+  and listing its input) and `grantTool` (→ the grant-writer seam) — and the workspace's project policy
+  (`setMcpPolicyResolver` → `Project.mcpApprovals` / `mcpOverrides` / `mcpToolGrants`, fail-closed to
+  none) and loaded trust (`projectTrusted`; omp's `ctx.isProjectTrusted()` is always true). Every other
+  `createAgentSession` (children, probes) must pass `enableMCP: false`, or omp runs its own multi-source
+  discovery without approvals. MCP is not a replaceable extension in omp: an installed extension that
+  registers `/mcp` neither replaces the host's command (discovered extensions load before inline factories,
+  and the runner resolves a command from the last extension that registered it) nor stops the host from
+  managing servers; omp has no MCP-off setting, no `-builtin:mcp` and no `registerMcpServer`, so the host
+  owns MCP in every chat and its management is never read-only.
+- **Configuration** ([[submodule-server-agent-mcp]]). omp's native files are the source of truth
+  (`~/.omp/agent/mcp.json`, trusted `.omp/mcp.json`), read by the host's loader under omp's schema with
+  ThinkRail's `exposure` / `toolExposure` / `description` keys (omp ignores them), project overrides,
+  approvals by fingerprint, record overrides and the chat-local disabled set; parity tests compare it
+  with omp's own loader. Config writers are ThinkRail's (synchronous temp-file rename, unknown keys kept,
+  only the defining file touched, no symlinked `.omp/` paths, secret literals masked in every UI). The
+  one-time pi import (`migratePiAgentData`) converts `~/.pi/agent/mcp.json` into omp's user file when
+  that file does not exist yet (`streamable-http` → `http`, seconds → milliseconds, `callbackUrl` →
+  `redirectUri`, pi's provider `auth` dropped); repositories' `.pi/mcp.json` are not moved.
+- **Trust.** omp has no project-trust gate (any cwd contributes project settings and
+  `isProjectTrusted()` is hard-wired `true`), so the host enforces the project's resource trust
+  (`Project.piResourceTrust`, [[submodule-server-projects]]) itself: an untrusted chat's omp `Settings`
+  hold only the user layer (`loadHostSettings`), and `buildSessionResources` filters the rest (see
+  `extensions`; [[pi-compatibility]] "Trust").
+  - **Sites.** Sessions (`buildSessionSettings`), pre-session skill listings and child sessions
+    (`buildChildSettings`, `childSystemPrompt`); probes and catalogues use `isolatedHostSettings`.
+  - **Every load.** Every engine-session build reads the record's current trust, so any reload — a
+    grant, a config change or a manual reload — loads exactly
     what the record allows. A grant or revoke therefore only asks the gate to reload the sessions whose
     trust is stale (`applyPiResourceTrust`: idle now, busy at settlement). A session still opening when
     trust changes is not in that scan, so registration re-checks its loaded trust against the record and
@@ -1168,172 +1247,80 @@ the `/mcp` command stay pi's; ThinkRail owns what a multi-session GUI host owes 
     `project.setTrust` with `resources: true`, sent by a surface that names what it loads, grants it
     ([[submodule-server-projects]]). Repo-defined MCP entries additionally need a per-entry approval
     keyed to a fingerprint of the whole original entry object (approval state in the project record).
-    The trust notice is shown for alias skills, pi's own trust-requiring resources, project subagent
+    The trust notice is shown for alias skills, omp's project resources, project subagent
     definitions and project MCP entries alike.
-- **Lifecycle.** `AgentSession.dispose()` never emits `session_shutdown`, so the resource cascade
-  (`closeSessionResources`) runs it itself — synchronously, after the synchronous owner disposal, so handlers
-  have started before the synchronous teardown path disposes the pi session. pi's runner awaits handlers one
-  after another in load order, and file extensions load before `builtin:mcp`, so one that never settles would
-  keep pi's MCP shutdown from ever starting (pi's process-exit hook only sends SIGTERM). The cascade therefore
-  first runs the `mcp` factory's own `session_shutdown` handler directly (`McpSessionHost.shutdownEngine`,
-  with the event and the runner's `createContext()` pi would pass), then
-  `session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" })` for every extension. The
-  captured and runner-emitted MCP shutdown share one per-load cleanup promise, so clearing pi's server
-  list early cannot make a second dispatch lose the first dispatch's completion ([[submodule-server-agent-mcp]]).
-  Gated reloads await that actual MCP cleanup with reason `reload` before calling pi's `session.reload()`;
-  they never use the bounded quit wait to admit a replacement while old resources still live. A hanging
-  unrelated shutdown handler may delay the reload, but cannot keep MCP processes alive through a trust
-  or resource change. Closure checks before reload, in the public `beforeSessionStart` hook, and after
-  dispatch reject when the entry is disposed or its resources are closing. The hook alone is insufficient:
-  an earlier async `session_start` handler can pause the dispatch through closure, so the engine guards
-  its actual startup/change callbacks with the load's synchronously closed flag. Closure does not await
-  an unbounded resource loader or startup dispatch. If pi later builds a replacement
-  runner, the reload owner gives that runner its own bounded shutdown and disposes it. Shutdown is
-  single-flight per runner, including when emergency disposal follows graceful closure mid-reload;
-  each disposal continuation may dispose only the runner whose shutdown it awaited. Closed reloads never
-  flush completions, restart MCP status, or schedule another reload.
-  Every teardown path goes through this cascade: delete/remove, workspace archive/removal, quit
-  (`settleSessionsForShutdown` + `disposeAllSessions`) and a preparation that fails after binding —
-  including one whose registration is refused because the workspace closed or the host began quitting
-  meanwhile. Every one of them defers `session.dispose()` (`disposePiSessionAfterShutdown`) until both
-  settle or the budget (`SESSION_SHUTDOWN_BUDGET_MS`, 3 s — pi escalates stdin-close → SIGTERM → SIGKILL
-  over 2.5 s) elapses, because `dispose()` invalidates the extension context the handlers are still
-  using; the host shutdown settle budget is that same 3 s. Retained sessions keep their servers
-  (no eviction); they appear as the third list of `SessionResources` (`mcpServers`: name, state, tool
-  count, transport from the session's latest status snapshot, `registered: true` with the registration's
-  transport for a server an extension registered; a change publishes `session.resourcesChanged`) with
-  per-chat "Disable in this chat" applied at the next idle reload (a deferred one shows the server
-  `pending-reload` at once). The overlay reaches `mcp.json` servers only, so `setSessionMcpServerEnabled`
-  refuses (`MCP_CONFIG_INVALID`) to disable a server the chat did not load from its files — for a
-  registered one the message says it is registered by an extension and can't be disabled per chat — and
-  refuses with `MCP_HANDLED_ELSEWHERE` where `builtin:mcp` does not own `/mcp`. Ownership and file
-  provenance are validated before both enable and disable, even for no-op requests; a disabled entry
-  retained across a reload that replaces `/mcp` cannot be re-enabled through the host. A failed reload
-  never rolls back the chat-local disable intent; repeating the same value retries while its MCP reload
-  failure remains, rather than returning unchanged. If that failure cleared the loaded snapshot, a retry
-  validates file provenance against the currently admitted configuration; unknown or extension-only names
-  remain refused and a replacement command owner still makes the control read-only.
-  Config or trust changes reload only the affected sessions: the session's `loadConfig` records the
-  per-server effective config pi received at its last start (`McpSessionHost.loaded()`, cleared at the start
-  of every load), and `reconcileMcpSessions` compares it with what the loader would produce now
-  (`pendingMcpReload`) — an unapproved repo entry, for example, changes nothing and reloads nothing. A
-  session whose `/mcp` another extension owns, or none does, has nothing to compare (the built-in's loader
-  never runs there) and is not reconciled unless an earlier failed MCP reload remains retryable.
-  Reconciliation runs after every
-  host mutation, when the user file changes (`watchUserMcpConfig`: one directory watcher on pi's agent dir,
-  300 ms debounce; a missing agent dir is created first — pi creates it on first use anyway — so a file the
-  user adds later is still seen; a rename or watcher error retires the old watch and rearms it with
-  capped retry backoff, including after the agent directory is recreated; stopping cancels retries), when a workspace change nudge touches `.pi`, and at each session's
-  `agent_settled` (so an edit the agent made itself applies once the run ends); a deferred reload shows the
-  changed servers as `pending-reload` until it runs. Every MCP-affecting gated reload (immediate,
-  deferred, manual, trust/settings, or chat-local override) shares one failure recorder in `mcpSessions`:
-  the existing tracked status object retains the retry marker even if the failed load already replaced
-  or cleared its config snapshot. The gate captures whether the built-in engine was loaded before
-  replacement; that provenance, a newly loaded engine, or an existing failure makes the reload
-  MCP-affecting. Hosts where MCP was never managed acquire no MCP failure marker. Each failed attempt
-  logs and notifies once with redacted details; deferred and reconciliation callers do not report it again.
-  Failure does not restart authoritative status or immediately drain another pending reload; a later
-  reconciliation or explicit retry can recover without any config delta. Only a successful reload clears
-  the marker and restarts status. Closing or disposed entries neither report failures nor restart.
-  Reloads go through `session.reload()` behind a per-session reload gate: while a reload runs, every
-  admission seam (`promptSession`, `steerSession`, `followUpSession`, `nudgeSession`, queue requeues,
-  `respondToTool`, `sendReviewFixToSession`, `compactSession`) refuses with "reloading", and completion
-  delivery waits in its owners through `canDeliverCompletion` and flushes afterwards; the gate opens only
-  when pi is `isIdle`, no admitted prompt is still in preflight (the host reserves the window from
-  admission to `agent_start` — pi ≤ 1.1 reported idle throughout it and pi 1.2 still does until
-  `before_agent_start`, through `input` handlers and expansion; a prompt handled as a slash command never
-  starts a run), no queued-message removal is putting the kept messages back (`removeQueuedSession` holds a
-  reservation `agent_start` does not release from its drain to its last requeue, so a run that settles
-  meanwhile cannot start a reload that would refuse — and lose — the rest), and no manual or automatic
-  compaction is in flight; a pending reload is reconsidered at `agent_settled`, on every reservation release
-  and on compaction end / `compactSession`'s `finally`.
-- **Status** (`mcpSessions.ts`). Exposed, not recomputed: connection truth is pi's headless `/mcp` text,
-  obtained by dispatching the session's own command (`dispatchSessionMcpCommand` →
-  `extensionRunner.getCommand("mcp").handler`). The capture goes by provenance, never by format: that
-  dispatch gets `createCommandContext()` with its `ui` getter redefined (`Object.defineProperty`, so pi's
-  other lazy getters stay untouched) to a forwarding proxy of pi's UI whose `notify` alone reports to the
-  capture. It therefore takes exactly its own dispatch's notices, nothing it prints ever reaches the chat,
-  and a user's own `/mcp` (pi's prompt path, pi's context) always prints there, even mid-capture. The
-  reconnects (`reconnectMcpServer`: `mcp.reconnect` and the post-sign-in ones) dispatch the same way:
-  success is silent, pi's error notice becomes the call's rejection (through `redactMcpText`), and a chat
-  where `builtin:mcp` does not own `/mcp` is refused with `MCP_HANDLED_ELSEWHERE`. pi's startup "MCP
-  servers need attention" notice is unsolicited, so it alone is recognised by its fixed prefix through
-  `interceptExtUiNotify` ([`webUiContext`]), installed before `bindExtensions`: it becomes a partial status
-  update plus a full refresh instead of a toast — except for clients below `MCP_PROTOCOL_VERSION`, which
-  are not subscribed to `mcp.status` and still receive the notice as a toast (`notifyExtUi` with an
-  `ExtUiAudience`, delivered per socket and redacted before delivery), since the web client and host ship independently. pi's `/mcp` awaits every startup connection before it
-  answers, so registration and every successful gated reload first seed the snapshot from what pi was given
-  (`McpSessionHost.loaded()` plus the servers extensions registered): each enabled one reads `starting`, a
-  disabled one its disabled state through the same derivation, and the previous load's report never
-  survives a reload. Then a capture starts; one begun before that (re)start is dropped (a per-session load
-  epoch), so a stale report never replaces the seed. Refreshes also run at `agent_settled` and after a
-  chat's own MCP login/logout/reconnect settles, including failures; status reads never invalidate
-  themselves. The capture continues after a read caller's wait budget and publishes its eventual answer.
-  At most one
-  capture per session is in flight and a caller waits a bounded time. Each snapshot merges pi's report with
-  configuration (`deriveMcpServerStatuses`: disabled by this chat / the project, pending approval, invalid
-  config; the last report stands when pi did not answer), carries a per-session monotonic generation, and
-  is published to the `mcp.status` channel. pi does not redact its status text (connection errors, HTTP
-  error bodies, a stdio server's stderr tail), so every `detail` and `configError` passes the host's
-  `redactMcpText` ([[submodule-server-agent-mcp]]) before it leaves the host. Configuration problems are
-  reported, never dropped: every named entry keeps its summary (one that is not an object reads
-  `server "<name>" must be an object`), and `listMcpServers` adds the two files' file-level problems
-  (unparsable JSON, `mcpServers` not an object, a mistyped key; `summarizeMcpConfigErrors`, masked) as
-  `configErrors` — pi's own report of them is the startup notice the host intercepts. Only a session whose
-  `/mcp` belongs to `builtin:mcp` is queried; another owner makes `listMcpServers` report
-  `handledElsewhere` (`by` = that extension's path, or `pi settings` for a live chat without `/mcp`), and
-  the refresh after the reload that handed `/mcp` over retires that session's statuses and resource rows
-  once (an empty `mcp.status` snapshot, one `session.resourcesChanged`). pi settings that turn the built-in
-  off are known with no chat open: `listMcpServers` resolves them the way the exclusion loader does
-  (`DefaultPackageManager` with the built-in's name, its `builtin:mcp` resource's `enabled`; missing
-  packages are skipped, never installed) and reports `by: "pi settings (-builtin:mcp)"`. Whether an
-  enabled non-built-in extension registers `/mcp` is not knowable without loading it, so a replacement is
-  only seen through a live chat's owner.
-- **Calls.** The per-session host extension ([[submodule-server-agent-mcp]]) asks on the call's card
-  before any `mcp__*` call without `readOnlyHint` (Deny · Allow once · Allow in this chat · Always allow;
-  anything but an affirmative answer blocks, and a user message answers it like any dialog). "Allow in
-  this chat" is session memory; "Always allow" is a project grant written through the
-  **`setMcpToolGrantWriter`** seam (host → `grantProjectMcpTool`; a failed write is logged and the call
-  still runs) and read back through the policy resolver on every call. Its `tool_result` handler
-  adds the bounded, base64-free `McpResultSummary` under `details.thinkrail` (`summarizeMcpResult`), and
-  `readMcpToolOutput` serves a result's recorded full output (`mcp.readOutput`) from exactly its
-  `fullOutputPath` (pi's owner-only temp file; at most 1 MiB, `truncated` beyond) — `unavailable` for a
-  result that recorded none, `expired` once the file is gone. Settings' *Show log* reads `readMcpServerLog`
-  ([[submodule-server-agent-mcp]]): pi appends what servers log (`notifications/message`) to one `mcp.log`
-  per agent directory for every session, so a server's lines are picked by their entry head and masked.
-- **Sign-in** (`mcpSignIn.ts`; pi ≥ 1.1.0 for cancellable sign-in, #10565). `startMcpProbe({ action:
-  login | test | logout })` opens a short-lived, unregistered, in-memory pi session whose loader carries only
-  `builtin:mcp` with the one server (forced enabled) and whose UI context is the probe's own, dispatches
-  pi's `/mcp login|logout <name>` or headless `/mcp`, then emits `session_shutdown` (which also aborts a
-  running sign-in) and disposes it. Frames ride the `provider.login` family with `target: { kind: "mcp" }`
-  and `loginId` `mcplogin_*`, to the owning connection only (`setMcpLoginPublisher(push, ownerClientKey)`);
-  replies and cancels from any other connection fail with `LOGIN_NOT_OWNER`. Pi's public `openUrl`
-  callback supplies the `authUrl` frame directly, only for `https:` or loopback `http:` addresses; its redirect
-  prompt becomes the paste-back `prompt` frame, and the outcome is derived from pi's captured
-  notifications (signed in / failure text / cancelled), never from the command promise alone. pi's wait for
-  the browser or the paste-back has no overall timeout, so every probe has a deadline (`PROBE_DEADLINE_MS`,
-  10 minutes; `startMcpProbe`'s optional `deadlineMs` is the test seam, which the host never passes) after
-  which it ends exactly like a cancel — `error` frame "Sign-in timed out.",
-  `session_shutdown` (which closes pi's loopback listener), lock released once the session is closed — and
-  the host cancels the probes a client owned when it reaps that client (`cancelMcpProbesOwnedBy`), so a
-  reloaded page or a discarded tab never holds a server until restart. After a successful sign-in, the
-  workspace's live chats that report the server as *needs sign-in* get `/mcp reconnect <name>` instead of
-  waiting for their next turn. Test connection is HTTP-only (a stdio server is verified when a chat starts
-  it) and reports *connected · N tools* or the reason; every `error` frame's message (pi's reason or
-  notice) is redacted like a status detail. A live chat's own `/mcp login` keeps pi's rpc path:
-  the sign-in address arrives as a transcript notice (never auto-opened; `openUrl` is a no-op on the host)
-  next to pi's paste dialog. The probe's loader forces `builtin:mcp`, so the host starts no probe where
-  `listMcpServers` reports `handledElsewhere` (`MCP_HANDLED_ELSEWHERE`, [[submodule-server-host]]).
-- **One sign-in per server, whoever runs it.** pi keeps one client registration and pending PKCE state per
-  server in the shared `mcp-auth.json`, so two concurrent flows for a server break each other. A probe
-  holds the server's lock (`acquireMcpSignInLock`, [[submodule-server-agent-mcp]]) from its start until its
-  session is closed and refuses with "already running" ("… in a chat" when a chat holds it); a live chat's
-  `/mcp login|logout <name>` holds the same lock for the command's duration (the engine's wrapped `/mcp`)
-  and, while anything else holds it, says so in the chat instead of starting pi's flow. A bare
-  `/mcp login` / `/mcp logout` is not locked — the accepted gap: pi picks the server inside its handler
-  (the only OAuth server, the only one needing sign-in, or the answer to its own picker), so there is no
-  name to lock before its flow writes state; pi's status text and hint always name the server
-  (`run /mcp login <name>`).
+- **Lifecycle.** A ThinkRail reload disposes the omp `AgentSession` and creates a new one on the same
+  transcript; each load has its own `MCPManager` and per-load cleanup. Every teardown path
+  (`closeSessionResources`: delete/remove, workspace archive/removal, quit, a preparation that fails after
+  attach, and a gated reload) calls `mcpHost.shutdownEngine()` before `session.dispose()`: it marks the
+  load closed synchronously, aborts its sign-ins and in-flight handshakes, disconnects every server (stdio:
+  SIGTERM then SIGKILL) and joins the load's discovery, which disconnects again if a connect started after
+  closure; repeated calls share one promise. omp's `dispose()` neither emits a `reason` nor disconnects a
+  host-supplied manager, and runs `session_shutdown` handlers in parallel under a 2 s cap, so an unrelated
+  hanging handler cannot keep a server alive or delay a reload's MCP cleanup. Retained sessions keep their
+  servers; they appear as the third list of `SessionResources` (`mcpServers`: name, state, tool count,
+  transport). "Disable in this chat" applies at the next idle reload (a deferred one shows the server
+  `pending-reload` at once); `setSessionMcpServerEnabled` validates file provenance before both enable
+  and disable, even for no-op requests, and refuses (`MCP_CONFIG_INVALID`) a name the chat did not load
+  (or, after a failed reload, one the admitted configuration lacks). A failed reload never rolls back
+  the chat-local intent; repeating the same value retries while its MCP reload failure remains. Config
+  or trust changes reload only affected sessions: `McpSessionHost.loaded()` is the configuration each
+  load was given and `reconcileMcpSessions` compares it with what the loader would produce now
+  (`pendingMcpReload`). Reconciliation runs after every host mutation, when the user file changes
+  (`watchUserMcpConfig`: one directory watcher on omp's agent dir, 300 ms debounce, created when missing,
+  rearmed with capped backoff), when a workspace change nudge touches `.omp`, and at settlement. Every
+  MCP-affecting gated reload shares one failure recorder in `mcpSessions` (logged and notified once,
+  redacted; only a successful reload clears it and restarts status; closing entries never report).
+- **Status** (`mcpSessions.ts`). Exposed, not recomputed: connection truth is omp's typed manager state
+  (`McpSessionHost.registered()` → `McpSessionView.runtime`: connection status, tool count, connection
+  events with their errors). A read caller waits a bounded time for the load's startup
+  (`McpSessionView.startup()`), so a status read just after opening reports `connected` once omp has
+  connected and `starting` until then; registration and every successful reload seed the snapshot from
+  the new load. Each snapshot merges the runtime with configuration (`deriveMcpServerStatuses`), carries a
+  per-session monotonic generation and is published on `mcp.status`; every `detail` passes `redactMcpText`.
+  Mutating `/mcp` commands and every connection event invalidate the snapshot through `onCommandSettled`.
+  Clients below `MCP_PROTOCOL_VERSION` are not subscribed to `mcp.status`, so a server that newly reaches
+  `failed` or `needs-sign-in` also reaches them as one "MCP servers need attention" toast (`notifyExtUi`
+  with an `ExtUiAudience`, details already masked). `reconnectMcpServer` calls the host's typed reconnect;
+  its failure (masked) is the call's rejection. `dispatchSessionMcpCommand` runs the chat's `/mcp` with
+  an optional notify capture (`notifyingCommandContext`), so a capture takes only its own dispatch's
+  notices while the user's own `/mcp` prints in the chat. `listMcpServers` adds the files' file-level
+  problems (`summarizeMcpConfigErrors`) as `configErrors`.
+- **Calls.** The host wraps every MCP tool it delivers: before omp's `execute` it asks on the call's card
+  (Deny · Allow once · Allow in this chat · Always allow) unless the tool declares `readOnlyHint`, was
+  allowed in this chat or holds a valid project grant; anything but an affirmative answer is an error
+  result with the reason, and a user message the session accepts answers the dialog like any other
+  (`cancelExtUiForSession`). The question runs inside the tool, not in a `tool_call` handler, because
+  omp's 30 s handler budget only pauses for omp-owned dialogs. "Allow in this chat" is host memory that
+  survives reloads; "Always allow" is a project grant (`setMcpToolGrantWriter`, read back through the
+  policy resolver on every call). Results carry `details.thinkrail` (`summarizeMcpResult`, bounded,
+  base64-free), `details.server` / `details.tool`, and never omp's raw content; `readMcpToolOutput`
+  serves `details.fullOutputPath` (omp's spilled artifact: a file path, or `artifact://<id>` resolved
+  through the live session) up to 1 MiB, `unavailable` for a result that recorded none, `expired` once
+  it is gone. Settings' *Show log* reads `readMcpServerLog`; the host writes that log itself, since omp
+  keeps none. omp's `mcp://` resource reads are disabled in ThinkRail chats: omp resolves them through a
+  process-global manager, which the host clears so one chat never reads another's servers.
+- **Sign-in** (`mcpSignIn.ts`). `startMcpProbe({ action: login | test | logout })` needs no engine
+  session: login runs omp's `reauthorizeMcpServer` for the admitted server (forced enabled), with the
+  generation's `AuthStorage`, a per-probe `AbortSignal` and omp writing no config (`acpOwned`); test is a
+  throwaway `MCPManager` connect; logout removes the server's credential rows. Frames ride the
+  `provider.login` family with `target: { kind: "mcp" }` and `loginId` `mcplogin_*`, to the owning
+  connection only (`setMcpLoginPublisher(push, ownerClientKey)`); replies and cancels from any other
+  connection fail with `LOGIN_NOT_OWNER`. omp's `onAuth` supplies the `authUrl` frame (only `https:` or
+  loopback `http:`); its manual-code request becomes the paste-back `prompt` frame. Every probe has a
+  deadline (`PROBE_DEADLINE_MS`, 10 minutes; `deadlineMs` is the test seam) after which it ends like a
+  cancel — `error` frame "Sign-in timed out.", the flow aborted (closing omp's loopback listener), lock
+  released — and the host cancels the probes a client owned when it reaps that client. After a
+  successful sign-in, the workspace's live chats that report the server as *needs sign-in* reconnect.
+  Test connection is HTTP-only and reports *connected · N tools* or the masked reason. A live chat's own
+  `/mcp login <name>` shows the address as a notice (never auto-opened) and asks for the paste-back in a
+  dialog; dismissing it cancels the flow.
+- **One sign-in per server, whoever runs it.** A probe holds the server's lock (`acquireMcpSignInLock`,
+  keyed by its tool namespace) from its start until it ends and refuses with "already running" ("… in a
+  chat" when a chat holds it); a chat's `/mcp login|logout <name>` holds the same lock for the command's
+  duration and, while anything else holds it, says so in the chat instead of starting. omp's own single
+  flight is per owner; the host uses one owner per server so sign-ins for different servers never cancel
+  each other.
 
 ## Get right
 
@@ -1350,7 +1337,8 @@ the `/mcp` command stay pi's; ThinkRail owns what a multi-session GUI host owes 
 - Share one **current** `ModelRuntime` for pre-session reads and new sessions. Every session receives and
   retains its generation as `createAgentSession`'s `modelRuntime`; give each its own `SessionManager` and
   `dispose()` it on removal. Old runtimes remain reachable only through old live sessions and become
-  collectible with them; `AgentSession.reload()` is resource-only and never changes generations.
+  collectible with them; a resource reload rebuilds the engine session on the chat's retained
+  generation and never changes it.
 - **A `pi` `Model` must never cross the wire raw** — provider/extension configuration may carry secrets in
   `baseUrl`, headers, auth, or provider closures. Every model-bearing frame (`model.list`/`model.refresh`/`model.default`, the
   `session.create` result, `SessionSummary.model`) goes through `toWireModel` — the list paths share the
@@ -1371,13 +1359,16 @@ the `/mcp` command stay pi's; ThinkRail owns what a multi-session GUI host owes 
   disagree. `toWireModel(model, auth?)` takes the projection as a value: the catalog read computes it once
   per provider (`readAvailableWireModels`), the session result, summary and `setSessionModel` paths derive
   it from their own generation (`sessionWireModel`).
-- A live slash-command list is derived from the **same three sources Pi's rpc mode uses**
-  (`extensionRunner.getRegisteredCommands()` + `promptTemplates` + `resourceLoader.getSkills()`). The
-  pre-session catalog maps only `resourceLoader.getSkills()` through the same skill→command helper and
+- A live slash-command list is derived from three engine sources
+  (`extensionRunner.getRegisteredCommands()` + `session.promptTemplates` + `session.skills`). The
+  pre-session catalog maps only the admitted skills through the same skill→command helper and
   applies the **same project-trust gate**, so New Workspace preview and a real session cannot disagree
   except for the accepted base-branch/current-checkout timing difference.
 - Dialog promises honor abort/timeout and are settled (+ dismissed in the UI) on session disposal — a
   bridged `uiContext` call must never hang.
+- Process exit belongs to omp's postmortem (installed by importing `@oh-my-pi/pi-utils`): the host's
+  graceful shutdown, which calls `settleSessionsForShutdown`, and its crash report run as postmortem
+  cleanups (`host/boot.ts`, `host/crashLog.ts`; the host SPEC owns them, [[pi-compatibility]]).
 - **Prompt-template `/name` expansion** — typed-through references like `/name args` in a prompt ride
   the agent's default `expandPromptTemplates: true` (no agent code change). It expands from the
   session's **create-time template snapshot** — a template saved mid-session is **NOT** seen by an

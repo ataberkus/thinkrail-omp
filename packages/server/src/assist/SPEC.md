@@ -42,7 +42,7 @@ surface** — no wire method; consumers are host-side flows.
   `suggestPrDescription`, `toPrDescription`, `OneShotRunner`, `PlanSummaryStep`, `PrDescriptionInput`.
 - **Allowed deps:** `agent` (the `completeOnce`/`OneShotRequest`/`OneShotResult` primitive, via its
   barrel); Node.
-- **Forbidden:** `host`; **`@earendil-works/pi-ai` / `pi-coding-agent` directly** (model access + dispatch
+- **Forbidden:** `host`; **`@oh-my-pi/pi-ai` / `pi-coding-agent` directly** (model access + dispatch
   belong to `agent`); reaching into another feature's internals.
 
 ## Get right

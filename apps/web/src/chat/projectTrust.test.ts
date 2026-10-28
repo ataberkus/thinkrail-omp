@@ -63,7 +63,7 @@ describe("deriveProjectTrustNotice", () => {
 		});
 	});
 
-	test("a repository whose only gated content is .pi/mcp.json still asks for pi-level trust", () => {
+	test("a repository whose only gated content is .omp/mcp.json still asks for pi-level trust", () => {
 		const mcpOnly = summary({ mcpServers: 2 });
 		expect(deriveProjectTrustNotice({}, mcpOnly)).toEqual({
 			kind: "untrusted",

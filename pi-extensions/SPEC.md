@@ -2,15 +2,16 @@
 id: module-pi-extensions
 type: module-design
 status: draft
-title: Portable pi packages (pi-extensions/)
+title: Portable omp packages (pi-extensions/)
 parent: architecture
 tags: [pi-extension, publishing]
 ---
 
 ## Responsibility
 
-The workspace root for pi packages ThinkRail **publishes to npm** and that must work in **vanilla `pi`**
-with no ThinkRail present. Each package here is a capability (tools, skills) the agent can use anywhere;
+The workspace root for oh-my-pi (`omp`) packages ThinkRail **publishes to npm** and that must work in
+**vanilla `omp`** with no ThinkRail present. Directory and package names keep their historical `pi`
+prefix. Each package here is a capability (tools, skills) the agent can use anywhere;
 ThinkRail is one embedder among others. The ThinkRail-specific halves of a capability live in
 [[module-thinkrail-extensions]], never here.
 
@@ -28,48 +29,69 @@ host — two copies coexist on purpose and the wiring PR deletes the old one. A 
   third-party) and the scope attributes ownership in the
   `pi.dev/packages` gallery, which is an index of npm packages carrying the `pi-package` keyword — there
   is no registry to submit to.
-- **Two shapes.** An *installable pi extension* carries a `pi` manifest (`extensions: ["./index.ts"]`,
-  `skills` where present, `image`) and the `pi-package` keyword. A *portable library* (e.g. delegation)
+- **Two shapes.** An *installable omp extension* carries an `omp` manifest (`extensions: ["./index.ts"]`)
+  and the `pi-package`/`oh-my-pi` keywords. omp reads `pkg.omp || pkg.pi` (plugin loader, installer and
+  manager), so only the `omp` key is published; the manifest has no skills key, because omp discovers a
+  package's `skills/` directory by convention (`discovery/omp-plugins.ts`). A *portable library* (e.g. delegation)
   has named exports only — no manifest, no keyword, never a no-op factory — and is verified through its
   packed consumer.
-- **Raw TypeScript, no build step** (pi loads entrypoints through jiti). `files` is a package-specific
+- **Raw TypeScript, no build step** (omp is a Bun CLI and loads TypeScript entrypoints directly). `files` is a package-specific
   whitelist of everything the entrypoints and `exports` transitively import, tests excluded; `exports`
-  preserves every subpath an existing consumer uses (e.g. `./core`). Pi SDK packages are
-  `peerDependencies: "*"`; `@earendil-works/pi-tui` is a `"*"` peer where TUI rendering exists. The tested
-  pi version is the root catalog's and is never restated here (architecture Decision 10).
+  preserves every subpath an existing consumer uses (e.g. `./core`). omp SDK packages are
+  `peerDependencies: "*"`; `@oh-my-pi/pi-tui` is a `"*"` peer where TUI rendering exists. omp remaps a
+  plugin's `@oh-my-pi/*` imports onto its own instance. Tool schemas use omp's `z` builder from
+  `@oh-my-pi/pi-coding-agent`, not TypeBox. The tested omp version is the root catalog's and is never
+  restated here (architecture Decision 10).
 - The ThinkRail host consumes these packages through `workspace:*`; the published artifact is verified by
   the parity gate, not by the host.
 
 ## Vanilla-parity bar
 
-Required before a package's first publish, and the definition of "works in vanilla pi":
+Required before a package's first publish, and the definition of "works in vanilla omp":
 
-- Installs from its **packed tarball** with dependencies resolved by npm, loads through pi's own
-  resolver/loader with zero diagnostics, and registers its tools and skills. (A local-path `pi install`
-  installs nothing — it only records the path — so the gate never uses it.)
-- **Dual runtime.** Vanilla pi is an npm CLI under Node ≥ 22.19 with jiti; ThinkRail runs the same code
-  under Bun. Shipped code uses `node:` builtins and standard ESM only — no `Bun.*`, `bun:*`, or
-  Bun-specific `import.meta`.
+- Installs from its **packed tarball** through `omp plugin install` (omp runs `bun install` in its plugins
+  root), loads through omp's own plugin discovery with zero diagnostics, binds to the host omp rather than
+  a plugin-local copy, and registers its tools and skills.
+- **Runtime.** omp is Bun-only: its CLI runs under Bun, the standalone binary embeds it, and plugins are
+  imported in-process. There is no Node host to stay portable to, so the old Node run and the scan for
+  Bun-only APIs are gone; the gate runs the package in omp's own Bun process instead. What omp hides is a
+  stale engine import: its plugin loader silently remaps `@earendil-works/*`, `@mariozechner/*` and
+  `typebox` onto a legacy-pi compat layer, so such a package loads and passes every runtime case. Shipped
+  code therefore imports only `@oh-my-pi/*` public entries (never `extensibility/legacy-pi-*`), and the
+  gate rejects the legacy specifiers in the tarball.
+- **Tool registration.** omp presents an extension tool as `discoverable` (behind tool search / `xd://`)
+  unless it sets `loadMode: "essential"`; these tools set it so the model sees them directly, as in pi.
+  omp's tool definition has no `promptSnippet` or `promptGuidelines`: the description carries the
+  summary, and guidelines are appended to the system prompt from `before_agent_start` while the tool is
+  active.
 - TUI: `renderCall` and `renderResult` wherever the plain text fallback reads poorly; every UI call behind
   `ctx.hasUI`. A **manual check in a real terminal** (Ghostty/iTerm2, and inside tmux) is part of the bar.
 - No ThinkRail assumptions: no `~/.thinkrail` paths, no host wire, no `@thinkrail/*` imports other than
   sibling portable packages.
 - Gate: `bun run check:pi-packages` (`scripts/check-pi-packages.ts`, CI job `pi-packages`, provider-free).
-  Packs the package and every pending portable workspace dependency, greps the tarball for Bun-only APIs,
-  installs the tarballs plus pi at the catalog version into a temp agent dir **outside the repository**
-  with pi's own npm policy (`--legacy-peer-deps`), configures `packages: ["npm:@thinkrail/pi-<name>"]`,
-  then copies `scripts/pi-package-parity.node.mjs` **into the fixture** and runs it under Node so pi
-  resolves from the fixture (Node ignores `import.meta.resolve`'s parent URL — resolving from the script's
-  own location silently tested the repo's pi). The runner loads through `DefaultResourceLoader.reload()`,
-  asserts zero errors and the expected tools/skills, and executes a per-package case table (tool calls,
-  expected text/error, a `renderResult(...).render(width)` check, and an expected `terminate` flag). A
-  case may script the UI the tool sees: `ui.mode` (`tui` or `rpc`), `ui.replies` answering `select`
-  (a number picks that choice) and `input` in order with `null` dismissing, and `ui.keys` as raw terminal
-  input fed to the component a `ui.custom` factory returns; cases without `ui` get an empty context.
-  *Session-bound* tools (registered
-  in `session_start`, e.g. subagents, background-commands) will need a mode that binds an isolated
-  `AgentSession` on pi's faux provider — added with the first wave that ships one. Token-backed smokes
-  stay on-demand.
+  Packs every publishable package and rejects legacy engine imports in each tarball. Installs omp at the
+  catalog version with `bun add` into a fixture **outside the repository**. Serves the packed tarballs
+  from a loopback npm registry for the packages' scope, so pending sibling versions resolve and any other
+  `@thinkrail/*` dependency fails. Then, per package, with an isolated `HOME` (the user plugins root is
+  `~/.omp/plugins`), `PI_CODING_AGENT_DIR`, bun cache and a scope-only `.npmrc`, it runs the fixture's
+  `omp plugin install @thinkrail/pi-<name>`: the command the package README gives users. That install
+  already loads every declared `omp.extensions` entry and fails on a missing or factory-less one. The gate
+  copies `scripts/pi-package-parity.omp.mjs` **into the fixture** and runs it under Bun. It refuses to run
+  unless the runner sits in the fixture, `@oh-my-pi/pi-coding-agent` resolves into the fixture's
+  `node_modules`, and `PI_CODING_AGENT_DIR` was set at spawn (omp snapshots it on import). The runner
+  finds extensions as a session does: `discoverSessionExtensionPaths` with settings loaded from the
+  isolated agent dir, then `loadExtensions`. It asserts zero errors, a loaded extension inside the
+  installed plugin directory, no module loaded from the plugin root's own `@oh-my-pi/` copy (bun installs
+  the `*` peers there), and the expected tools with `loadMode: "essential"`. Skills are checked through
+  `discoverSkills`. Last, it executes a per-package case table: tool calls, expected text or error, a
+  `renderResult(...).render(width)` check against omp's real theme with terminal sequences stripped, and
+  an expected `terminate` flag. A case may script the UI the tool sees: `ui.mode` (`tui` or `rpc`),
+  `ui.replies` answering `select` (a number picks that choice) and `input` in order with `null` dismissing,
+  and `ui.keys` as raw terminal input fed to the component a `ui.custom` factory returns. Cases without
+  `ui` get `hasUI: false`. `--packages-dir <dir>` points the gate at another packages root, e.g. a
+  deliberately broken copy. *Session-bound* tools (registered in `session_start`, e.g. subagents,
+  background-commands) will need a mode that binds an isolated `AgentSession` on the faux provider, added
+  with the first wave that ships one. Token-backed smokes stay on-demand.
 
 ## Release
 
@@ -110,4 +132,4 @@ todos. Not published:
 | package | shape | notes |
 | --- | --- | --- |
 | `visualize` | extension | `visualize` tool; `lovely-mermaid` for TUI box-drawing and the best-effort vanilla validation; exports `createVisualizeExtension({ validateMermaid })` so an embedder can inject a strict validator — ThinkRail does, from [[module-ext-visualize]]. Detail: [[module-pi-visualize]]. |
-| `ask-user-question` | extension | `ask_user_question` tool: a terminal questionnaire in pi's interactive mode, one dialog per question in RPC hosts; exports `createAskUserQuestionExtension({ ask, guidance })` so an embedder can answer through its own UI, and a runtime-import-free `./core`. ThinkRail composes it from [[module-ext-ask-user-question]] with an asker over its answer mailbox. Detail: [[module-pi-ask-user-question]]. |
+| `ask-user-question` | extension | `ask_user_question` tool: a terminal questionnaire in omp's interactive mode, one dialog per question in RPC hosts; exports `createAskUserQuestionExtension({ ask, guidance })` so an embedder can answer through its own UI, and a runtime-import-free `./core`. ThinkRail composes it from [[module-ext-ask-user-question]] with an asker over its answer mailbox. Detail: [[module-pi-ask-user-question]]. |

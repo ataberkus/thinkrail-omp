@@ -28,7 +28,7 @@ describe("isProjectSkillPath", () => {
 			".github/skills/x.md",
 			".gemini/skills",
 			".agents/skills/z",
-			".pi/skills/y.md",
+			".omp/skills/y.md",
 			".claude\\skills\\windows\\SKILL.md",
 		]) {
 			expect(isProjectSkillPath(path)).toBe(true);
@@ -38,7 +38,8 @@ describe("isProjectSkillPath", () => {
 			".claude/settings.json",
 			".claudeskills/x",
 			"src/claude/skills/x",
-			"nested/.pi/skills/y.md",
+			"nested/.omp/skills/y.md",
+			".pi/skills/y.md",
 			"skills/x",
 		]) {
 			expect(isProjectSkillPath(path)).toBe(false);

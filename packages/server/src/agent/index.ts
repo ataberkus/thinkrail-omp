@@ -34,7 +34,6 @@ export {
 } from "./mcp";
 export {
 	listMcpServers,
-	mcpOwnershipGuard,
 	readMcpToolOutput,
 	reconcileMcpSessions,
 	reconnectMcpServer,
@@ -59,13 +58,22 @@ export {
 	setModelContextWindow,
 } from "./modelContext";
 export { preferredDefaultModel } from "./modelDefaults";
+export {
+	type AuthInteraction,
+	type AuthPrompt,
+	type AuthType,
+	ModelRuntime,
+	type NativeProvider,
+} from "./modelRuntime";
 export * from "./oneshot";
+export { migratePiAgentDataOnBoot } from "./piMigration";
 export {
 	activatePiRuntimeGeneration,
 	configurePiRuntime,
 	configurePiRuntimeFactory,
 	configurePiRuntimeGenerationInitializer,
 	configurePiRuntimeSessionExtensionExclusions,
+	getPiRuntime,
 	getPiRuntimeGeneration,
 	type PiRuntimeGeneration,
 	type PiRuntimeGenerationInitializer,
@@ -74,7 +82,7 @@ export {
 	preparePiRuntimeGeneration,
 	settledAvailableModels,
 } from "./piRuntime";
-export { piTrustsProjectPath, projectTrustSummary } from "./projectTrust";
+export { projectTrustSummary } from "./projectTrust";
 export { describeProviderAuth, type ProviderAuthFacts } from "./providerAuth";
 export {
 	REQUEST_REVIEW_TOOL_NAME,

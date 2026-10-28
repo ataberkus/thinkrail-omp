@@ -2,24 +2,29 @@ import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
-import {
-	createFauxCore,
-	fauxAssistantMessage,
-	fauxToolCall,
-} from "@earendil-works/pi-ai/providers/faux";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type AgentSession,
 	createAgentSession,
-	DefaultResourceLoader,
+	type ExtensionAPI,
 	type ExtensionFactory,
-	getAgentDir,
-	ModelRuntime,
-	type ProviderConfig,
+	type ModelRegistry,
+	type ProviderConfigInput,
 	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+	Settings,
+	type TurnEndEvent,
+	z,
+} from "@oh-my-pi/pi-coding-agent";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { createDelegationService, type DelegationService } from "pi-delegation";
+import {
+	createFauxCore,
+	createFauxModelRegistry,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type IsolatedAgentDir,
+	isolateAgentDir,
+} from "pi-faux";
 import defaultSubagents, {
 	createSubagents,
 	createSubagentsExtension,
@@ -57,9 +62,10 @@ function tmpDir(prefix: string): string {
 	return dir;
 }
 
-let priorAgentDir: string | undefined;
+let isolatedAgentDir: IsolatedAgentDir | undefined;
 let priorOffline: string | undefined;
-let runtime: ModelRuntime;
+let runtime: ModelRegistry;
+let agentDir: string;
 let parent: AgentSession;
 let parentCwd: string;
 let service: DelegationService;
@@ -69,7 +75,7 @@ const liveParents = new Map<string, AgentSession>();
 const BG_RUNNER_DEFINITION =
 	"---\nname: bg-runner\ndescription: Background test runner\nmodel: fauxb\n---\n\nRun the delegated task.\n";
 
-function fauxConfig(core: typeof fauxA, id: string, reasoning = false): ProviderConfig {
+function fauxConfig(core: typeof fauxA, id: string, reasoning = false): ProviderConfigInput {
 	return {
 		api: core.api,
 		baseUrl: "http://faux.local",
@@ -81,7 +87,21 @@ function fauxConfig(core: typeof fauxA, id: string, reasoning = false): Provider
 				name: id,
 				api: core.api,
 				reasoning,
-				...(reasoning ? { thinkingLevelMap: { xhigh: "xhigh", max: "max" } } : {}),
+				...(reasoning
+					? {
+							thinking: {
+								mode: "effort" as const,
+								efforts: [
+									ThinkingLevel.Minimal,
+									ThinkingLevel.Low,
+									ThinkingLevel.Medium,
+									ThinkingLevel.High,
+									ThinkingLevel.XHigh,
+									ThinkingLevel.Max,
+								],
+							},
+						}
+					: {}),
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: 100_000,
@@ -95,10 +115,64 @@ function registerFaux(core: typeof fauxA, id: string): void {
 	runtime.registerProvider(id, fauxConfig(core, id));
 }
 
+function withSendMessage(pi: ExtensionAPI, sendMessage: ExtensionAPI["sendMessage"]): ExtensionAPI {
+	return new Proxy(pi, {
+		get: (target, property) =>
+			property === "sendMessage" ? sendMessage : Reflect.get(target, property, target),
+	});
+}
+
+function fauxModel() {
+	const model = runtime.find("fauxa", "fauxa");
+	if (!model) throw new Error("fauxa not registered");
+	return model;
+}
+
+async function bindSession(
+	factory: ExtensionFactory,
+	sessionManager: SessionManager = SessionManager.inMemory(parentCwd),
+): Promise<AgentSession> {
+	const { session } = await createAgentSession({
+		cwd: parentCwd,
+		agentDir,
+		settings: Settings.isolated({}),
+		modelRegistry: runtime,
+		model: fauxModel(),
+		sessionManager,
+		extensions: [factory],
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		hasUI: false,
+		bindProcessState: false,
+	});
+	liveParents.set(session.sessionId, session);
+	try {
+		await initializeExtensions(session, {
+			reportSendError: () => {},
+			reportRuntimeError: (error) => {
+				throw new Error(error.error);
+			},
+		});
+		return session;
+	} catch (error) {
+		liveParents.delete(session.sessionId);
+		await session.dispose();
+		throw error;
+	}
+}
+
+function toolInfo(session: AgentSession, name: string) {
+	return session.getAllToolInfos().find((tool) => tool.name === name);
+}
+
 beforeAll(async () => {
-	priorAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const agentDir = tmpDir("pi-subagents-agentdir-");
-	process.env.PI_CODING_AGENT_DIR = agentDir;
+	agentDir = tmpDir("pi-subagents-agentdir-");
+	isolatedAgentDir = isolateAgentDir(agentDir);
 	priorOffline = process.env.PI_OFFLINE;
 	process.env.PI_OFFLINE = "1";
 
@@ -114,18 +188,12 @@ beforeAll(async () => {
 		"---\nname: extension-provider\ndescription: Extension-provider test agent\nmodel: extension-faux\n---\n\nRun through the extension-registered provider.\n",
 	);
 
-	runtime = await ModelRuntime.create({
-		credentials: new InMemoryCredentialStore(),
-		modelsPath: null,
-		allowModelNetwork: false,
-	});
+	runtime = (await createFauxModelRegistry(Settings.isolated({}))).modelRegistry;
 	registerFaux(fauxA, "fauxa");
 	registerFaux(fauxB, "fauxb");
 	runtime.registerProvider("fauxreasoner", fauxConfig(fauxReasoner, "fauxreasoner", true));
 
 	parentCwd = tmpDir("pi-subagents-parent-");
-	const model = runtime.getModel("fauxa", "fauxa") as Model<string> | undefined;
-	if (!model) throw new Error("fauxa not registered");
 
 	service = createDelegationService({
 		resolveParent: (id) => {
@@ -136,51 +204,28 @@ beforeAll(async () => {
 		},
 		delegationRoot: tmpDir("pi-subagents-delegation-"),
 		scope: "ws-sub",
-		modelRuntime: runtime,
+		modelRegistry: runtime,
 	});
 
-	const settingsManager = SettingsManager.inMemory({});
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: parentCwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		extensionFactories: [createSubagentsExtension({ service })],
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await resourceLoader.reload();
-
-	const created = await createAgentSession({
-		cwd: parentCwd,
-		modelRuntime: runtime,
-		sessionManager: SessionManager.inMemory(parentCwd),
-		settingsManager,
-		resourceLoader,
-		model,
-	});
-	parent = created.session;
-	liveParents.set(parent.sessionId, parent);
-	await parent.bindExtensions({ mode: "print" });
+	parent = await bindSession(createSubagentsExtension({ service }));
 });
 
 beforeEach(async () => {
 	if (parent) await service.disposeChildrenOf(parent.sessionId);
 });
 
-afterAll(() => {
-	parent?.dispose();
-	if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-	else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+afterAll(async () => {
+	await parent?.dispose();
+	isolatedAgentDir?.restore();
 	if (priorOffline === undefined) delete process.env.PI_OFFLINE;
 	else process.env.PI_OFFLINE = priorOffline;
 	for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
 });
 
-function storedChildContext(session: AgentSession = parent) {
+async function storedChildContext(session: AgentSession = parent) {
 	const child = service.childrenOf(session.sessionId)[0];
 	if (!child) throw new Error("Expected a delegated child");
-	return SessionManager.open(child.record.sessionFile).buildSessionContext();
+	return (await SessionManager.open(child.record.sessionFile)).buildSessionContext();
 }
 
 function transcript(): string {
@@ -202,47 +247,14 @@ async function makeSession(
 	factory?: ExtensionFactory,
 	sessionManager?: SessionManager,
 ): Promise<AgentSession> {
-	const settingsManager = SettingsManager.inMemory({});
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: parentCwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		extensionFactories: [
-			factory ??
-				createSubagentsExtension({
-					service: boundService,
-					...(isEnabled ? { isEnabled } : {}),
-				}),
-		],
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-	});
-	await resourceLoader.reload();
-	const model = runtime.getModel("fauxa", "fauxa") as Model<string> | undefined;
-	if (!model) throw new Error("fauxa not registered");
-	const created = await createAgentSession({
-		cwd: parentCwd,
-		modelRuntime: runtime,
-		sessionManager: sessionManager ?? SessionManager.inMemory(parentCwd),
-		settingsManager,
-		resourceLoader,
-		model,
-	});
-	liveParents.set(created.session.sessionId, created.session);
-	try {
-		await created.session.bindExtensions({
-			mode: "print",
-			onError: (error) => {
-				throw new Error(error.error);
-			},
-		});
-		return created.session;
-	} catch (error) {
-		liveParents.delete(created.session.sessionId);
-		created.session.dispose();
-		throw error;
-	}
+	return bindSession(
+		factory ??
+			createSubagentsExtension({
+				service: boundService,
+				...(isEnabled ? { isEnabled } : {}),
+			}),
+		sessionManager,
+	);
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
@@ -256,14 +268,14 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
 test("an embedder can keep subagent tools registered but inactive at session start", async () => {
 	const session = await makeSession(() => false);
 	try {
-		const configured = session.getAllTools().map((tool) => tool.name);
+		const configured = session.getAllToolNames();
 		expect(configured).toContain("Agent");
 		expect(configured).toContain("get_subagent_result");
 		expect(session.getActiveToolNames()).not.toContain("Agent");
 		expect(session.getActiveToolNames()).not.toContain("get_subagent_result");
 	} finally {
 		liveParents.delete(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -286,7 +298,7 @@ test("the live enabled predicate rejects a launch selected before embedder polic
 	} finally {
 		await service.disposeChildrenOf(session.sessionId);
 		liveParents.delete(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -332,7 +344,7 @@ test("a disable during asynchronous child creation disposes it before provider w
 		releaseChild();
 		await service.disposeChildrenOf(session.sessionId);
 		liveParents.delete(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -363,11 +375,16 @@ test("foreground: one Agent call runs a builtin scout and returns its report to 
 });
 
 test("Agent advertises thinking suffix syntax without adding a separate thinking argument", () => {
-	const tool = parent.getToolDefinition("Agent");
+	const tool = toolInfo(parent, "Agent");
+	const parameters = tool?.parameters;
+	const schema =
+		parameters && "toJsonSchema" in parameters && typeof parameters.toJsonSchema === "function"
+			? parameters.toJsonSchema()
+			: parameters;
 	expect(tool?.description).toContain(":<thinking>");
 	expect(tool?.description).toContain("definition thinking overrides");
-	expect(JSON.stringify(tool?.parameters)).toContain("provider/id:thinking");
-	expect(tool?.parameters).not.toHaveProperty("properties.thinking");
+	expect(JSON.stringify(schema)).toContain("provider/id:thinking");
+	expect(schema).not.toHaveProperty("properties.thinking");
 });
 
 test("a per-call model runs an unpinned agent on a different model than the parent", async () => {
@@ -420,8 +437,8 @@ test.each([
 	await waitFor(() => transcript().includes(`DONE_${marker}`));
 	await parent.waitForIdle();
 
-	const context = storedChildContext();
-	expect(context.model).toEqual({ provider, modelId: provider });
+	const context = await storedChildContext();
+	expect(context.models.default).toBe(`${provider}/${provider}`);
 	expect(context.thinkingLevel).toBe(expectedThinking);
 	expect(transcript()).toContain(`CHILD_${marker}`);
 	expect(parent.model).toEqual(originalModel);
@@ -434,10 +451,10 @@ test.each([
 ])("an unsuffixed child inherits live parent thinking (model selected %s)", async (selectModel) => {
 	const session = await makeSession();
 	try {
-		const model = runtime.getModel("fauxreasoner", "fauxreasoner");
+		const model = runtime.find("fauxreasoner", "fauxreasoner");
 		if (!model) throw new Error("Reasoning model not registered");
 		await session.setModel(model);
-		session.setThinkingLevel("high");
+		session.setThinkingLevel(ThinkingLevel.High);
 		fauxReasoner.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall("Agent", {
@@ -450,12 +467,12 @@ test.each([
 			fauxAssistantMessage("PARENT_DONE"),
 		]);
 		await session.prompt("Delegate without a suffix.");
-		expect(storedChildContext(session).thinkingLevel).toBe("high");
-		expect(session.thinkingLevel).toBe("high");
+		expect((await storedChildContext(session)).thinkingLevel).toBe("high");
+		expect<string | undefined>(session.thinkingLevel).toBe("high");
 	} finally {
 		await service.disposeChildrenOf(session.sessionId);
 		liveParents.delete(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -502,7 +519,7 @@ test("a definition-pinned model silently wins over the per-call model", async ()
 
 	expect(transcript()).toContain("PINNED_MODEL_CHILD_OK");
 	expect(transcript()).toContain("PARENT_USED_PINNED_MODEL");
-	expect(storedChildContext().thinkingLevel).toBe("off");
+	expect((await storedChildContext()).thinkingLevel).toBe("off");
 	const child = service.childrenOf(parent.sessionId)[0];
 	expect(child?.snapshot?.details.model).toBe("fauxb/fauxb");
 	await service.disposeChildrenOf(parent.sessionId);
@@ -530,12 +547,12 @@ test("a live definition edit refreshes advertised and effective model/thinking p
 
 		expect(transcript()).toContain("REFRESHED_PIN_CHILD_OK");
 		expect(transcript()).toContain("PARENT_USED_REFRESHED_PIN");
-		expect(parent.getToolDefinition("Agent")?.description).toContain(
+		expect(toolInfo(parent, "Agent")?.description).toContain(
 			"model: pinned fauxreasoner:xhigh; thinking: low (overrides suffix)",
 		);
 		const child = service.childrenOf(parent.sessionId)[0];
 		expect(child?.snapshot?.details.model).toBe("fauxreasoner/fauxreasoner");
-		expect(storedChildContext().thinkingLevel).toBe("low");
+		expect((await storedChildContext()).thinkingLevel).toBe("low");
 	} finally {
 		writeFileSync(bgRunnerPath, BG_RUNNER_DEFINITION);
 		await service.disposeChildrenOf(parent.sessionId);
@@ -550,7 +567,7 @@ test("a definition edit during a model turn cannot split advertised and executed
 		);
 		fauxA.setResponses([
 			() => {
-				expect(parent.getToolDefinition("Agent")?.description).toContain(
+				expect(toolInfo(parent, "Agent")?.description).toContain(
 					"model: pinned fauxreasoner:xhigh; thinking: low (overrides suffix)",
 				);
 				writeFileSync(
@@ -569,10 +586,10 @@ test("a definition edit during a model turn cannot split advertised and executed
 		]);
 		fauxReasoner.setResponses([fauxAssistantMessage("SNAPSHOT_CHILD")]);
 		await parent.prompt("Delegate while the definition changes.");
-		const context = storedChildContext();
-		expect(context.model).toEqual({ provider: "fauxreasoner", modelId: "fauxreasoner" });
+		const context = await storedChildContext();
+		expect(context.models.default).toBe("fauxreasoner/fauxreasoner");
 		expect(context.thinkingLevel).toBe("low");
-		expect(parent.getToolDefinition("Agent")?.description).toContain(
+		expect(toolInfo(parent, "Agent")?.description).toContain(
 			"model: pinned fauxb; thinking: off (overrides suffix)",
 		);
 	} finally {
@@ -581,46 +598,23 @@ test("a definition edit during a model turn cannot split advertised and executed
 	}
 });
 
-test("zero-config fallback mirrors a provider registered by another extension", async () => {
+test("zero-config fallback delegates through a provider registered by another extension", async () => {
 	const extensionFaux = fauxCore("extension-faux");
-	const settingsManager = SettingsManager.inMemory({});
 	const standaloneDelegationRoot = tmpDir("pi-subagents-standalone-delegation-");
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: parentCwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		extensionFactories: [
-			(pi) => pi.registerProvider("extension-faux", fauxConfig(extensionFaux, "extension-faux")),
-			createSubagentsExtension({
-				delegationRoot: standaloneDelegationRoot,
-				scope: "standalone",
-			}),
-		],
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
+	const standalone = await bindSession((pi) => {
+		pi.registerProvider("extension-faux", fauxConfig(extensionFaux, "extension-faux"));
+		return createSubagentsExtension({
+			delegationRoot: standaloneDelegationRoot,
+			scope: "standalone",
+		})(pi);
 	});
-	await resourceLoader.reload();
-	const model = runtime.getModel("fauxa", "fauxa") as Model<string> | undefined;
-	if (!model) throw new Error("fauxa not registered");
-	const standalone = (
-		await createAgentSession({
-			cwd: parentCwd,
-			modelRuntime: runtime,
-			sessionManager: SessionManager.inMemory(parentCwd),
-			settingsManager,
-			resourceLoader,
-			model,
-		})
-	).session;
 
 	try {
-		await standalone.bindExtensions({ mode: "print" });
 		fauxA.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall("Agent", {
 					subagent_type: "extension-provider",
-					task: "Use the mirrored provider.",
+					task: "Use the shared provider.",
 				}),
 			),
 			fauxAssistantMessage("PARENT_USED_EXTENSION_PROVIDER"),
@@ -631,9 +625,10 @@ test("zero-config fallback mirrors a provider registered by another extension", 
 
 		expect(JSON.stringify(standalone.messages)).toContain("EXTENSION_PROVIDER_CHILD_OK");
 		expect(JSON.stringify(standalone.messages)).toContain("PARENT_USED_EXTENSION_PROVIDER");
+		expect(runtime.find("extension-faux", "extension-faux")).toBeDefined();
 	} finally {
-		await standalone.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		standalone.dispose();
+		liveParents.delete(standalone.sessionId);
+		await standalone.dispose();
 		runtime.unregisterProvider("extension-faux");
 	}
 });
@@ -780,7 +775,7 @@ test.each([
 		unsubscribe();
 		await service.disposeChildrenOf(session.sessionId);
 		liveParents.delete(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -937,7 +932,7 @@ test("get_subagent_result rejects another parent's child — lineage is enforced
 		expect(lastToolResultText(other)).toContain(`Unknown subagent session ${child.sessionId}`);
 		expect(child.snapshot?.collected).toBe(false);
 	} finally {
-		other.dispose();
+		await other.dispose();
 		await service.disposeChildrenOf(parent.sessionId);
 	}
 });
@@ -1028,64 +1023,57 @@ test("retained completion waits behind a closed gate, then repeated flush accept
 		finish.resolve();
 		owner.dispose();
 		await service.disposeChildrenOf(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
 test.each([
 	"gap",
 	"rebound",
-])("real Pi reload retains completion settling %s and ignores stale unbind", async (timing) => {
+])("a rebuilt parent session retains completion settling in the %s and ignores stale unbind", async (timing) => {
 	const owner = createSubagents({ service });
-	const inGap = deferred();
-	const resume = deferred();
 	let bindings = 0;
 	const sends: number[] = [];
-	const session = await makeSession(undefined, service, (pi) => {
+	const factory: ExtensionFactory = (pi) => {
 		const binding = ++bindings;
-		owner.extension({
-			...pi,
-			sendMessage: (message, options) => {
+		owner.extension(
+			withSendMessage(pi, (message, options) => {
 				sends.push(binding);
 				pi.sendMessage(message, options);
-			},
-		});
-		pi.on("session_shutdown", async (event) => {
-			if (event.reason !== "reload") return;
-			inGap.resolve();
-			await resume.promise;
-		});
-	});
-	const oldRunner = session.extensionRunner;
-	const finish = await launchDetached(session);
-	const reloading = session.reload();
+			}),
+		);
+	};
+	const first = await makeSession(undefined, service, factory);
+	const oldRunner = first.extensionRunner;
+	const finish = await launchDetached(first);
+	await first.waitForIdle();
+	liveParents.delete(first.sessionId);
+	await first.dispose();
+	let rebound: AgentSession | undefined;
 	try {
-		await inGap.promise;
 		if (timing === "gap") {
 			finish.resolve();
-			await waitFor(
-				() => service.childrenOf(session.sessionId)[0]?.snapshot?.status === "completed",
-			);
+			await waitFor(() => service.childrenOf(first.sessionId)[0]?.snapshot?.status === "completed");
 			owner.flushCompletions();
-			expect(completions(session)).toHaveLength(0);
 			expect(sends).toEqual([]);
 		}
-		resume.resolve();
-		await reloading;
-		await oldRunner.emit({ type: "session_shutdown", reason: "reload" });
+		rebound = await makeSession(undefined, service, factory, first.sessionManager);
+		await oldRunner?.emit({ type: "session_shutdown" });
 		finish.resolve();
+		const session = rebound;
 		await waitFor(() => !session.isStreaming && completions(session).length === 1);
 		owner.flushCompletions();
 		expect(sends).toEqual([2]);
 		expect(service.childrenOf(session.sessionId)).toHaveLength(1);
-		expect(session.getAllTools().filter((tool) => tool.name === "Agent")).toHaveLength(1);
+		expect(session.getAllToolNames().filter((name) => name === "Agent")).toHaveLength(1);
 	} finally {
-		resume.resolve();
 		finish.resolve();
-		await reloading;
 		owner.dispose();
-		await service.disposeChildrenOf(session.sessionId);
-		session.dispose();
+		await service.disposeChildrenOf(first.sessionId);
+		if (rebound) {
+			liveParents.delete(rebound.sessionId);
+			await rebound.dispose();
+		}
 	}
 });
 
@@ -1094,15 +1082,22 @@ test.each([
 	"quit",
 ])("permanent %s clears pending and future outcomes and cannot rebind open", async (close) => {
 	let allowed = false;
-	const owner = createSubagents({ service, canDeliverCompletion: () => allowed });
-	const session = await makeSession(undefined, service, owner.extension);
+	const owner =
+		close === "dispose"
+			? createSubagents({ service, canDeliverCompletion: () => allowed })
+			: undefined;
+	const session = await makeSession(
+		undefined,
+		service,
+		owner?.extension ?? createSubagentsExtension({ service, canDeliverCompletion: () => allowed }),
+	);
 	const first = await launchDetached(session);
 	first.resolve();
 	await waitFor(() => service.childrenOf(session.sessionId)[0]?.snapshot?.status === "completed");
 	const second = await launchDetached(session);
 	try {
-		if (close === "dispose") owner.dispose();
-		else await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		if (owner) owner.dispose();
+		else await session.extensionRunner?.emit({ type: "session_shutdown" });
 		allowed = true;
 		await session.reload();
 		second.resolve();
@@ -1111,14 +1106,15 @@ test.each([
 				.childrenOf(session.sessionId)
 				.every((child) => child.snapshot?.status === "completed"),
 		);
-		owner.flushCompletions();
+		owner?.flushCompletions();
+		await macrotask();
 		expect(completions(session)).toHaveLength(0);
 		expect(session.isStreaming).toBe(false);
 	} finally {
 		second.resolve();
-		owner.dispose();
+		owner?.dispose();
 		await service.disposeChildrenOf(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -1130,9 +1126,8 @@ test.each([
 	let attempts = 0;
 	const owner = createSubagents({ service, canDeliverCompletion: () => allowed });
 	const session = await makeSession(undefined, service, (pi) =>
-		owner.extension({
-			...pi,
-			sendMessage(message, options) {
+		owner.extension(
+			withSendMessage(pi, (message, options) => {
 				attempts++;
 				owner.flushCompletions();
 				if (attempts === 1) {
@@ -1141,8 +1136,8 @@ test.each([
 				}
 				pi.sendMessage(message, options);
 				owner.flushCompletions();
-			},
-		}),
+			}),
+		),
 	);
 	const finish = await launchDetached(session);
 	try {
@@ -1154,14 +1149,16 @@ test.each([
 		expect(completions(session)).toHaveLength(0);
 		owner.flushCompletions();
 		owner.flushCompletions();
-		await waitFor(() => !session.isStreaming);
+		await waitFor(
+			() => !session.isStreaming && (disposeOnFailure || completions(session).length === 1),
+		);
 		expect(attempts).toBe(disposeOnFailure ? 1 : 2);
 		expect(completions(session)).toHaveLength(disposeOnFailure ? 0 : 1);
 	} finally {
 		finish.resolve();
 		owner.dispose();
 		await service.disposeChildrenOf(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -1176,7 +1173,7 @@ test.each([
 	const firstFinish = await launchDetached(first);
 	try {
 		const child = service.childrenOf(first.sessionId)[0];
-		const closing = first.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		const closing = first.extensionRunner?.emit({ type: "session_shutdown" });
 		let aborting: Promise<void> | undefined;
 		if (kind === "legacy") {
 			await closing;
@@ -1198,11 +1195,11 @@ test.each([
 		expect(JSON.stringify(completions(second))).toContain("RETAINED_RESULT");
 	} finally {
 		firstFinish.resolve();
-		await second.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		await second.extensionRunner?.emit({ type: "session_shutdown" });
 		await service.disposeChildrenOf(first.sessionId);
 		await service.disposeChildrenOf(second.sessionId);
-		first.dispose();
-		second.dispose();
+		await first.dispose();
+		await second.dispose();
 	}
 });
 
@@ -1219,7 +1216,7 @@ test("a retained owner rejects another parent without replacing the original sen
 	} finally {
 		owner.dispose();
 		await service.disposeChildrenOf(session.sessionId);
-		session.dispose();
+		await session.dispose();
 	}
 });
 
@@ -1229,7 +1226,7 @@ test("a previous live runner's reload shutdown cannot unbind a newer sender for 
 	const finish = await launchDetached(first);
 	const rebound = await makeSession(undefined, service, owner.extension, first.sessionManager);
 	try {
-		await first.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
+		await first.extensionRunner?.emit({ type: "session_shutdown" });
 		finish.resolve();
 		await waitFor(() => !rebound.isStreaming && completions(rebound).length === 1);
 		expect(completions(first)).toHaveLength(0);
@@ -1239,8 +1236,8 @@ test("a previous live runner's reload shutdown cannot unbind a newer sender for 
 		finish.resolve();
 		owner.dispose();
 		await service.disposeChildrenOf(first.sessionId);
-		first.dispose();
-		rebound.dispose();
+		await first.dispose();
+		await rebound.dispose();
 	}
 });
 
@@ -1277,7 +1274,7 @@ function deliveries(session: AgentSession) {
 function countSettles(session: AgentSession) {
 	const counter = { settles: 0 };
 	session.subscribe((event) => {
-		if (event.type === "agent_settled") counter.settles++;
+		if (event.type === "agent_end" && event.yielded !== false) counter.settles++;
 	});
 	return counter;
 }
@@ -1295,7 +1292,7 @@ function background(task: string) {
 async function closeSession(session: AgentSession) {
 	await service.disposeChildrenOf(session.sessionId);
 	liveParents.delete(session.sessionId);
-	session.dispose();
+	await session.dispose();
 }
 
 test("a detached result the parent already pulled mid-run is never delivered again", async () => {
@@ -1385,6 +1382,70 @@ test("a result finishing during a tool turn reaches the very next request of the
 		expect(counter.settles).toBe(1);
 		expect(deliveries(session)).toEqual(["run"]);
 	} finally {
+		await closeSession(session);
+	}
+});
+
+test("a result deliverable only once a tool returns joins the request right after its batch", async () => {
+	let open = false;
+	const owner = createSubagents({ service, canDeliverCompletion: () => open });
+	const stepStarted = Promise.withResolvers<void>();
+	const launchTurnHandled = Promise.withResolvers<void>();
+	const launchTurn = (event: TurnEndEvent) =>
+		event.toolResults.some((result) => result.toolName === "Agent");
+	const session = await makeSession(undefined, service, (pi) => {
+		pi.on("turn_end", async (event) => {
+			if (launchTurn(event)) await stepStarted.promise;
+			else await Bun.sleep(50);
+		});
+		const bound = owner.extension(pi);
+		pi.on("turn_end", (event) => {
+			if (launchTurn(event)) launchTurnHandled.resolve();
+		});
+		pi.registerTool({
+			name: "gated_step",
+			label: "Gated step",
+			description: "Opens the delivery gate before returning",
+			parameters: z.object({}),
+			loadMode: "essential",
+			async execute() {
+				stepStarted.resolve();
+				await launchTurnHandled.promise;
+				open = true;
+				return { content: [{ type: "text", text: "GATED_RESULT" }], details: {} };
+			},
+		});
+		return bound;
+	});
+	const counter = countSettles(session);
+	let sawReport = false;
+	try {
+		fauxB.setResponses([fauxAssistantMessage("BG_RESULT")]);
+		fauxA.setResponses([
+			background("Job."),
+			async () => {
+				await childHeld(session);
+				return fauxAssistantMessage(fauxToolCall("gated_step", {}));
+			},
+			(context) => {
+				sawReport = requestText(context).includes("BG_RESULT");
+				return fauxAssistantMessage("DONE");
+			},
+			fauxAssistantMessage("LATE_RESULT"),
+		]);
+		const before = fauxA.state.callCount;
+		await session.prompt("Delegate, then take the gated step.");
+		await macrotask();
+		expect(sawReport).toBe(true);
+		expect(fauxA.state.callCount - before).toBe(3);
+		expect(counter.settles).toBe(1);
+		expect(deliveries(session)).toEqual(["run"]);
+		const tail = session.messages.slice(-3);
+		expect(tail.map((m) => m.role)).toEqual(["toolResult", "custom", "assistant"]);
+		expect(JSON.stringify(tail[0])).toContain("GATED_RESULT");
+		expect(JSON.stringify(session.messages)).not.toContain("LATE_RESULT");
+	} finally {
+		owner.dispose();
 		await closeSession(session);
 	}
 });
@@ -1635,16 +1696,15 @@ test("a rejected waking send keeps the wake for the retry instead of losing it",
 	let rejectWake = true;
 	const owner = createSubagents({ service, canDeliverCompletion: () => allowed });
 	const session = await makeSession(undefined, service, (pi) =>
-		owner.extension({
-			...pi,
-			sendMessage(message, options) {
+		owner.extension(
+			withSendMessage(pi, (message, options) => {
 				if (options?.triggerTurn && rejectWake) {
 					rejectWake = false;
 					throw new Error("runtime unavailable");
 				}
 				pi.sendMessage(message, options);
-			},
-		}),
+			}),
+		),
 	);
 	const counter = countSettles(session);
 	const stoppedStarted = deferred();
@@ -1696,7 +1756,7 @@ test("a rejected waking send keeps the wake for the retry instead of losing it",
 		await macrotask();
 		allowed = true;
 		owner.flushCompletions();
-		expect(completions(session)).toHaveLength(1);
+		await waitFor(() => completions(session).length === 1);
 		expect(counter.settles).toBe(1);
 		owner.flushCompletions();
 		await waitFor(() => !session.isStreaming && counter.settles === 2);

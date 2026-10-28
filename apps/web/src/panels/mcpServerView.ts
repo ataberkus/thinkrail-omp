@@ -29,14 +29,6 @@ export interface McpRowView {
 	secondary?: McpRowAction;
 }
 
-const DISABLED_IN_PI_SETTINGS = "pi settings (-builtin:mcp)";
-
-export function mcpHandledElsewhereText(t: Translator, by: string): string {
-	return by === DISABLED_IN_PI_SETTINGS
-		? t("mcp.handledElsewhere.piSettings")
-		: t("mcp.handledElsewhere.by", { by });
-}
-
 export interface McpChatFailure {
 	chat: string;
 	error: string;
@@ -81,11 +73,7 @@ export function formatStartingElapsed(t: Translator, ms: number): string {
 export function mcpRowView(t: Translator, row: McpServerRow, now: number): McpRowView {
 	const { summary } = row;
 	const view = baseView(t, row, now);
-	if (
-		row.approvalPending &&
-		row.state !== "pending-approval" &&
-		row.state !== "handled-elsewhere"
-	) {
+	if (row.approvalPending && row.state !== "pending-approval") {
 		return {
 			...view,
 			reason:
@@ -108,8 +96,6 @@ function baseView(t: Translator, row: McpServerRow, now: number): McpRowView {
 				tone: "neutral",
 				reason: t("mcp.row.replacedReason"),
 			};
-		case "handled-elsewhere":
-			return { label: mcpStateLabel(t, "handled-elsewhere"), tone: "neutral" };
 		case "starting":
 			return {
 				label: t("mcp.row.starting", {
@@ -262,7 +248,7 @@ export function mcpSettingWrite(
 			params: { workspaceId, name: summary.name, ...change },
 		};
 	}
-	if (!projectEntry) throw new Error(`Read "${summary.name}" from .pi/mcp.json first.`);
+	if (!projectEntry) throw new Error(`Read "${summary.name}" from .omp/mcp.json first.`);
 	return {
 		method: "mcp.update",
 		params: mcpEntryUpdate(

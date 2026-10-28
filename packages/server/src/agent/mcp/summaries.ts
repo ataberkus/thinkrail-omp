@@ -1,5 +1,6 @@
 import type { McpConfigFileError, McpExposure, McpServerSummary } from "@thinkrail/contracts";
 import {
+	effectiveExposure,
 	fingerprintMcpEntry,
 	grantedMcpTools,
 	isRecord,
@@ -16,8 +17,12 @@ import { maskMcpEndpoint, redactMcpText } from "./redact";
 const EXPOSURES: readonly McpExposure[] = ["deferred", "direct", "hidden", "codemode"];
 
 function configuredExposure(raw: Record<string, unknown>): McpExposure {
-	const value = raw.exposure === "codemode-deferred" ? "codemode" : raw.exposure;
-	return EXPOSURES.includes(value as McpExposure) ? (value as McpExposure) : "codemode";
+	const value = raw.exposure;
+	return EXPOSURES.find((exposure) => exposure === value) ?? "deferred";
+}
+
+function usesOAuth(raw: Record<string, unknown>): boolean {
+	return raw.auth === undefined || (isRecord(raw.auth) && raw.auth.type === "oauth");
 }
 
 function hasAuthorizationHeader(raw: Record<string, unknown>): boolean {
@@ -80,7 +85,12 @@ export function summarizeMcpServers(options: {
 		const projectOverride = entry.scope === "global" ? policy.overrides[entry.name] : undefined;
 		const exposure = configuredExposure(raw);
 		const repoOverride = entry.scope === "global" ? overrides.get(entry.name) : undefined;
-		const transport = typeof raw.url === "string" || raw.type === "http" ? "http" : "stdio";
+		const transport =
+			raw.type === "http" ||
+			raw.type === "sse" ||
+			(raw.type === undefined && raw.command === undefined && raw.url !== undefined)
+				? "http"
+				: "stdio";
 		const fingerprint = fingerprintMcpEntry(entry.name, entry.raw);
 		const granted = isEffective ? grantedMcpTools(policy, entry.name, live.config) : [];
 		const configError = [
@@ -98,15 +108,14 @@ export function summarizeMcpServers(options: {
 			endpoint: maskMcpEndpoint(raw),
 			effective: isEffective,
 			exposure,
-			effectiveExposure:
-				isEffective && live.config.exposure && live.config.exposure !== "codemode"
-					? live.config.exposure
-					: (projectOverride?.exposure ?? (exposure === "codemode" ? "deferred" : exposure)),
+			effectiveExposure: isEffective
+				? effectiveExposure(live.config.exposure)
+				: (projectOverride?.exposure ?? effectiveExposure(exposure)),
 			enabled: isEffective ? live.config.enabled !== false : raw.enabled !== false,
 			...(typeof raw.description === "string"
 				? { description: redactMcpText(raw.description) }
 				: {}),
-			oauth: transport === "http" && !hasAuthorizationHeader(raw) && raw.auth === undefined,
+			oauth: transport === "http" && !hasAuthorizationHeader(raw) && usesOAuth(raw),
 			...(entry.scope === "project" && globalNames.has(entry.name) ? { replacesGlobal: true } : {}),
 			...(projectOverride ? { projectOverride } : {}),
 			...(entry.scope === "project"

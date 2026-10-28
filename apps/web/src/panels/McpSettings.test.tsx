@@ -163,7 +163,6 @@ test("runtime menus follow row authority while scope-specific review, edit and r
 			{
 				servers: [user, project],
 				configErrors: [],
-				handledElsewhere: null,
 				sessions: {},
 			},
 			0,
@@ -198,7 +197,6 @@ test("an effective user server keeps runtime menus despite an invalid folded ove
 				).summary,
 			],
 			configErrors: [],
-			handledElsewhere: null,
 			sessions: {},
 		},
 		0,

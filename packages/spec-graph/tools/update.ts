@@ -1,30 +1,27 @@
 import { writeFileSync } from "node:fs";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type ExtensionAPI, z } from "@oh-my-pi/pi-coding-agent";
 import { FIELDS, type FrontmatterEdit, updateFrontmatterText } from "../core/index.ts";
 import { errorResult, getIndex, textResult } from "./shared.ts";
 
-const listGroup = Type.Object({
-	[FIELDS.dependsOn]: Type.Optional(Type.Array(Type.String())),
-	[FIELDS.references]: Type.Optional(Type.Array(Type.String())),
-	[FIELDS.implements]: Type.Optional(Type.Array(Type.String())),
-	[FIELDS.covers]: Type.Optional(Type.Array(Type.String())),
-	[FIELDS.tags]: Type.Optional(Type.Array(Type.String())),
+const listGroup = z.object({
+	[FIELDS.dependsOn]: z.array(z.string()).optional(),
+	[FIELDS.references]: z.array(z.string()).optional(),
+	[FIELDS.implements]: z.array(z.string()).optional(),
+	[FIELDS.covers]: z.array(z.string()).optional(),
+	[FIELDS.tags]: z.array(z.string()).optional(),
 });
 
-const parameters = Type.Object({
-	id: Type.String({ description: "Id of the spec to update." }),
-	set: Type.Optional(
-		Type.Record(Type.String(), Type.String(), {
-			description:
-				"Scalar frontmatter fields to set/overwrite (e.g. title, status, parent). For list fields (depends-on/references/implements/covers/tags) use addList/removeList.",
-		}),
-	),
-	remove: Type.Optional(
-		Type.Array(Type.String(), { description: "Frontmatter field names to remove entirely." }),
-	),
-	addList: Type.Optional(listGroup),
-	removeList: Type.Optional(listGroup),
+const parameters = z.object({
+	id: z.string().describe("Id of the spec to update."),
+	set: z
+		.record(z.string(), z.string())
+		.optional()
+		.describe(
+			"Scalar frontmatter fields to set/overwrite (e.g. title, status, parent). For list fields (depends-on/references/implements/covers/tags) use addList/removeList.",
+		),
+	remove: z.array(z.string()).optional().describe("Frontmatter field names to remove entirely."),
+	addList: listGroup.optional(),
+	removeList: listGroup.optional(),
 });
 
 export function registerSpecUpdate(pi: ExtensionAPI): void {
@@ -33,8 +30,7 @@ export function registerSpecUpdate(pi: ExtensionAPI): void {
 		label: "Spec Update",
 		description:
 			"Edit a spec's frontmatter only (never its prose): set/overwrite scalar fields, remove fields, and add/remove entries in the list fields (depends-on/references/implements/covers/tags). Comments and any non-dialect fields are preserved. Prose is edited with the write/edit tools.",
-		promptSnippet:
-			"spec_update — edit a spec's frontmatter only (scalar fields + list entries); never its prose.",
+		loadMode: "essential",
 		parameters,
 		async execute(_callId, params, _signal, _onUpdate, ctx) {
 			const index = getIndex(ctx.cwd);
