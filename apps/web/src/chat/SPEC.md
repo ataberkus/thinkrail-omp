@@ -962,13 +962,16 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
 - **Prompt enhance** (`Composer` control, `useDraftEnhance.ts` orchestration, pure rules in the store-free
   `draftEnhance.ts`) — ported from omp-companion's ✨ Enhance. A Remix `RiSparkling2Line` `IconButton ghost m`
   (`composer-enhance`) leads the trailing cluster, rendered only from a `PROMPT_ENHANCE_PROTOCOL_VERSION`
-  (v94) host; `Cmd/Ctrl+Shift+E` in the message box does the same. It is disabled for an empty draft or a
-  `/` command, and while another chat's enhance runs in this view. A click sends the trimmed draft plus the
-  last 6 user/assistant turns (`enhanceConversation`: each assistant run reduced to its last reply with
-  text) to `prompt.enhance` with a client timeout outliving the host's. **While it runs** the textarea is
-  `readOnly`, send is disarmed, a `composer-enhance-status` chip shows, and the control turns into
-  `RiCloseLine` *Cancel enhance* (`data-running`, `selected`) — a second click cancels instead of starting
-  another; the wire has no cancel, so a cancelled answer is only dropped, and cancel says nothing. Streaming
+  (v95) host; `Cmd/Ctrl+Shift+E` in the message box does the same. It is disabled for an empty draft or a
+  `/` command, and while another chat's enhance runs in this view. A click mints a `requestId` and sends
+  the chat's `sessionId`, the trimmed draft, the last 6 user/assistant turns (`enhanceConversation`: each
+  assistant run reduced to its last reply with text) and the composer's attached images to
+  `prompt.enhance` with a client timeout (190 s) outliving the host's. **While it runs** the textarea is
+  `readOnly`, send is disarmed, a `composer-enhance-status` chip shows the latest repository lookup from
+  `prompt.enhanceProgress` (*Reading / Searching for / Listing {target}…*, *Enhancing prompt…* before the
+  first), and the control turns into `RiCloseLine` *Cancel enhance* (`data-running`, `selected`) — a second
+  click cancels instead of starting another: it sends `prompt.enhanceCancel`, drops any late answer, and
+  says nothing. Streaming
   does not gate it: the send modes work again once it settles. **Settling** (`enhanceOutcome`) re-reads the
   run's session draft from the store: unchanged → `replaceDraftUndoable` (select-all +
   `execCommand("insertText")`, so Ctrl+Z restores the original; a direct `onChange` fallback) with a
@@ -976,9 +979,10 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
   view, text inserted) → never overwritten, an info toast offers *Use enhanced prompt*; a session that no
   longer exists drops it. A run for a chat this view no longer shows writes that chat's store draft instead.
   A `null` answer or a rejected request leaves the draft as is and shows the reason in the
-  `composer-command-error` chip (a toast when the chat is not shown). Deliberate departures from the
-  companion: the host runs a tool-free cheap one-shot ([[submodule-server-assist]]), so no repository
-  lookups, image context, progress steps, or role-chosen model.
+  `composer-command-error` chip (a toast when the chat is not shown). The host reads the repository on
+  the chat's own model and thinking level ([[submodule-server-assist]]), matching the companion; the
+  companion's role-chosen model setting is not carried over. Live coverage: `e2e/enhance.live.spec.ts`
+  (@agent).
 - **Queued messages: the pending strip** (`QueueStrip.tsx`, props-driven: `queue` + `onEdit`/`onRemove`)
   — the web mirror of pi's interactive-mode pending-messages area. A **streaming send never renders an
   optimistic transcript bubble** (see the store SPEC's echo contract): `ChatView.onSubmit` skips

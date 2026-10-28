@@ -310,7 +310,7 @@ Children / associated surfaces:
 | Slash-Command Menu | `chat/SlashCommandCompletion.tsx` → `SlashCommandMenu` | `slash-templates-empty` (footer) | `/` command + template completion |
 | Send Button | inline (`ArrowUp` / `Square` abort) | — | Send / steer / follow-up / abort |
 | History-Open Button | inline (`History` icon) | `history-open` | Opens the History Overlay |
-| Enhance Button | inline (`Sparkling2` icon; `Close` while running) · hook `chat/useDraftEnhance.ts` | `composer-enhance` (`data-running`); status chip `composer-enhance-status` | Rewrites the draft into a complete prompt (`prompt.enhance`), Undo in the toast; again cancels |
+| Enhance Button | inline (`Sparkling2` icon; `Close` while running) · hook `chat/useDraftEnhance.ts` | `composer-enhance` (`data-running`); status chip `composer-enhance-status` (latest lookup) | Rewrites the draft into a repository-grounded prompt (`prompt.enhance`), Undo in the toast; again cancels (`prompt.enhanceCancel`) |
 | Slot Hint Chip | inline pill | `slot-hint` | Template slot session progress (`slot n/m · ⇥ next · esc done`) |
 | Slot Highlight | inline backdrop span | `slot-highlight` (`data-slot-state`) | Tinted template-slot ranges |
 
