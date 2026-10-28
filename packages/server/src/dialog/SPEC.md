@@ -13,8 +13,9 @@ The host's native directory picker, so the browser "Open project" gets a real OS
 ## Boundary
 
 - **Owns:** `selectDirectory()` — the host's native folder picker, per OS via `pickersFor(platform)`:
-  macOS `osascript` (`choose folder`), Linux `zenity` then `kdialog`, Windows a PowerShell
-  `FolderBrowserDialog`. `THINKRAIL_PICK_DIR` overrides it for dev/e2e and is resolved before native
+  macOS `osascript` (`choose folder`), Linux `zenity` then `kdialog`, Windows a PowerShell-hosted
+  Vista+ `IFileOpenDialog` (`FOS_PICKFOLDERS`) with a `FolderBrowserDialog` fallback.
+  `THINKRAIL_PICK_DIR` overrides it for dev/e2e and is resolved before native
   availability checks. It returns `null` **only** when the user cancels. Picker completion is classified
   from exit code plus diagnostics: AppleScript's `-128` marker and Linux exit 1 without stderr are
   cancellation; Linux exit 1 with diagnostics (including GTK's `Failed to open display`) and every
@@ -45,6 +46,18 @@ The host's native directory picker, so the browser "Open project" gets a real OS
   The script is handed over as `-EncodedCommand` (base64/UTF-16LE), not `-Command`: it is multi-line and
   contains the double quotes of P/Invoke signatures, which Windows argv quoting plus PowerShell's own
   re-parse do not preserve.
+- **Windows: the modern folder dialog, not the tree.** Under Windows PowerShell 5.1 `FolderBrowserDialog`
+  is the legacy `SHBrowseForFolder` tree: no address bar, no typed path. The script instead compiles a
+  small C# `ThinkRail.FolderPicker` (COM interop for `IFileOpenDialog`/`IShellItem`, CLSID
+  `DC1C5A9C-…`) with `FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST`, shows it owned by the
+  foregrounded owner form, and writes `GetDisplayName(SIGDN_FILESYSPATH)`. Cancel
+  (`HRESULT_FROM_WIN32(ERROR_CANCELLED)`, `0x800704C7`) writes nothing and exits 0, since Windows pickers
+  treat every non-zero exit as failure; any other `Show` HRESULT writes
+  `Folder picker failed (0x…): …` to stderr and exits 1. Compiling or creating the COM dialog is
+  best-effort: on failure the script falls back to `FolderBrowserDialog` instead of failing the pick.
+  Measured on Windows 10 (powershell.exe): typed path in the "Folder:" field returned it, Cancel returned
+  empty stdout at exit 0, a broken CLSID fell back to the tree dialog. The encoded script stays well under
+  the 32767-character command-line limit.
 - **Public surface (barrel):** `selectDirectory` (+ `pickersFor` / `Picker` and the two message builders
   `pickerFailure` / `noPickerMessage`, exposed for unit tests).
 - **Allowed deps:** Bun (`Bun.spawn`, with `windowsHide`; see `architecture.md` Invariants),

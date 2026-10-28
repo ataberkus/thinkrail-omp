@@ -18,14 +18,24 @@ test("Linux picker tries zenity then kdialog, both as directory pickers", () => 
 	expect(pickers[1]?.cmd).toContain("--getexistingdirectory");
 });
 
-test("Windows picker: a PowerShell FolderBrowserDialog, -Sta, owned by a top-most form", () => {
+test("Windows picker: IFileOpenDialog folder picker, -Sta, owned by a top-most form, FolderBrowserDialog fallback", () => {
 	const pickers = pickersFor("win32");
 	expect(pickers.map((p) => p.cmd[0])).toEqual(["powershell.exe", "pwsh.exe"]);
 	for (const picker of pickers) {
 		expect(picker.cmd).toContain("-Sta");
 		const flag = picker.cmd.indexOf("-EncodedCommand");
 		expect(flag).toBeGreaterThan(-1);
+		expect(picker.cmd[flag + 1]?.length ?? 0).toBeLessThan(32767);
 		const script = Buffer.from(picker.cmd[flag + 1] ?? "", "base64").toString("utf16le");
+		expect(script).toContain("interface IFileOpenDialog");
+		expect(script).toContain("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7");
+		expect(script).toContain(
+			"dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)",
+		);
+		expect(script).toContain("$picker.Show($owner.Handle, 'Open project')");
+		expect(script).toContain("if (hr == HRESULT_ERROR_CANCELLED) return null;");
+		expect(script).toContain("unchecked((int)0x800704C7)");
+		expect(script).toContain("exit 1");
 		expect(script).toContain("FolderBrowserDialog");
 		expect(script).toContain("$owner.TopMost = $true");
 		expect(script).toContain("$d.ShowDialog($owner)");
