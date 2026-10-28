@@ -836,6 +836,33 @@ export type JbcentralQuotaSnapshot =
 	| { state: "stale"; remaining: number; total: number; observedAt: number }
 	| { state: "unavailable" };
 
+/** One provider-reported plan limit window (e.g. Claude "5 Hour", "7 Day"). */
+export interface ProviderUsageLimit {
+	label: string;
+	/** Window, model or tier qualifier that tells same-label limits apart. */
+	detail?: string;
+	/** Fraction of the window used, 0..1 (above 1 means overage); `null` when the provider gave no amount. */
+	usedFraction: number | null;
+	/** Epoch milliseconds when the window resets, when known. */
+	resetsAt?: number;
+}
+
+export interface ProviderUsageAccount {
+	/** Account identity the provider reported (email, org, plan), when any. */
+	account?: string;
+	limits: ProviderUsageLimit[];
+}
+
+export interface ProviderUsageProvider {
+	providerId: string;
+	name: string;
+	accounts: ProviderUsageAccount[];
+}
+
+export type ProviderUsageSnapshot =
+	| { state: "hidden" }
+	| { state: "available"; providers: ProviderUsageProvider[]; observedAt: number };
+
 export type LoginFrame =
 	| { kind: "authUrl"; url: string; instructions?: string }
 	| { kind: "deviceCode"; userCode: string; verificationUri: string; expiresInSeconds?: number }

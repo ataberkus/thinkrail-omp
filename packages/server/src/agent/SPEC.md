@@ -23,7 +23,10 @@ re-opened transcripts provider-valid.
 
 - **Owns:**
   - `piRuntime` (the current shared `ModelRuntime` generation — pi's canonical model/auth facade for
-    catalogs, credentials, availability, login/logout, and request dispatch). Sibling consumers use the
+    catalogs, credentials, availability, login/logout, request dispatch, and **`usageLimits(force)`**: omp's
+    `authStorage.usage.reports` (force invalidates omp's usage cache first) normalized by the pure
+    `toProviderUsage` into the wire `ProviderUsageProvider[]` — reports grouped per provider, empty reports
+    dropped, omp's `resolveUsedFraction` for the amount, and identical routing-copy limits deduplicated). Sibling consumers use the
     `usePiRuntime()` callback to capture the current generation rather than receiving a mutable singleton;
     host boot initializes it before any model work, while later Central artifact changes prepare and atomically
     activate a fresh generation. Tests configure the factory before initialization. Every runtime is created

@@ -52,7 +52,8 @@ create the tools it needs based on how you actually work.
   anchored review comments on files and diffs and send them to a chat as structured context, or open the
   worktree in your installed IDE.
 - **Chats that stream like the engine thinks.** Several concurrent `omp` sessions per workspace, each with
-  its own model and live token and cost readout. Steer a running turn or queue a follow-up, delegate to
+  its own model and live token and cost readout; the top bar shows how much of your subscription plan
+  limits (Claude 5-hour / weekly, Codex, Copilot…) you have used and when they reset. Steer a running turn or queue a follow-up, delegate to
   subagents, and work a shared plan the agent updates and you edit — each completed step can be committed
   and reviewed on its own. ✨ Enhance (or Ctrl+Shift+E) reads the repository and rewrites a rough draft
   into a complete, grounded prompt in place, with Undo; nothing is sent until you send it.

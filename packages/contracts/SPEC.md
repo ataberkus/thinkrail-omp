@@ -363,7 +363,11 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
   and raw PI models are structurally absent; server and web map codes to their own generic copy). Protocol
   v59 adds **`JbcentralQuotaSnapshot`**, the separate closed quota read: `hidden`, `available`, `stale`, or
   `unavailable`; only available/stale carry finite recurring `remaining` / `total` numbers and an observation
-  timestamp. No account/plan/used/top-up/refill field or raw failure text exists;
+  timestamp. No account/plan/used/top-up/refill field or raw failure text exists. Protocol v96 adds
+  **`provider.usage`** → **`ProviderUsageSnapshot`**: `hidden` when no logged-in provider reports plan limits,
+  else `available` with `providers[]` → `accounts[]` (optional provider-reported identity) → `limits[]` of
+  `label`, optional `detail`, `usedFraction` (`null` when the provider gave no amount) and optional
+  `resetsAt`; read failures are thrown request errors, not snapshot states;
   the **theme/config selection** — **`ThemeId`** is an open string on the wire, because the host persists
   opaque selections while the independently shipped web client owns the available manifest catalog;
   **`ThemeMode`** is the closed `"fixed" | "system"` behavior and **`SystemThemePair`** carries one opaque

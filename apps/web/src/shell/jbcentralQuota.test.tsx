@@ -6,11 +6,7 @@ import {
 	JbcentralQuotaIndicator,
 	type JbcentralQuotaViewSnapshot,
 } from "./JbcentralQuotaIndicator";
-import {
-	formatJbcentralQuota,
-	startJbcentralQuotaPolling,
-	type TimerHandle,
-} from "./jbcentralQuota";
+import { formatJbcentralQuota, startQuotaPolling, type TimerHandle } from "./jbcentralQuota";
 
 function deferred<T>() {
 	let resolve: (value: T) => void = () => {};
@@ -71,7 +67,7 @@ test("quota polling starts immediately, never overlaps, and stops after a hidden
 	const snapshots: JbcentralQuotaSnapshot[] = [];
 	const clock = scheduler();
 
-	startJbcentralQuotaPolling({
+	startQuotaPolling<JbcentralQuotaSnapshot>({
 		intervalMs: 30_000,
 		request: (force) => {
 			forces.push(force);
@@ -110,7 +106,7 @@ test("Retry cancels the pending timer and forces one immediate read", async () =
 	];
 	const forces: boolean[] = [];
 	const clock = scheduler();
-	const polling = startJbcentralQuotaPolling({
+	const polling = startQuotaPolling<JbcentralQuotaSnapshot>({
 		intervalMs: 30_000,
 		request: (force) => {
 			forces.push(force);
@@ -136,7 +132,7 @@ test("stopping polling discards a late response and schedules nothing", async ()
 	const read = deferred<JbcentralQuotaSnapshot>();
 	const snapshots: JbcentralQuotaSnapshot[] = [];
 	const clock = scheduler();
-	const polling = startJbcentralQuotaPolling({
+	const polling = startQuotaPolling<JbcentralQuotaSnapshot>({
 		intervalMs: 1_000,
 		request: () => read.promise,
 		onSnapshot: (snapshot) => snapshots.push(snapshot),

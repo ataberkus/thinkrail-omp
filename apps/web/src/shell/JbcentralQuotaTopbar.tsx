@@ -10,7 +10,7 @@ import {
 	JbcentralQuotaIndicator,
 	type JbcentralQuotaViewSnapshot,
 } from "./JbcentralQuotaIndicator";
-import { type JbcentralQuotaPolling, startJbcentralQuotaPolling } from "./jbcentralQuota";
+import { type QuotaPolling, startQuotaPolling } from "./jbcentralQuota";
 
 function transportFailureSnapshot(current: JbcentralQuotaViewSnapshot): JbcentralQuotaViewSnapshot {
 	if (current.state === "available" || current.state === "stale") {
@@ -30,7 +30,7 @@ export function JbcentralQuotaTopbar() {
 	);
 	const [centralConnected, setCentralConnected] = useState(false);
 	const [snapshot, setSnapshot] = useState<JbcentralQuotaViewSnapshot>({ state: "hidden" });
-	const pollingRef = useRef<JbcentralQuotaPolling | null>(null);
+	const pollingRef = useRef<QuotaPolling | null>(null);
 	const supported = protocolVersion !== null && protocolVersion >= JBCENTRAL_QUOTA_PROTOCOL_VERSION;
 
 	useEffect(() => {
@@ -74,7 +74,7 @@ export function JbcentralQuotaTopbar() {
 		pollingRef.current = null;
 		if (!centralConnected || !visible || !enabled || connectionStatus !== "connected") return;
 
-		const polling = startJbcentralQuotaPolling({
+		const polling = startQuotaPolling<JbcentralQuotaSnapshot>({
 			intervalMs: refreshSeconds * 1_000,
 			request: (force): Promise<JbcentralQuotaSnapshot> =>
 				getTransport().request("provider.jbcentralQuota", force ? { force: true } : {}),

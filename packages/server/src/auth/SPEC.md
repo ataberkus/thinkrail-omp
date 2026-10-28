@@ -140,7 +140,8 @@ ourselves and never surface a credential value over the wire.
     serializes CLI actions, while candidate requests coalesce to the newest observed artifact state. Status and
     action results use only the closed contracts taxonomy—never child output, extension contents, diagnostics,
     proxy data, raw models, or arbitrary thrown messages.
-- **Public surface (barrel):** `getProviderStatus`, `buildProviderReport` (+ `ProviderStatusSources`);
+- **Public surface (barrel):** `getProviderStatus`, `buildProviderReport` (+ `ProviderStatusSources`),
+  `getProviderUsage(force)` (the current runtime's `usageLimits`, `hidden` when no provider reports limits);
   `startLogin`, `resolveLogin`, `cancelLogin`, `cancelAllLogins`, `logoutProvider`,
   `setLoginPublisher`; `initializeJbcentralRuntime`, `stopJbcentralRuntime`, `getJbcentralStatus`,
   `getJbcentralQuota`, `connectJbcentral`, `disconnectJbcentral`, `startProxyJbcentral`,

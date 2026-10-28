@@ -1,17 +1,15 @@
-import type { JbcentralQuotaSnapshot } from "@thinkrail/contracts";
-
 export type TimerHandle = ReturnType<typeof setTimeout> | number;
 
-export interface JbcentralQuotaPollingOptions {
+export interface QuotaPollingOptions<T extends { state: string }> {
 	intervalMs: number;
-	request: (force: boolean) => Promise<JbcentralQuotaSnapshot>;
-	onSnapshot: (snapshot: JbcentralQuotaSnapshot) => void;
+	request: (force: boolean) => Promise<T>;
+	onSnapshot: (snapshot: T) => void;
 	onError: () => void;
 	schedule?: (callback: () => void, delay: number) => TimerHandle;
 	cancel?: (handle: TimerHandle) => void;
 }
 
-export interface JbcentralQuotaPolling {
+export interface QuotaPolling {
 	retry(): void;
 	stop(): void;
 }
@@ -21,14 +19,14 @@ export function formatJbcentralQuota(remaining: number, total: number, locale: s
 	return `${formatter.format(remaining)} / ${formatter.format(total)}`;
 }
 
-export function startJbcentralQuotaPolling({
+export function startQuotaPolling<T extends { state: string }>({
 	intervalMs,
 	request,
 	onSnapshot,
 	onError,
 	schedule = (callback, delay) => setTimeout(callback, delay),
 	cancel = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-}: JbcentralQuotaPollingOptions): JbcentralQuotaPolling {
+}: QuotaPollingOptions<T>): QuotaPolling {
 	let stopped = false;
 	let running = false;
 	let queuedForce = false;

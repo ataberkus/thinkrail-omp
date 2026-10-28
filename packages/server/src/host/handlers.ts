@@ -89,6 +89,7 @@ import {
 	disconnectJbcentral,
 	getJbcentralQuota,
 	getProviderStatus,
+	getProviderUsage,
 	jbcentralLogin,
 	logoutProvider,
 	resolveLogin,
@@ -1230,6 +1231,7 @@ const handlers: WsHandlers = {
 			force: params.force === true,
 		});
 	},
+	"provider.usage": (params) => getProviderUsage(params.force === true),
 	"host.update": (_params, ctx) => {
 		if (!ctx.runHostUpdate) throw new Error("Host update is unavailable.");
 		ctx.runHostUpdate();

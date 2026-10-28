@@ -23,5 +23,6 @@ export {
 export {
 	buildProviderReport,
 	getProviderStatus,
+	getProviderUsage,
 	type ProviderStatusSources,
 } from "./providerStatus";

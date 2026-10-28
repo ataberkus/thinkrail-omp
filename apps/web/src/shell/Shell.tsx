@@ -44,6 +44,7 @@ import { useLocalLayoutState } from "./layoutState";
 import { LocationBar } from "./locationBar";
 import { NativeWindowControls } from "./NativeWindowControls";
 import { PROJECT_HOME_PROJECTS_REGION_ID, ProjectHome } from "./ProjectHome";
+import { ProviderUsageTopbar } from "./ProviderUsageTopbar";
 import { SessionSwitcher } from "./SessionSwitcher";
 import { readSettingsShortcutLabel } from "./useAppShortcuts";
 import { useCollapsibleRegion } from "./useCollapsibleRegion";
@@ -189,6 +190,7 @@ export function Shell() {
 							onOpen={() => useAppStore.getState().openSettings(SettingsSection.Updates)}
 						/>
 					) : null}
+					<ProviderUsageTopbar />
 					<JbcentralQuotaTopbar />
 					<span
 						data-testid="connection-status"

@@ -46,6 +46,7 @@ import type {
 	ProjectTrustSummary,
 	PromptEnhanceMessage,
 	ProviderStatusReport,
+	ProviderUsageSnapshot,
 	PrPreview,
 	ResourceMeta,
 	RevertTarget,
@@ -123,7 +124,8 @@ export type TemplateReadLocation =
 	| { projectId: string; workspaceId?: never }
 	| { workspaceId?: never; projectId?: never };
 
-export const PROTOCOL_VERSION = 95;
+export const PROTOCOL_VERSION = 96;
+export const PROVIDER_USAGE_PROTOCOL_VERSION = 96;
 export const PROMPT_ENHANCE_PROTOCOL_VERSION = 95;
 export const TOOL_RESPONSE_PROTOCOL_VERSION = 93;
 export const USER_THEMES_PROTOCOL_VERSION = 92;
@@ -334,6 +336,7 @@ export const WS_METHODS = {
 	providerJbcentralLogin: "provider.jbcentralLogin",
 	providerJbcentralUpdate: "provider.jbcentralUpdate",
 	providerJbcentralQuota: "provider.jbcentralQuota",
+	providerUsage: "provider.usage",
 	hostUpdate: "host.update",
 	settingsUpdate: "settings.update",
 	environmentGet: "environment.get",
@@ -952,6 +955,7 @@ export interface WsMethodMap {
 	"provider.jbcentralLogin": { params: Record<string, never>; result: JbcentralLoginResult };
 	"provider.jbcentralUpdate": { params: Record<string, never>; result: JbcentralActionResult };
 	"provider.jbcentralQuota": { params: { force?: boolean }; result: JbcentralQuotaSnapshot };
+	"provider.usage": { params: { force?: boolean }; result: ProviderUsageSnapshot };
 	"host.update": { params: Record<string, never>; result: Ack };
 	"settings.update": { params: { config: AppConfigUpdate }; result: AppConfig };
 	"environment.get": { params: Record<string, never>; result: HostEnvironmentStatus };

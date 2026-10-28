@@ -38,6 +38,7 @@ import {
 	PROJECT_TRUST_PROTOCOL_VERSION,
 	PROMPT_ENHANCE_PROTOCOL_VERSION,
 	PROTOCOL_VERSION,
+	PROVIDER_USAGE_PROTOCOL_VERSION,
 	RESOURCE_META_PROTOCOL_VERSION,
 	REVIEW_ACTIONS_PROTOCOL_VERSION,
 	REVIEW_RICH_ANCHORS_PROTOCOL_VERSION,
@@ -232,11 +233,17 @@ test("tool responses replace the ask-only answer method at v93", () => {
 });
 
 test("repository-reading prompt enhancement is pinned to v95", () => {
-	expect(PROTOCOL_VERSION).toBe(95);
+	expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(PROMPT_ENHANCE_PROTOCOL_VERSION);
 	expect(PROMPT_ENHANCE_PROTOCOL_VERSION).toBe(95);
 	expect(WS_METHODS.promptEnhance).toBe("prompt.enhance");
 	expect(WS_METHODS.promptEnhanceCancel).toBe("prompt.enhanceCancel");
 	expect(WS_CHANNELS.promptEnhanceProgress).toBe("prompt.enhanceProgress");
+});
+
+test("provider plan usage is pinned to v96", () => {
+	expect(PROTOCOL_VERSION).toBe(96);
+	expect(PROVIDER_USAGE_PROTOCOL_VERSION).toBe(96);
+	expect(WS_METHODS.providerUsage).toBe("provider.usage");
 });
 
 test("user theme files are pinned to v92", () => {

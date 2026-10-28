@@ -14,8 +14,10 @@ import {
 	type Model,
 	type OAuthLoginCallbacks,
 	PROVIDER_REGISTRY,
+	resolveUsedFraction,
 	type SimpleStreamOptions,
 	streamSimple as streamWithModel,
+	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import {
 	discoverAuthStorage,
@@ -27,6 +29,57 @@ import {
 	type Settings,
 } from "@oh-my-pi/pi-coding-agent";
 import { ModelsConfigFile } from "@oh-my-pi/pi-coding-agent/config/models-config";
+import type { ProviderUsageLimit, ProviderUsageProvider } from "@thinkrail/contracts";
+
+function accountLabel(metadata: Record<string, unknown> | undefined): string | undefined {
+	const text = (key: string) => {
+		const value = metadata?.[key];
+		return typeof value === "string" && value ? value : undefined;
+	};
+	const parts = [
+		text("email") ?? text("accountId") ?? text("projectId"),
+		text("orgName") ?? text("orgId"),
+		text("planType"),
+	].filter((part) => part !== undefined);
+	return parts.length ? parts.join(" · ") : undefined;
+}
+
+export function toProviderUsage(
+	reports: readonly UsageReport[],
+	nameOf: (providerId: string) => string,
+): ProviderUsageProvider[] {
+	const providers = new Map<string, ProviderUsageProvider>();
+	for (const report of reports) {
+		if (!Array.isArray(report.limits) || report.limits.length === 0) continue;
+		let provider = providers.get(report.provider);
+		if (!provider) {
+			provider = { providerId: report.provider, name: nameOf(report.provider), accounts: [] };
+			providers.set(report.provider, provider);
+		}
+		const account = accountLabel(report.metadata);
+		const limits = new Map<string, ProviderUsageLimit>();
+		for (const limit of report.limits) {
+			const used = resolveUsedFraction(limit);
+			const resetsAt = limit.window?.resetsAt;
+			const detail = [limit.window?.label, limit.scope?.modelId, limit.scope?.tier]
+				.filter(
+					(part): part is string =>
+						!!part && !limit.label.toLowerCase().includes(part.toLowerCase()),
+				)
+				.join(" · ");
+			const entry: ProviderUsageLimit = {
+				label: limit.label,
+				...(detail ? { detail } : {}),
+				usedFraction: used !== undefined && Number.isFinite(used) ? Math.max(0, used) : null,
+				...(resetsAt !== undefined && Number.isFinite(resetsAt) ? { resetsAt } : {}),
+			};
+			// Routing-specific copies of one upstream quota arrive as identical entries.
+			limits.set(JSON.stringify(entry), entry);
+		}
+		provider.accounts.push({ ...(account ? { account } : {}), limits: [...limits.values()] });
+	}
+	return [...providers.values()];
+}
 
 export type AuthType = "oauth" | "api_key";
 
@@ -384,6 +437,14 @@ export class ModelRuntime {
 
 	async removeRuntimeApiKey(providerId: string): Promise<void> {
 		this.authStorage.keys.removeRuntime(providerId);
+	}
+
+	async usageLimits(force: boolean): Promise<ProviderUsageProvider[]> {
+		if (force) await this.authStorage.usage.invalidate();
+		const reports = await this.authStorage.usage.reports({
+			baseUrlResolver: (provider) => this.modelRegistry.getProviderBaseUrl(provider),
+		});
+		return toProviderUsage(reports ?? [], (id) => this.getProvider(id)?.name ?? id);
 	}
 
 	async listCredentials(): Promise<readonly CredentialInfo[]> {

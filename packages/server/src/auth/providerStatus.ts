@@ -3,6 +3,7 @@ import type {
 	JbcentralStatus,
 	ProviderStatus,
 	ProviderStatusReport,
+	ProviderUsageSnapshot,
 } from "@thinkrail/contracts";
 import { jbcentralInstall } from "@thinkrail/shared/jbcentral";
 import {
@@ -72,6 +73,13 @@ export function buildProviderReport(sources: ProviderStatusSources): ProviderSta
 		jbcentral: sources.jbcentral,
 		jbcentralInstall: sources.jbcentralInstall,
 	};
+}
+
+export async function getProviderUsage(force: boolean): Promise<ProviderUsageSnapshot> {
+	const providers = await usePiRuntime((runtime) => runtime.usageLimits(force));
+	return providers.length > 0
+		? { state: "available", providers, observedAt: Date.now() }
+		: { state: "hidden" };
 }
 
 export async function getProviderStatus(): Promise<ProviderStatusReport> {
