@@ -252,6 +252,9 @@ bun run desktop:build                # package without opening it
 
 On Windows, `start_web.bat` and `start_desktop.bat` at the repository root run `bun run dev` and
 `bun run desktop:dev` from any directory or by double-click, installing dependencies first if needed.
+`start_tailscale.bat` builds the web UI and runs the CLI host with `--tailscale` for a phone on your
+tailnet; extra arguments such as `--port` are passed through. If the phone cannot connect, allow
+`bun.exe` inbound on the Tailscale interface in Windows Firewall (needs an administrator).
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the checks, the end-to-end suites, desktop packaging, and the
 repository layout.
