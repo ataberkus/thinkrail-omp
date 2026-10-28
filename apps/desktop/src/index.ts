@@ -41,7 +41,8 @@ import { createRepeatGate } from "./repeatGate";
 import { RouteStore } from "./routeStore";
 import type { DesktopRpc } from "./rpc";
 import { ptyLibraryName, runtimeTarget } from "./runtimeTarget";
-import type { DesktopServerRuntime } from "./serverRuntime";
+import type { DesktopHost, DesktopServerRuntime } from "./serverRuntime";
+import { reachSharedHost, type SharedHostProxy, startSharedHostProxy } from "./sharedHost";
 import {
 	handOffStartupSplash,
 	openStartupSplash,
@@ -264,34 +265,49 @@ async function start(): Promise<void> {
 			splashMessage(dialogLabels, pendingInstallVersion),
 		);
 	}
-	const serverRuntime = (await import(
-		pathToFileURL(join(runtimeDir, "server-runtime.ts")).href
-	)) as DesktopServerRuntime;
-	await shellEnv;
-	const host = await serverRuntime.startDesktopHost({
-		runtimeDir,
-		staticDir: join(PATHS.VIEWS_FOLDER, "web"),
-		appVersion: version,
-		channel,
-		posthogProjectKey,
-		...(Electrobun.app.isPackaged
-			? { openExternal: (url: string) => Utils.openExternal(url) }
-			: {}),
-	});
-	setDesktopErrorReporter(host.reportError);
+	const sharedHostUrl = neutral ? undefined : process.env.THINKRAIL_DESKTOP_HOST_URL || undefined;
+	let host: DesktopHost | undefined;
+	let proxy: SharedHostProxy | undefined;
+	let backendProfileId = BACKEND_PROFILE_ID;
+	if (sharedHostUrl) {
+		const remoteOrigin = await reachSharedHost(sharedHostUrl);
+		proxy = startSharedHostProxy(remoteOrigin);
+		backendProfileId = `shared:${remoteOrigin}`;
+	} else {
+		const serverRuntime = (await import(
+			pathToFileURL(join(runtimeDir, "server-runtime.ts")).href
+		)) as DesktopServerRuntime;
+		await shellEnv;
+		host = await serverRuntime.startDesktopHost({
+			runtimeDir,
+			staticDir: join(PATHS.VIEWS_FOLDER, "web"),
+			appVersion: version,
+			channel,
+			posthogProjectKey,
+			...(Electrobun.app.isPackaged
+				? { openExternal: (url: string) => Utils.openExternal(url) }
+				: {}),
+		});
+		setDesktopErrorReporter(host.reportError);
+	}
+	const embeddedHost = host;
+	const sharedProxy = proxy;
+	const origin = sharedProxy?.origin ?? `http://127.0.0.1:${embeddedHost?.port}`;
 	const quitCoordinator = createElectrobunQuitCoordinator(
-		() => host.server.shutdown(),
+		async () => {
+			sharedProxy?.stop();
+			await embeddedHost?.server.shutdown();
+		},
 		() => dialogLabels,
 	);
 	startupQuitCoordinator = quitCoordinator;
 	Electrobun.events.on("before-quit", (event: BeforeQuitEvent) => {
 		quitCoordinator.handleBeforeQuit(event);
 	});
-	const origin = `http://127.0.0.1:${host.port}`;
 	const routes = new RouteStore(join(userData, "routes.json"));
 	const preferences = new PreferenceStore(join(userData, "preferences.json"));
-	const initialRoute = routes.read(BACKEND_PROFILE_ID, WINDOW_ID);
-	const initialPreferences = preferences.read(BACKEND_PROFILE_ID, WINDOW_ID);
+	const initialRoute = routes.read(backendProfileId, WINDOW_ID);
+	const initialPreferences = preferences.read(backendProfileId, WINDOW_ID);
 	const titleBarProbePath = neutral
 		? undefined
 		: process.env.THINKRAIL_DESKTOP_TITLE_BAR_PROBE_FILE;
@@ -387,14 +403,14 @@ async function start(): Promise<void> {
 					}
 				},
 				routeChanged: ({ hash }) => {
-					if (!neutral) routes.write(BACKEND_PROFILE_ID, WINDOW_ID, hash);
+					if (!neutral) routes.write(backendProfileId, WINDOW_ID, hash);
 				},
 				preferenceWrite: (payload) => {
 					if (neutral) return;
 					const preference = readDesktopPreferenceWrite(payload);
 					if (
 						preference &&
-						!preferences.write(BACKEND_PROFILE_ID, WINDOW_ID, preference.key, preference.value)
+						!preferences.write(backendProfileId, WINDOW_ID, preference.key, preference.value)
 					) {
 						console.error("[desktop] could not save a local preference");
 					}
@@ -402,7 +418,7 @@ async function start(): Promise<void> {
 				preferenceRemove: (payload) => {
 					if (neutral) return;
 					const preference = readDesktopPreferenceRemove(payload);
-					if (preference && !preferences.remove(BACKEND_PROFILE_ID, WINDOW_ID, preference.key)) {
+					if (preference && !preferences.remove(backendProfileId, WINDOW_ID, preference.key)) {
 						console.error("[desktop] could not remove a local preference");
 					}
 				},
@@ -508,7 +524,7 @@ async function start(): Promise<void> {
 
 	let ready = false;
 	const startAttributionClaim = attributionClaimOnFirstReadiness(() =>
-		host.server.startAttributionClaim(),
+		embeddedHost?.server.startAttributionClaim(),
 	);
 	mainWindow.webview.on("dom-ready", () => {
 		if (ready) return;

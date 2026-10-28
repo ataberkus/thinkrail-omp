@@ -45,7 +45,8 @@ bun run desktop:build                # package without opening it
 ```
 
 On Windows, `start_web.bat` (`bun run dev`), `start_desktop.bat` (`bun run desktop:dev`), and
-`start_tailscale.bat` (`bun run build:web`, then `bun apps/cli/src/index.ts --tailscale`) at the
+`start_tailscale.bat` (`bun run build:web`, then `bun run tailscale`: Tailscale host plus the desktop app
+connected to it through `THINKRAIL_DESKTOP_HOST_URL`) at the
 repository root do the same from any directory or by double-click; they check for Bun and run
 `bun install` when `node_modules` is missing.
 

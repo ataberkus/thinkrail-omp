@@ -10,7 +10,7 @@ if not exist "node_modules\" (
 )
 
 call bun run build:web || goto :fail
-call bun apps/cli/src/index.ts --tailscale %*
+call bun run tailscale %*
 if %errorlevel% neq 0 goto :fail
 popd
 exit /b 0
