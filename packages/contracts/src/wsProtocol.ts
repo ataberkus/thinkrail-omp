@@ -123,8 +123,8 @@ export type TemplateReadLocation =
 	| { projectId: string; workspaceId?: never }
 	| { workspaceId?: never; projectId?: never };
 
-export const PROTOCOL_VERSION = 94;
-export const PROMPT_ENHANCE_PROTOCOL_VERSION = 94;
+export const PROTOCOL_VERSION = 95;
+export const PROMPT_ENHANCE_PROTOCOL_VERSION = 95;
 export const TOOL_RESPONSE_PROTOCOL_VERSION = 93;
 export const USER_THEMES_PROTOCOL_VERSION = 92;
 export const HOST_ENVIRONMENT_PROTOCOL_VERSION = 91;
@@ -250,6 +250,7 @@ export const WS_METHODS = {
 	prOpen: "pr.open",
 	prGenerate: "pr.generate",
 	promptEnhance: "prompt.enhance",
+	promptEnhanceCancel: "prompt.enhanceCancel",
 	prReady: "pr.ready",
 	prMerge: "pr.merge",
 	prReopen: "pr.reopen",
@@ -397,6 +398,7 @@ export const WS_CHANNELS = {
 	mcpStatus: "mcp.status",
 	localesChanged: "locales.changed",
 	themesChanged: "themes.changed",
+	promptEnhanceProgress: "prompt.enhanceProgress",
 } as const;
 
 type SameUnion<A extends B, B extends C, C = A> = A;
@@ -694,9 +696,16 @@ export interface WsMethodMap {
 		result: { body: string | null };
 	};
 	"prompt.enhance": {
-		params: { draft: string; conversation?: PromptEnhanceMessage[] };
+		params: {
+			sessionId: string;
+			requestId: string;
+			draft: string;
+			conversation?: PromptEnhanceMessage[];
+			images?: ImageContent[];
+		};
 		result: { text: string | null };
 	};
+	"prompt.enhanceCancel": { params: { requestId: string }; result: Ack };
 	"pr.ready": {
 		params: { workspaceId: string; branch: string; number: number };
 		result: Ack;

@@ -241,6 +241,12 @@ export interface PromptEnhanceMessage {
 	text: string;
 }
 
+/** `prompt.enhanceProgress` (v95): one repository lookup the enhancer is making for `requestId`. */
+export interface PromptEnhanceProgress {
+	requestId: string;
+	step: { tool: "read" | "grep" | "glob"; target: string };
+}
+
 export type ReviewProvider = "github" | "gitlab";
 
 /** `workspace.branchStatus`: where the branch stands against origin and its base, review or not. */
