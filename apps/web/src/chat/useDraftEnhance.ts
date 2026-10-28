@@ -1,3 +1,4 @@
+import { type ImageContent, type PromptEnhanceProgress, WS_CHANNELS } from "@thinkrail/contracts";
 import { t as translate } from "@thinkrail/locales/react";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { toast, useAppStore } from "@/store";
@@ -10,12 +11,14 @@ import {
 	supportsPromptEnhance,
 } from "./draftEnhance";
 
-// Outlives the host's 90 s one-shot so its `null` arrives instead of a client timeout.
-const ENHANCE_REQUEST_TIMEOUT_MS = 100_000;
+// Outlives the host's 180 s run so its `null` arrives instead of a client timeout.
+const ENHANCE_REQUEST_TIMEOUT_MS = 190_000;
 
 interface EnhanceRun {
 	sessionId: string;
+	requestId: string;
 	original: string;
+	unsubscribe: () => void;
 }
 
 /**
@@ -29,6 +32,7 @@ export function useDraftEnhance(
 	const supported = useAppStore((s) => supportsPromptEnhance(s.protocolVersion));
 	const runRef = useRef<EnhanceRun | null>(null);
 	const [runningFor, setRunningFor] = useState<string | null>(null);
+	const [step, setStep] = useState<PromptEnhanceProgress["step"] | null>(null);
 	const shownRef = useRef(sessionId);
 	useEffect(() => {
 		shownRef.current = sessionId;
@@ -43,7 +47,9 @@ export function useDraftEnhance(
 	const finish = (run: EnhanceRun, text: string | null, error?: unknown) => {
 		if (runRef.current !== run) return;
 		runRef.current = null;
+		run.unsubscribe();
 		setRunningFor(null);
+		setStep(null);
 		const current = useAppStore.getState().sessions[run.sessionId]?.draft;
 		const outcome = enhanceOutcome(run.original, current, text);
 		if (outcome === "dropped") return;
@@ -84,26 +90,43 @@ export function useDraftEnhance(
 		});
 	};
 
-	const toggle = () => {
+	const toggle = (images: ImageContent[]) => {
 		const active = runRef.current;
 		if (active) {
 			if (active.sessionId === sessionId) {
 				runRef.current = null;
+				active.unsubscribe();
 				setRunningFor(null);
+				setStep(null);
+				void getTransport()
+					.request("prompt.enhanceCancel", { requestId: active.requestId })
+					.catch(() => {});
 			}
 			return;
 		}
 		const session = useAppStore.getState().sessions[sessionId];
 		const original = session?.draft ?? "";
 		if (!canEnhanceDraft(original)) return;
-		const run = { sessionId, original };
+		const requestId = crypto.randomUUID();
+		const unsubscribe = getTransport().subscribe(WS_CHANNELS.promptEnhanceProgress, (data) => {
+			const progress = data as PromptEnhanceProgress;
+			if (progress.requestId === requestId && runRef.current?.requestId === requestId)
+				setStep(progress.step);
+		});
+		const run = { sessionId, requestId, original, unsubscribe };
 		runRef.current = run;
 		setRunningFor(sessionId);
 		const conversation = enhanceConversation(session?.turns ?? []);
 		getTransport()
 			.request(
 				"prompt.enhance",
-				{ draft: original.trim(), ...(conversation.length > 0 ? { conversation } : {}) },
+				{
+					sessionId,
+					requestId,
+					draft: original.trim(),
+					...(conversation.length > 0 ? { conversation } : {}),
+					...(images.length > 0 ? { images } : {}),
+				},
 				{ timeoutMs: ENHANCE_REQUEST_TIMEOUT_MS },
 			)
 			.then(
@@ -116,6 +139,7 @@ export function useDraftEnhance(
 	return {
 		running: runningFor === sessionId,
 		blocked: runningFor !== null && runningFor !== sessionId,
+		step: runningFor === sessionId ? step : null,
 		toggle,
 	};
 }

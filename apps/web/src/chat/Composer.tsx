@@ -9,7 +9,13 @@ import {
 	RiSparkling2Line as Sparkles,
 	RiStopFill as StopFill,
 } from "@remixicon/react";
-import type { ComposerGrowthLimit, ThinkingLevel, WireModel } from "@thinkrail/contracts";
+import type {
+	ComposerGrowthLimit,
+	ImageContent,
+	PromptEnhanceProgress,
+	ThinkingLevel,
+	WireModel,
+} from "@thinkrail/contracts";
 import type { MessageKey } from "@thinkrail/locales";
 import { useT } from "@thinkrail/locales/react";
 import { Button, IconButton } from "@thinkrail/ui/button";
@@ -148,11 +154,21 @@ function highlightTint(state: SlotHighlightState): string {
 	}
 }
 
-/** The ✨ Enhance control's state; `blocked` while another chat's enhance is still running here. */
+const ENHANCE_STEP_KEYS = {
+	read: "chat.composer.enhance.stepRead",
+	grep: "chat.composer.enhance.stepGrep",
+	glob: "chat.composer.enhance.stepGlob",
+} as const satisfies Record<PromptEnhanceProgress["step"]["tool"], MessageKey>;
+
+/**
+ * The ✨ Enhance control's state; `blocked` while another chat's enhance is still running here, `step`
+ * the latest repository lookup of this chat's run.
+ */
 export interface ComposerEnhance {
 	running: boolean;
 	blocked: boolean;
-	toggle: () => void;
+	step: PromptEnhanceProgress["step"] | null;
+	toggle: (images: ImageContent[]) => void;
 }
 
 interface ComposerProps {
@@ -438,7 +454,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 		if (isPromptKeyEventComposing(e.nativeEvent)) return;
 		if (enhance && (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "e") {
 			e.preventDefault();
-			if (enhancing || enhanceReady) enhance.toggle();
+			if (enhancing || enhanceReady) enhance.toggle(images.map((i) => i.content));
 			return;
 		}
 		if (slots && !menuOpen) {
@@ -604,7 +620,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 								<FileChip
 									data-testid="composer-enhance-status"
 									icon={false}
-									label={t("chat.composer.enhance.running")}
+									label={
+										enhance?.step
+											? t(ENHANCE_STEP_KEYS[enhance.step.tool], { target: enhance.step.target })
+											: t("chat.composer.enhance.running")
+									}
 								/>
 							) : null}
 						</>
@@ -725,7 +745,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 								}
 								selected={enhancing}
 								disabled={!enhancing && !enhanceReady}
-								onClick={enhance.toggle}
+								onClick={() => enhance.toggle(images.map((i) => i.content))}
 							/>
 						) : null}
 						<IconButton
