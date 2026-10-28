@@ -1,0 +1,211 @@
+name: Release
+
+# Fork-owned public release controller (see .github/SPEC.md → Fork release). Builds every native target
+# through .github/actions/build-binary at one version, checksums the final bytes, tags v<version> and
+# publishes a GitHub Release whose asset names match install.sh / install.ps1. Artifacts are unsigned.
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel"
+        type: choice
+        options: [nightly, stable]
+        default: nightly
+      bump:
+        description: "Stable version bump (ignored for nightly)"
+        type: choice
+        options: [patch, minor, major, explicit]
+        default: patch
+      version:
+        description: "X.Y.Z, used only with bump=explicit"
+        type: string
+        default: ""
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Compute version
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - name: Require PostHog project key
+        env:
+          POSTHOG_PROJECT_KEY: ${{ secrets.POSTHOG_PROJECT_KEY }}
+        run: |
+          case "$POSTHOG_PROJECT_KEY" in
+            phc_?*) ;;
+            *) echo "::error::repository secret POSTHOG_PROJECT_KEY must be set to a phc_ project key"; exit 1 ;;
+          esac
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: next
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          BUMP: ${{ inputs.bump }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          case "$CHANNEL" in
+            nightly) version=$(bash .github/scripts/next-version.sh nightly) ;;
+            stable)
+              if [ "$BUMP" = explicit ]; then
+                version=$(bash .github/scripts/next-version.sh stable --bump=explicit --version="$VERSION")
+              else
+                version=$(bash .github/scripts/next-version.sh stable --bump="$BUMP")
+              fi
+              ;;
+            *) echo "::error::unsupported release channel $CHANNEL"; exit 1 ;;
+          esac
+          echo "Releasing $CHANNEL v$version from $GITHUB_SHA"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  gate:
+    name: Lint, typecheck & unit tests
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [version, gate]
+    timeout-minutes: 90
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: bun-darwin-arm64, runner: macos-14 }
+          - { target: bun-darwin-x64, runner: macos-15-intel }
+          - { target: bun-windows-x64, runner: windows-latest }
+          - { target: bun-linux-x64, runner: ubuntu-24.04 }
+          - { target: bun-linux-arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
+      - name: Install desktop runtime packages
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/desktop-apt
+        timeout-minutes: 10
+      - id: build
+        uses: ./.github/actions/build-binary
+        with:
+          version: ${{ needs.version.outputs.version }}
+          channel: ${{ inputs.channel }}
+          target: ${{ matrix.target }}
+          posthog-project-key: ${{ secrets.POSTHOG_PROJECT_KEY }}
+          posthog-cli-api-key: ${{ secrets.POSTHOG_CLI_API_KEY }}
+          posthog-cli-project-id: ${{ secrets.POSTHOG_CLI_PROJECT_ID }}
+      - name: Stage release assets
+        shell: bash
+        env:
+          CLI: ${{ steps.build.outputs.artifact-path }}
+          DESKTOP: ${{ steps.build.outputs.desktop-artifact-path }}
+        run: |
+          set -eu
+          mkdir -p release-assets
+          cp "$CLI" "$DESKTOP" release-assets/
+          ls -l release-assets
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Tag & publish
+    needs: [version, build]
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+      - name: Verify assets and write SHA256SUMS
+        working-directory: release
+        run: |
+          set -eu
+          expected=(
+            thinkrail-darwin-arm64 thinkrail-darwin-x64 thinkrail-windows-x64.exe
+            thinkrail-linux-x64 thinkrail-linux-arm64
+            thinkrail-desktop-darwin-arm64.dmg thinkrail-desktop-darwin-x64.dmg
+            thinkrail-desktop-windows-x64.zip
+            thinkrail-desktop-linux-x64.tar.gz thinkrail-desktop-linux-arm64.tar.gz
+          )
+          actual=$(ls -1 | sort)
+          wanted=$(printf '%s\n' "${expected[@]}" | sort)
+          if [ "$actual" != "$wanted" ]; then
+            echo "::error::release asset set mismatch"; diff <(echo "$wanted") <(echo "$actual") || true; exit 1
+          fi
+          sha256sum "${expected[@]}" > SHA256SUMS
+          cat SHA256SUMS
+      - name: Tag v${{ needs.version.outputs.version }}
+        env:
+          TAG: v${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          git fetch --force --tags origin
+          if existing=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}"); then
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $TAG already points at $existing, not $GITHUB_SHA"; exit 1
+            fi
+            echo "tag $TAG already exists at $GITHUB_SHA; skipping"
+          else
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+      - name: Publish GitHub Release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.version.outputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -eu
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release $TAG exists; replacing its assets"
+            gh release upload "$TAG" ./* --clobber
+            exit 0
+          fi
+          case "$CHANNEL" in
+            nightly) flags=(--prerelease --latest=false) ;;
+            *) flags=(--latest) ;;
+          esac
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ThinkRail $TAG ($CHANNEL) built from $GITHUB_SHA.
+
+          **Unsigned build.** These artifacts come from public CI without code-signing credentials: the macOS
+          binaries and DMGs are neither signed nor notarized, and the Windows executable and installer are not
+          Authenticode-signed. Gatekeeper and SmartScreen will warn. Verify downloads against \`SHA256SUMS\`.
+
+          Install the CLI from this fork with \`THINKRAIL_REPO=$GITHUB_REPOSITORY\` set for \`install.sh\` / \`install.ps1\`.
+          EOF
+          gh release create "$TAG" ./* --verify-tag --title "ThinkRail $TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"

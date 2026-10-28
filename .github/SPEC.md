@@ -9,22 +9,23 @@ depends-on: [module-cli, module-desktop, module-shared, module-repo-scripts, mod
 
 ## Responsibility
 
-Public PR gates, contribution templates, and reusable native build recipes. Release orchestration,
-signing/notary credentials,
+Public PR gates, contribution templates, reusable native build recipes, and this fork's unsigned
+public release workflow (below). Upstream's signed release orchestration, signing/notary credentials,
 source authorization, tags, checksums, and publication belong to `JetBrains/thinkrail-signing`.
 This module owns the public action inputs/outputs and artifact/version contract consumed by that private
-pipeline.
+pipeline and by the fork workflow.
 
 ## Boundary
 
 - **Owns:** public CI/site workflows, contribution templates, native build recipes, version calculation,
-  and the artifact
-  interface consumed by the private release controller.
+  the artifact interface consumed by the private release controller, and the fork's
+  `.github/workflows/release.yml`.
 - **Consumes:** CLI and desktop build commands, [[module-artifact-tests]] smoke entrypoints, shared
   version stamping, root conformance/unit/browser commands, git, and native platform tools.
-- **Forbidden:** product runtime logic; another public release controller; public signing credentials;
-  publication before required signing and verification; checksums over pre-signing bytes; or a
-  release-only application build path that bypasses normal package commands.
+- **Forbidden:** product runtime logic; a public release controller other than `release.yml`; public
+  signing credentials; publishing private signing intermediates or updater payloads from the fork
+  workflow; checksums over anything but the uploaded bytes; or a release-only application build path
+  that bypasses `build-binary` and the normal package commands.
 
 ## CI
 
@@ -122,6 +123,25 @@ name (`C:\Users\RUNNER~1\…`) while git reports the long one, so path fixtures 
 macOS and Linux ARM64 acceptance belongs to the release matrix. The Windows jobs install Bun and their
 dependencies without the Actions cache: restoring it took longer than a fresh install, and with no Windows
 job on main every PR and merge group kept its own copy, about half of the repository's cache quota.
+
+## Fork release
+
+This fork cannot use the private signing pipeline, so `.github/workflows/release.yml` is a deliberate
+departure from upstream's single private release controller. It is `workflow_dispatch`-only with inputs
+`channel` (`nightly|stable`), `bump` (`major|minor|patch|explicit`) and `version` (for `explicit`).
+One job runs `next-version.sh` once and every target consumes that version. A gate job runs
+`bun install --frozen-lockfile`, `lint`, `typecheck` and `test` on the dispatched commit before any build.
+A fail-fast matrix runs `build-binary` on the five target/runner pairs of the table below (Linux legs
+first install `desktop-apt` for the action's `xvfb-run` smokes) and uploads only `artifact-path` and
+`desktop-artifact-path`; the app archive and updater manifest/archive never ship. The publish job requires
+exactly those ten files, writes `SHA256SUMS` (`sha256sum` basenames) over them, creates `v<version>` at the
+dispatched commit or skips it when it already points there (failing when it points elsewhere), then
+`gh release create`s the release: nightly as a prerelease, stable as latest, the shapes `install.sh` /
+`install.ps1` resolve. A re-run finding the release replaces its assets instead of creating another.
+Secrets: `POSTHOG_PROJECT_KEY` (required, checked before building) and optional `POSTHOG_CLI_API_KEY` /
+`POSTHOG_CLI_PROJECT_ID`. Every artifact is unsigned and the release notes say so; the signing and
+verification gates of the sections below apply only to upstream's private pipeline. Installers and CLI
+self-update still default to `JetBrains/thinkrail`; fork users set `THINKRAIL_REPO`.
 
 ## Native build contract
 
