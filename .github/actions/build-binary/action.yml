@@ -143,18 +143,7 @@ runs:
           stable) environment="stable" ;;
           *) echo "::error::unsupported release channel $CHANNEL"; exit 1 ;;
         esac
-        case "$TARGET" in
-          bun-darwin-*) attempts=3 ;;
-          *) attempts=1 ;;
-        esac
-        for attempt in $(seq 1 "$attempts"); do
-          bun run --cwd apps/desktop "package:$environment" && exit 0
-          echo "::warning::desktop packaging attempt $attempt/$attempts failed"
-          for volume in /Volumes/ThinkRail*; do
-            [ -d "$volume" ] && hdiutil detach "$volume" -force || true
-          done
-        done
-        exit 1
+        bun run --cwd apps/desktop "package:$environment"
 
     - id: resolve-desktop
       name: Resolve desktop installer

@@ -1,9 +1,9 @@
 name: Release
 
 # Fork-owned public release controller (see .github/SPEC.md → Fork release). Every push to main publishes
-# a nightly; a manual dispatch publishes a nightly or stable. Builds every native target through
-# .github/actions/build-binary at one version, checksums the final bytes, tags v<version> and publishes a
-# GitHub Release whose asset names match install.sh / install.ps1. Artifacts are unsigned.
+# a nightly; a manual dispatch publishes a nightly or stable. Builds Windows x64 only through
+# .github/actions/build-binary, checksums the final bytes, tags v<version> and publishes a GitHub Release
+# whose asset names match install.ps1. Artifacts are unsigned.
 on:
   push:
     branches: [main]
@@ -77,35 +77,22 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Build bun-windows-x64
     needs: [version]
     timeout-minutes: 90
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - { target: bun-darwin-arm64, runner: macos-14 }
-          - { target: bun-darwin-x64, runner: macos-15-intel }
-          - { target: bun-windows-x64, runner: windows-latest }
-          - { target: bun-linux-x64, runner: ubuntu-24.04 }
-          - { target: bun-linux-arm64, runner: ubuntu-24.04-arm }
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - name: Install desktop runtime packages
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/desktop-apt
-        timeout-minutes: 10
       - id: build
         uses: ./.github/actions/build-binary
         with:
           version: ${{ needs.version.outputs.version }}
           channel: ${{ needs.version.outputs.channel }}
-          target: ${{ matrix.target }}
+          target: bun-windows-x64
           posthog-project-key: ${{ secrets.POSTHOG_PROJECT_KEY }}
           posthog-cli-api-key: ${{ secrets.POSTHOG_CLI_API_KEY }}
           posthog-cli-project-id: ${{ secrets.POSTHOG_CLI_PROJECT_ID }}
@@ -121,7 +108,7 @@ jobs:
           ls -l release-assets
       - uses: actions/upload-artifact@v5
         with:
-          name: release-${{ matrix.target }}
+          name: release-bun-windows-x64
           path: release-assets/
           if-no-files-found: error
           retention-days: 7
@@ -146,13 +133,7 @@ jobs:
         working-directory: release
         run: |
           set -eu
-          expected=(
-            thinkrail-darwin-arm64 thinkrail-darwin-x64 thinkrail-windows-x64.exe
-            thinkrail-linux-x64 thinkrail-linux-arm64
-            thinkrail-desktop-darwin-arm64.dmg thinkrail-desktop-darwin-x64.dmg
-            thinkrail-desktop-windows-x64.zip
-            thinkrail-desktop-linux-x64.tar.gz thinkrail-desktop-linux-arm64.tar.gz
-          )
+          expected=(thinkrail-windows-x64.exe thinkrail-desktop-windows-x64.zip)
           actual=$(ls -1 | sort)
           wanted=$(printf '%s\n' "${expected[@]}" | sort)
           if [ "$actual" != "$wanted" ]; then
@@ -195,11 +176,11 @@ jobs:
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           ThinkRail $TAG ($CHANNEL) built from $GITHUB_SHA.
 
-          **Unsigned build.** These artifacts come from public CI without code-signing credentials: the macOS
-          binaries and DMGs are neither signed nor notarized, and the Windows executable and installer are not
-          Authenticode-signed. Gatekeeper and SmartScreen will warn. Verify downloads against \`SHA256SUMS\`.
+          **Unsigned Windows build.** These artifacts come from public CI without code-signing credentials: the
+          executable and installer are not Authenticode-signed, so SmartScreen will warn. Verify downloads
+          against \`SHA256SUMS\`.
 
-          Install the CLI from this fork with \`THINKRAIL_REPO=$GITHUB_REPOSITORY\` set for \`install.sh\` / \`install.ps1\`.
+          Install the CLI from this fork with \`THINKRAIL_REPO=$GITHUB_REPOSITORY\` set for \`install.ps1\`.
           EOF
           gh release create "$TAG" ./* --verify-tag --title "ThinkRail $TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"

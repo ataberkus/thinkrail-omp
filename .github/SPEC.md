@@ -131,15 +131,15 @@ departure from upstream's single private release controller. Every push to `main
 `workflow_dispatch` publishes on demand with inputs `channel` (`nightly|stable`), `bump`
 (`major|minor|patch|explicit`) and `version` (for `explicit`). The one `release` concurrency group queues
 runs, so each computes its version after the previous one tagged. One job runs `next-version.sh` once and
-every target consumes that version and channel. The release runs no tests or smokes: it only proves every
+the build consumes that version and channel. The release runs no tests or smokes: it only proves the
 target builds and packages (PR CI owns verification).
-A fail-fast matrix runs `build-binary` on the five target/runner pairs of the table below (Linux legs
-first install `desktop-apt`) and uploads only `artifact-path` and
-`desktop-artifact-path`; the app archive and updater manifest/archive never ship. The publish job requires
-exactly those ten files, writes `SHA256SUMS` (`sha256sum` basenames) over them, creates `v<version>` at the
+The fork releases **Windows x64 only**: one `windows-latest` job runs `build-binary` for `bun-windows-x64`
+and uploads only `artifact-path` and `desktop-artifact-path`; the updater manifest/archive never ship.
+The publish job requires exactly `thinkrail-windows-x64.exe` and `thinkrail-desktop-windows-x64.zip`,
+writes `SHA256SUMS` (`sha256sum` basenames) over them, creates `v<version>` at the
 dispatched commit or skips it when it already points there (failing when it points elsewhere), then
-`gh release create`s the release: nightly as a prerelease, stable as latest, the shapes `install.sh` /
-`install.ps1` resolve. A re-run finding the release replaces its assets instead of creating another.
+`gh release create`s the release: nightly as a prerelease, stable as latest, the shapes `install.ps1`
+resolves. A re-run finding the release replaces its assets instead of creating another.
 Secrets are all optional: `POSTHOG_PROJECT_KEY` (when unset the release builds without analytics, with a
 warning; when set it must be `phc_…`, checked before building) and `POSTHOG_CLI_API_KEY` /
 `POSTHOG_CLI_PROJECT_ID`. Every artifact is unsigned and the release notes say so; the signing and
@@ -161,9 +161,6 @@ Its stable public outputs are:
 
 The recipe stamps the shared version, builds the CLI, invokes the normal Electrobun dev and channel
 builds, then collects exact target/channel outputs. It runs no smokes; artifact smokes live in PR CI.
-macOS legs retry packaging up to three times, detaching any leftover `ThinkRail*` volume, because hosted
-runners' `hdiutil create -srcfolder` intermittently undersizes the image ("No space left on device",
-actions/runner-images#7522).
 Update outputs preserve Electrobun's generated basenames and compressed bytes. The manifest is the exact
 `<stable|canary>-<macos|win|linux>-<arm64|x64>-update.json`. Its `artifact.file` is the archive basename:
 `stable-<platform>-ThinkRail[.app].tar.zst` for stable or
