@@ -1,6 +1,7 @@
 import {
 	RiArrowUpLine as ArrowUp,
 	RiArrowDownSLine as ChevronDown,
+	RiCloseLine as Close,
 	RiCornerDownLeftLine as EnterKey,
 	RiFileLine as FileIcon,
 	RiFolderLine as FolderIcon,
@@ -44,6 +45,7 @@ import {
 	usePendingSelection,
 	useSlashCommandCompletion,
 } from "@/prompt";
+import { canEnhanceDraft } from "./draftEnhance";
 import { FileChip } from "./FileChip";
 import {
 	ModelEffortPicker,
@@ -146,6 +148,13 @@ function highlightTint(state: SlotHighlightState): string {
 	}
 }
 
+/** The ✨ Enhance control's state; `blocked` while another chat's enhance is still running here. */
+export interface ComposerEnhance {
+	running: boolean;
+	blocked: boolean;
+	toggle: () => void;
+}
+
 interface ComposerProps {
 	value: string;
 	onChange: (value: string) => void;
@@ -175,6 +184,7 @@ interface ComposerProps {
 	onPickTemplate?: (name: string) => void;
 	onManageTemplates?: () => void;
 	templatesEmpty?: boolean;
+	enhance?: ComposerEnhance | null;
 }
 
 export interface ComposerHandle {
@@ -184,6 +194,8 @@ export interface ComposerHandle {
 	restoreAttachments: (attachments: ChatAttachment[]) => void;
 	openHistory: () => void;
 	refocus: () => void;
+	replaceDraftUndoable: (text: string) => void;
+	showError: (message: string) => void;
 }
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
@@ -212,6 +224,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 		onPickTemplate,
 		onManageTemplates,
 		templatesEmpty,
+		enhance,
 	},
 	handleRef,
 ) {
@@ -301,8 +314,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 		[onChange, focusSelection],
 	);
 
+	const replaceDraftUndoable = (text: string) => {
+		const el = ref.current;
+		recallIdxRef.current = null;
+		setSubmitError(null);
+		if (el) {
+			el.readOnly = false;
+			el.focus();
+			el.select();
+		}
+		// insertText keeps the swap on the textarea's native undo stack (Ctrl+Z); its input event reaches onChange.
+		if (!el || !document.execCommand("insertText", false, text)) onChange(text);
+		setSlotSession(null);
+		focusSelection(text.length);
+	};
+
+	const enhancing = enhance?.running ?? false;
+	const enhanceReady = !!enhance && !enhance.blocked && canEnhanceDraft(value);
+
 	const canSubmit = (raw: string) =>
-		!templatePending && pendingImages === 0 && (!!raw.trim() || images.length > 0);
+		!enhancing && !templatePending && pendingImages === 0 && (!!raw.trim() || images.length > 0);
 	const canSend = canSubmit(value);
 
 	const openModelPicker = (query: string) => {
@@ -387,6 +418,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 			if (slot) focusSelection(slot.start, slot.end);
 			else focusSelection(caret);
 		},
+		replaceDraftUndoable,
+		showError: setSubmitError,
 	}));
 
 	const submit = (behavior: SubmitBehavior) => {
@@ -403,6 +436,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
 	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
 		if (isPromptKeyEventComposing(e.nativeEvent)) return;
+		if (enhance && (e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "e") {
+			e.preventDefault();
+			if (enhancing || enhanceReady) enhance.toggle();
+			return;
+		}
 		if (slots && !menuOpen) {
 			if (e.key === "Tab") {
 				e.preventDefault();
@@ -551,14 +589,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 			<PromptImageChips
 				controller={attachedImages}
 				leading={
-					submitError ? (
-						<FileChip
-							data-testid="composer-command-error"
-							tone="error"
-							icon={false}
-							title={submitError}
-							label={submitError}
-						/>
+					submitError || enhancing ? (
+						<>
+							{submitError ? (
+								<FileChip
+									data-testid="composer-command-error"
+									tone="error"
+									icon={false}
+									title={submitError}
+									label={submitError}
+								/>
+							) : null}
+							{enhancing ? (
+								<FileChip
+									data-testid="composer-enhance-status"
+									icon={false}
+									label={t("chat.composer.enhance.running")}
+								/>
+							) : null}
+						</>
 					) : null
 				}
 			/>
@@ -624,6 +673,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 							ref={ref}
 							data-testid="chat-input"
 							value={value}
+							readOnly={enhancing}
+							aria-busy={enhancing || undefined}
 							onScroll={syncBackdropScroll}
 							onChange={(e) => {
 								const next = e.target.value;
@@ -659,6 +710,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 						/>
 					</div>
 					<div className="col-start-3 row-start-2 flex shrink-0 items-center gap-4 self-end">
+						{enhance ? (
+							<IconButton
+								icon={enhancing ? Close : Sparkles}
+								data-testid="composer-enhance"
+								data-running={enhancing || undefined}
+								label={
+									enhancing ? t("chat.composer.enhance.cancel") : t("chat.composer.enhance.label")
+								}
+								tooltip={
+									enhancing
+										? t("chat.composer.enhance.cancel")
+										: t("chat.composer.enhance.tooltip", { shortcut: "Cmd/Ctrl+Shift+E" })
+								}
+								selected={enhancing}
+								disabled={!enhancing && !enhanceReady}
+								onClick={enhance.toggle}
+							/>
+						) : null}
 						<IconButton
 							icon={History}
 							data-testid="history-open"

@@ -44,6 +44,7 @@ import type {
 	Project,
 	ProjectPathStatus,
 	ProjectTrustSummary,
+	PromptEnhanceMessage,
 	ProviderStatusReport,
 	PrPreview,
 	ResourceMeta,
@@ -122,7 +123,8 @@ export type TemplateReadLocation =
 	| { projectId: string; workspaceId?: never }
 	| { workspaceId?: never; projectId?: never };
 
-export const PROTOCOL_VERSION = 93;
+export const PROTOCOL_VERSION = 94;
+export const PROMPT_ENHANCE_PROTOCOL_VERSION = 94;
 export const TOOL_RESPONSE_PROTOCOL_VERSION = 93;
 export const USER_THEMES_PROTOCOL_VERSION = 92;
 export const HOST_ENVIRONMENT_PROTOCOL_VERSION = 91;
@@ -247,6 +249,7 @@ export const WS_METHODS = {
 	prPreview: "pr.preview",
 	prOpen: "pr.open",
 	prGenerate: "pr.generate",
+	promptEnhance: "prompt.enhance",
 	prReady: "pr.ready",
 	prMerge: "pr.merge",
 	prReopen: "pr.reopen",
@@ -689,6 +692,10 @@ export interface WsMethodMap {
 	"pr.generate": {
 		params: { workspaceId: string; sessionId?: string; template?: string };
 		result: { body: string | null };
+	};
+	"prompt.enhance": {
+		params: { draft: string; conversation?: PromptEnhanceMessage[] };
+		result: { text: string | null };
 	};
 	"pr.ready": {
 		params: { workspaceId: string; branch: string; number: number };

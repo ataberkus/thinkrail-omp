@@ -235,6 +235,12 @@ export interface PrPreview extends PrDraft {
 	source?: PrBodySource;
 }
 
+/** `prompt.enhance` (v94): one recent chat turn the enhancer reads to resolve what a draft refers to. */
+export interface PromptEnhanceMessage {
+	role: "user" | "assistant";
+	text: string;
+}
+
 export type ReviewProvider = "github" | "gitlab";
 
 /** `workspace.branchStatus`: where the branch stands against origin and its base, review or not. */

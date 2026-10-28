@@ -929,7 +929,7 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
   boundary; transient read failure keeps the last good snapshot rather than replacing it with guessed state.
 - **Adaptive composer geometry** (`Composer`) — an idle draft that fits one visual line renders as a
   shared two-tier shell: a full-width, one-visual-line message row above a stable action footer. The
-  model · effort pill is the footer's one left-hand trigger; History and Send remain explicit on the right. A wrap, explicit
+  model · effort pill is the footer's one left-hand trigger; Enhance (when the host has it), History and Send remain explicit on the right. A wrap, explicit
   newline, or width change that makes the draft exceed one visual line grows the message row without moving
   the footer; fitting one line again shrinks only the message row. This is one persistent textarea, never
   conditional twins — the transition cannot lose focus, caret/selection, recall, draft, or a template-slot
@@ -953,6 +953,26 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
   `styles/COLOR.md`). **Compact mode**: below the chat column's `@md` container width (phones, narrow
   splits) labels and keycap hide and the send pill collapses to an icon, so the model pill keeps its room.
   Labels use `ui.action`.
+- **Prompt enhance** (`Composer` control, `useDraftEnhance.ts` orchestration, pure rules in the store-free
+  `draftEnhance.ts`) — ported from omp-companion's ✨ Enhance. A Remix `RiSparkling2Line` `IconButton ghost m`
+  (`composer-enhance`) leads the trailing cluster, rendered only from a `PROMPT_ENHANCE_PROTOCOL_VERSION`
+  (v94) host; `Cmd/Ctrl+Shift+E` in the message box does the same. It is disabled for an empty draft or a
+  `/` command, and while another chat's enhance runs in this view. A click sends the trimmed draft plus the
+  last 6 user/assistant turns (`enhanceConversation`: each assistant run reduced to its last reply with
+  text) to `prompt.enhance` with a client timeout outliving the host's. **While it runs** the textarea is
+  `readOnly`, send is disarmed, a `composer-enhance-status` chip shows, and the control turns into
+  `RiCloseLine` *Cancel enhance* (`data-running`, `selected`) — a second click cancels instead of starting
+  another; the wire has no cancel, so a cancelled answer is only dropped, and cancel says nothing. Streaming
+  does not gate it: the send modes work again once it settles. **Settling** (`enhanceOutcome`) re-reads the
+  run's session draft from the store: unchanged → `replaceDraftUndoable` (select-all +
+  `execCommand("insertText")`, so Ctrl+Z restores the original; a direct `onChange` fallback) with a
+  *Prompt enhanced* toast whose **Undo** restores the original; changed meanwhile (chat switched in this
+  view, text inserted) → never overwritten, an info toast offers *Use enhanced prompt*; a session that no
+  longer exists drops it. A run for a chat this view no longer shows writes that chat's store draft instead.
+  A `null` answer or a rejected request leaves the draft as is and shows the reason in the
+  `composer-command-error` chip (a toast when the chat is not shown). Deliberate departures from the
+  companion: the host runs a tool-free cheap one-shot ([[submodule-server-assist]]), so no repository
+  lookups, image context, progress steps, or role-chosen model.
 - **Queued messages: the pending strip** (`QueueStrip.tsx`, props-driven: `queue` + `onEdit`/`onRemove`)
   — the web mirror of pi's interactive-mode pending-messages area. A **streaming send never renders an
   optimistic transcript bubble** (see the store SPEC's echo contract): `ChatView.onSubmit` skips
@@ -1565,7 +1585,8 @@ Unknown custom messages retain their existing behavior.
   control, transcript sync, completion-ack, the extension-dialog reply, and the
   `ChatActions`/`InteractionStatesContext`/`PendingExtUiContext` providers),
   `chatPreferences.ts` (the client-local persistence adapter), plus the hooks and dialogs
-  it composes: `useChatTodos.ts`, `useHistorySearch.ts`,
+  it composes: `useChatTodos.ts`, `useHistorySearch.ts`, **`useDraftEnhance.ts`** (the `prompt.enhance`
+  request and its draft swap / toasts),
   `useModelCatalog.ts`, **`useChatResources.ts`** (the Resources hydration/control/log-read seam),
   **`useFreshResults.ts`** (the per-chat "new result" seen set),
   **`useSessionStats.ts`** (generation/revision-fenced authoritative telemetry reads),

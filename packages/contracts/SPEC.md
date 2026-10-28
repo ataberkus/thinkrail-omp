@@ -652,7 +652,10 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
   deleteBranch` → `MergePrResult { merged, branchDeleted, deleteError? }` — `merged: false` when GitHub only
   queued it (merge queue / auto-merge), in which case the branch is never deleted; a merge that landed while
   the branch deletion failed is a success with the reason), and **`workspace.deleteRemoteBranch`** (`{ workspaceId,
-  branch }` → `Ack`; `PUSH_AUTH_FAILED` as for a push) /
+  branch }` → `Ack`; `PUSH_AUTH_FAILED` as for a push) / **`prompt.enhance`** (v94,
+  `PROMPT_ENHANCE_PROTOCOL_VERSION`; `{ draft, conversation?: PromptEnhanceMessage[] }` → `{ text: string | null }`,
+  the message box's best-effort one-shot rewrite of a draft; `conversation` is the client's recent
+  `user`/`assistant` text, bounded again by the host; `null` when no model answered or the draft is empty) /
   **`project.setTrust`** (persist a project's trust grant → the updated `Project`; gates its committed
   cross-agent skill aliases; `resources: true` also grants pi-level resource trust, see Project trust) /
   **`skill.list`** (a pre-session, skill-only `SlashCommandInfo[]` preview for a `projectId`, resolved from

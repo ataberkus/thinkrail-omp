@@ -74,6 +74,7 @@ import { useModelPreferences } from "./useModelPreferences";
 import { useSessionStats } from "./useSessionStats";
 import "./tools/register";
 import type { ChatAttachment } from "./types";
+import { useDraftEnhance } from "./useDraftEnhance";
 import { useHistorySearch } from "./useHistorySearch";
 
 const TRY_AGAIN_PROMPT = "Try again.";
@@ -190,6 +191,7 @@ export default function ChatView({
 		[workspaceId, sessionId],
 	);
 	const composerRef = useRef<ComposerHandle>(null);
+	const enhance = useDraftEnhance(sessionId, composerRef);
 	const transcriptRef = useRef<ChatTranscriptHandle>(null);
 	const resources = useChatResources(workspaceId, sessionId);
 	const freshResults = useFreshResults(
@@ -876,6 +878,7 @@ export default function ChatView({
 					onPickTemplate={onPickTemplate}
 					onManageTemplates={onManageTemplates}
 					templatesEmpty={templatesEmpty}
+					enhance={enhance}
 				/>
 			</div>
 			<TemplateEditorDialog

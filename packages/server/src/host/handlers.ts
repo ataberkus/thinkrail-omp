@@ -82,7 +82,7 @@ import {
 	type SendMode,
 	track,
 } from "../analytics";
-import { suggestPrDescription } from "../assist";
+import { suggestPrDescription, suggestPromptEnhancement } from "../assist";
 import {
 	cancelLogin,
 	connectJbcentral,
@@ -666,6 +666,7 @@ const handlers: WsHandlers = {
 	"pr.generate": async (params) => ({
 		body: await suggestPrDescription(await prDraftInput(params)),
 	}),
+	"prompt.enhance": async (params) => ({ text: await suggestPromptEnhancement(params) }),
 	"pr.ready": async (p) => {
 		recordWorkspaceActivity(p.workspaceId);
 		await readyPr(p);

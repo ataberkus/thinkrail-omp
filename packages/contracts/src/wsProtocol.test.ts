@@ -36,6 +36,7 @@ import {
 	PROJECT_RENAME_PROTOCOL_VERSION,
 	PROJECT_TEMPLATE_PREVIEW_PROTOCOL_VERSION,
 	PROJECT_TRUST_PROTOCOL_VERSION,
+	PROMPT_ENHANCE_PROTOCOL_VERSION,
 	PROTOCOL_VERSION,
 	RESOURCE_META_PROTOCOL_VERSION,
 	REVIEW_ACTIONS_PROTOCOL_VERSION,
@@ -224,10 +225,16 @@ test("local language files and the locale setting are pinned to v89", () => {
 });
 
 test("tool responses replace the ask-only answer method at v93", () => {
-	expect(PROTOCOL_VERSION).toBe(93);
+	expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(TOOL_RESPONSE_PROTOCOL_VERSION);
 	expect(TOOL_RESPONSE_PROTOCOL_VERSION).toBe(93);
 	expect(WS_METHODS.sessionRespondToTool).toBe("session.respondToTool");
 	expect(WS_METHODS.sessionAnswerQuestion).toBe("session.answerQuestion");
+});
+
+test("message-box prompt enhancement is pinned to v94", () => {
+	expect(PROTOCOL_VERSION).toBe(94);
+	expect(PROMPT_ENHANCE_PROTOCOL_VERSION).toBe(94);
+	expect(WS_METHODS.promptEnhance).toBe("prompt.enhance");
 });
 
 test("user theme files are pinned to v92", () => {

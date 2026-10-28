@@ -15,8 +15,9 @@ task service." Each task owns its prompt, output parsing/guards, and graceful-de
 blocks or crashes its caller. The current task drafts a completed plan's summary when the agent wrote
 none. Naming chats and workspaces is **not** an assist task: the main agent names them through
 `set_title` (see [[submodule-server-agent]]), because every helper-model naming scheme produced names
-users wanted to fix. PR descriptions are the second task. The tasks are a **library
-surface** — no wire method; consumers are host-side flows.
+users wanted to fix. PR descriptions are the second task; rewriting a message-box draft into a complete
+prompt (`prompt.enhance`) is the third. The tasks are a **library surface** — assist owns no wire method;
+`host` composes the methods that expose them.
 
 ## Boundary
 
@@ -38,8 +39,19 @@ surface** — no wire method; consumers are host-side flows.
     best-effort terms. With a `template` the draft keeps the template's headings and checklist and fills
     their bodies; `toPrDescription(raw)` is the output guard (strip a code fence, clamp length, `null` when
     empty).
+  - `suggestPromptEnhancement({ draft, conversation? })` → the message box's ✨ Enhance rewrite: the draft
+    expanded into a grounded engineering prompt (Request / Inferred requirements / Assumptions / Done when,
+    by intent; a question stays a question) in the draft's language, or `null` on the same best-effort terms
+    and for an empty or over-20 000-character draft. The input is the draft plus at most the last 6
+    `user`/`assistant` turns (the latest assistant reply clipped to 6 000 characters, older turns to 1 500,
+    both ends kept), wrapped in `<conversation>` / `<draft>` with tag lookalikes defused so quoted text
+    cannot close them. It adapts omp-companion's enhancer, minus its read-only repository lookups: one
+    tool-free completion cannot read the code, so the prompt forbids naming paths or symbols the draft and
+    conversation do not contain. `toEnhancedPrompt(raw)` is the output guard (unwrap a fence around the
+    whole prompt, not one that merely opens it; `null` when empty).
 - **Public surface (barrel):** `setOneShotRunner`, `suggestPlanSummary`, `toPlanSummary`,
-  `suggestPrDescription`, `toPrDescription`, `OneShotRunner`, `PlanSummaryStep`, `PrDescriptionInput`.
+  `suggestPrDescription`, `toPrDescription`, `suggestPromptEnhancement`, `toEnhancedPrompt`,
+  `OneShotRunner`, `PlanSummaryStep`, `PrDescriptionInput`, `PromptEnhanceInput`, `PromptEnhanceMessage`.
 - **Allowed deps:** `agent` (the `completeOnce`/`OneShotRequest`/`OneShotResult` primitive, via its
   barrel); Node.
 - **Forbidden:** `host`; **`@oh-my-pi/pi-ai` / `pi-coding-agent` directly** (model access + dispatch

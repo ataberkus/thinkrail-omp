@@ -606,7 +606,8 @@ enabled/confirmed choice before entering analytics attribution.
   the measurement fails it falls back to the tracking ref only for a single-URL origin, and a split origin
   reports `published: null` (unknown) rather than the fetch repository's answer; `workspace.push` stamps activity
   like `pr.open` and drops the worktree's review cache through `pr`; `pr.generate` is composed here —
-  `pr` gathers the bounded input (`prDraftInput`), `assist` drafts — so `pr` gains no `assist` edge. **Review
+  `pr` gathers the bounded input (`prDraftInput`), `assist` drafts — so `pr` gains no `assist` edge;
+  `prompt.enhance` (v94) forwards its params straight to `assist.suggestPromptEnhancement`. **Review
   actions (v88):** `pr.ready` / `pr.merge` / `pr.reopen` / `workspace.deleteRemoteBranch` delegate to `pr` and
   stamp activity like a push; the snapshot follows on the client's next fresh `workspace.branchStatus`
   (a merged review needs the provider's merge time, which only the lookup has). `skipFetch` on
