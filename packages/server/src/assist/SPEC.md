@@ -49,7 +49,7 @@ prompt (`prompt.enhance`) is the third. The tasks are a **library surface** — 
     both ends kept), wrapped in `<conversation>` / `<draft>` with tag lookalikes defused so quoted text
     cannot close them; attached images ride along. It ports omp-companion's enhancer whole: one
     `agent.runReadOnlyAgent` run on the chat's own model and thinking level in the chat's folder, at most
-    8 read/grep/glob lookups, 180 s; `onStep` reports each lookup. `toEnhancedPrompt(raw)` is the output
+    12 read/grep/glob lookups, 180 s; `onStep` reports each lookup. `toEnhancedPrompt(raw)` is the output
     guard (unwrap a fence around the whole prompt, not one that merely opens it; `null` when empty).
 - **Public surface (barrel):** `setOneShotRunner`, `setReadOnlyRunner`, `suggestPlanSummary`,
   `toPlanSummary`, `suggestPrDescription`, `toPrDescription`, `suggestPromptEnhancement`,

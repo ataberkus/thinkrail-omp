@@ -186,9 +186,9 @@ test("suggestPromptEnhancement rewrites the draft in the chat's repo with the re
 	});
 	expect(out).toBe("## Request\n\nFix the stall.");
 	expect(sessionId).toBe("s1");
-	expect(maxLookups).toBe(8);
+	expect(maxLookups).toBe(12);
 	expect(images).toBe(1);
-	expect(system).toContain("at most 8 tool calls");
+	expect(system).toContain("at most 12 tool calls");
 	expect(system).toContain("prompt enhancer");
 	expect(seen).not.toContain("turn2\n");
 	expect(seen).toStartWith("<conversation>\nAssistant: turn3\n");
