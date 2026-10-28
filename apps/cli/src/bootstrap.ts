@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { type BuildKind, bootHost } from "@thinkrail/server";
+import { isPortFree } from "@thinkrail/shared/freePort";
 import { spawnDetached } from "@thinkrail/shared/spawn";
 import { printStartupMark } from "@thinkrail/shared/startupMark";
 import { channel, posthogProjectKey, version } from "@thinkrail/shared/version";
@@ -65,10 +66,15 @@ async function bootstrap(build: BuildKind): Promise<void> {
 		platform: process.platform,
 		execPath: process.execPath,
 	});
-	const { server, port, requested } = await bootHost({
+	if (!(await isPortFree(options.port, bindHost))) {
+		throw new Error(
+			`Port ${options.port} on ${bindHost} is in use (another ThinkRail host?). Stop it, or pass --port <n>.`,
+		);
+	}
+	const { server, port } = await bootHost({
 		port: options.port,
 		host: bindHost,
-		portMode: "free",
+		portMode: "exact",
 		resolveShellEnv: true,
 		staticDir,
 		appVersion: version,
@@ -84,9 +90,6 @@ async function bootstrap(build: BuildKind): Promise<void> {
 		...(hostUpdate ? { hostUpdate } : {}),
 		...(options.projectDir ? { projectPath: resolve(process.cwd(), options.projectDir) } : {}),
 	});
-	if (port !== requested) {
-		console.warn(`Port ${requested} is in use; using free port ${port}.`);
-	}
 
 	const openHost = bindHost === "0.0.0.0" || bindHost === "::" ? "localhost" : bindHost;
 	const url = `http://${openHost}:${port}`;

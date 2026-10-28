@@ -34,7 +34,7 @@ The \`update\` subcommand re-downloads + installs the latest build for your chan
 unless you ask for it to go). Both take \`--help\`.
 
 Options:
-  --port <n>     Listen port (default ${DEFAULT_PORT}; falls back to a free port if taken).
+  --port <n>     Listen port (default ${DEFAULT_PORT}; exits with an error if taken).
   --host <h>     Bind host (default ${DEFAULT_HOST}).
   --tailscale    Serve on this machine's Tailscale address and print the URL to open
                  on another device in the tailnet (e.g. a phone). Needs the \`tailscale\`

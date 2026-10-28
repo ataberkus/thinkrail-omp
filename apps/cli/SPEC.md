@@ -21,10 +21,14 @@ and process-boot logic lives in `packages/server`.
 2. Resolve the static dir (`THINKRAIL_STATIC_DIR`, else the built web app shipped beside the bin) and
    warn if it is missing.
    With `--tailscale`, resolve the tailnet address first (see *Tailscale mode*) and bind to it.
-3. Await `bootHost({ portMode: "free", resolveShellEnv: true, … })`. The shared boot path installs crash
+3. Await `bootHost({ portMode: "exact", resolveShellEnv: true, … })`. The shared boot path installs crash
    logging, repairs the login-shell environment, initializes the current PI runtime/Central watcher,
-   resolves a free serving port at or above the requested one, and embeds the host in this Bun process. Another CLI or desktop
-   host using the same data directory does not block startup; each process serves its own endpoint.
+   binds exactly the requested port, and embeds the host in this Bun process. The port is stable so a
+   bookmarked URL (a phone over Tailscale) keeps working. A taken port fails the launch (exit 1) instead of
+   moving: before boot the CLI probes it with `isPortFree` (a connect, not a bind), because Bun binds
+   `localhost` on whichever of IPv4/IPv6 is still free and would silently share the port with an older
+   host. Another CLI or desktop host using the same data directory does not block startup when it serves
+   a different port.
 4. On interactive stdout render the shared recursive ThinkRail startup mark with honest `host ready`
    status + the resolved endpoint, retain the parse-stable `thinkrail → <url>` line, and open the browser
    there (cross-platform: `open` / `start` / `xdg-open`, best-effort), unless `--no-open`. Exit-only
@@ -41,7 +45,7 @@ is a **subcommand** (`thinkrail update [--channel stable|nightly]
 *Self-update* / *Uninstall* below. The set lives in `args.ts` (`parseSubcommand`) because the compiled
 entry needs it too: a subcommand never boots the host, so it must not pay for (or, in `uninstall`'s case,
 re-create) the staged asset cache. Otherwise the launch args: `--port` (stable default 24242,
-scans upward to the next free port on collision), `--host` (default `localhost`), `--tailscale` (see
+bound exactly; a taken port is a launch error), `--host` (default `localhost`), `--tailscale` (see
 *Tailscale mode*), `--no-open`,
 `--no-analytics` (**per-run suppression of additional analytics only** — basic events remain on;
 the durable additional-data choice is Settings → Privacy, see [[submodule-server-analytics]]),
@@ -67,7 +71,7 @@ LAN. Auth stays external per [[architecture]] decision 7: tailnet ACLs and devic
 - The host binds to that IPv4 only (`Bun.serve` takes one hostname), so `localhost` does not answer: the
   local browser opens `http://<tailnet-ip>:<port>`, and the startup mark plus an extra line show the phone
   URL `http://<MagicDNS name, trailing dot dropped>:<port>`, or the IP when MagicDNS is off. Both use the
-  port `bootHost` resolved, not the requested one.
+  requested port, which `bootHost` binds exactly.
 - Failure is one line and exit 1, never a fallback to another address: the CLI missing from PATH, a
   daemon that does not answer in 5 s, a daemon that is not running, a state other than `Running` (logged
   out, stopped), or no IPv4. `--tailscale`/`THINKRAIL_TAILSCALE` together with `--host`/`THINKRAIL_HOST` is
