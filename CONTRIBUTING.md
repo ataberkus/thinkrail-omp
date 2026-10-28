@@ -44,6 +44,10 @@ bun run desktop:dev                  # package and open the Electrobun app
 bun run desktop:build                # package without opening it
 ```
 
+On Windows, `start_web.bat` (`bun run dev`) and `start_desktop.bat` (`bun run desktop:dev`) at the
+repository root do the same from any directory or by double-click; they check for Bun and run
+`bun install` when `node_modules` is missing.
+
 Desktop commands use the standard Electrobun CLI/configuration. Its pre-build hook builds the shared UI
 and stages ThinkRail's PI/native resources; Electrobun owns preload bundling and installer creation.
 Create host-native installers with `bun run desktop:package:stable` or `bun run desktop:package:canary`;

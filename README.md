@@ -246,6 +246,9 @@ bun run desktop:dev                  # package and open the Electrobun app
 bun run desktop:build                # package without opening it
 ```
 
+On Windows, `start_web.bat` and `start_desktop.bat` at the repository root run `bun run dev` and
+`bun run desktop:dev` from any directory or by double-click, installing dependencies first if needed.
+
 [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the checks, the end-to-end suites, desktop packaging, and the
 repository layout.
 
