@@ -7,6 +7,7 @@ import { channel, posthogProjectKey, version } from "@thinkrail/shared/version";
 import { type CliOptions, parseArgs, parseSubcommand, USAGE } from "./args";
 import { openUiThenStartAttribution } from "./attributionReadiness";
 import { BINARY_SOURCE_MAP_BASE } from "./binarySourceMap";
+import { resolveTailscaleAddress } from "./tailscale";
 import { runUninstall } from "./uninstall";
 import { createCliHostUpdate, runUpdate } from "./update";
 
@@ -57,13 +58,16 @@ async function bootstrap(build: BuildKind): Promise<void> {
 		console.warn(`Web app not found at ${staticDir} — run \`bun run build:web\` to build the UI.`);
 	}
 
+	const tailnet = options.tailscale ? resolveTailscaleAddress() : null;
+	const bindHost = tailnet?.ip ?? options.host;
+
 	const hostUpdate = createCliHostUpdate(build, channel, version, {
 		platform: process.platform,
 		execPath: process.execPath,
 	});
 	const { server, port, requested } = await bootHost({
 		port: options.port,
-		host: options.host,
+		host: bindHost,
 		portMode: "free",
 		resolveShellEnv: true,
 		staticDir,
@@ -84,10 +88,12 @@ async function bootstrap(build: BuildKind): Promise<void> {
 		console.warn(`Port ${requested} is in use; using free port ${port}.`);
 	}
 
-	const openHost = options.host === "0.0.0.0" || options.host === "::" ? "localhost" : options.host;
+	const openHost = bindHost === "0.0.0.0" || bindHost === "::" ? "localhost" : bindHost;
 	const url = `http://${openHost}:${port}`;
-	printStartupMark({ status: "host ready", endpoint: url });
+	const phoneUrl = tailnet ? `http://${tailnet.dnsName ?? tailnet.ip}:${port}` : null;
+	printStartupMark({ status: "host ready", endpoint: phoneUrl ?? url });
 	console.log(`thinkrail → ${url}`);
+	if (phoneUrl) console.log(`On a device in your tailnet (e.g. your phone), open ${phoneUrl}`);
 	openUiThenStartAttribution(options.open, url, openBrowser, server.startAttributionClaim);
 }
 

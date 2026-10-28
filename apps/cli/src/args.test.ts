@@ -22,6 +22,7 @@ describe("parseArgs", () => {
 		expect(parseArgs([], {})).toEqual({
 			port: DEFAULT_PORT,
 			host: DEFAULT_HOST,
+			tailscale: false,
 			open: true,
 			noAnalytics: false,
 			verbose: false,
@@ -42,6 +43,24 @@ describe("parseArgs", () => {
 		expect(parseArgs(["--verbose"], {}).verbose).toBe(true);
 		expect(parseArgs([], { THINKRAIL_LOG_LEVEL: "debug" }).verbose).toBe(false);
 		expect(parseArgs([], {}).verbose).toBe(false);
+	});
+
+	test("--tailscale or a truthy THINKRAIL_TAILSCALE turns on Tailscale mode", () => {
+		expect(parseArgs(["--tailscale"], {}).tailscale).toBe(true);
+		expect(parseArgs([], { THINKRAIL_TAILSCALE: "1" }).tailscale).toBe(true);
+		expect(parseArgs([], { THINKRAIL_TAILSCALE: "true" }).tailscale).toBe(true);
+		for (const off of ["", "0", "false", "FALSE"]) {
+			expect(parseArgs([], { THINKRAIL_TAILSCALE: off }).tailscale).toBe(false);
+		}
+	});
+
+	test("Tailscale mode refuses a second source for the bind address", () => {
+		expect(() => parseArgs(["--tailscale", "--host", "0.0.0.0"], {})).toThrow(/--tailscale/);
+		expect(() => parseArgs(["--host=0.0.0.0"], { THINKRAIL_TAILSCALE: "1" })).toThrow(/--host/);
+		expect(() => parseArgs(["--tailscale"], { THINKRAIL_HOST: "0.0.0.0" })).toThrow(
+			/THINKRAIL_HOST/,
+		);
+		expect(parseArgs(["--host", "0.0.0.0"], { THINKRAIL_TAILSCALE: "0" }).host).toBe("0.0.0.0");
 	});
 
 	test("flags win over env over defaults", () => {

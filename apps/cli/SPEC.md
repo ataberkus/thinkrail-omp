@@ -20,6 +20,7 @@ and process-boot logic lives in `packages/server`.
 1. Parse argv + env into options (`src/args.ts`, a pure function); `--help` prints usage and exits.
 2. Resolve the static dir (`THINKRAIL_STATIC_DIR`, else the built web app shipped beside the bin) and
    warn if it is missing.
+   With `--tailscale`, resolve the tailnet address first (see *Tailscale mode*) and bind to it.
 3. Await `bootHost({ portMode: "free", resolveShellEnv: true, … })`. The shared boot path installs crash
    logging, repairs the login-shell environment, initializes the current PI runtime/Central watcher,
    resolves a free serving port at or above the requested one, and embeds the host in this Bun process. Another CLI or desktop
@@ -40,7 +41,8 @@ is a **subcommand** (`thinkrail update [--channel stable|nightly]
 *Self-update* / *Uninstall* below. The set lives in `args.ts` (`parseSubcommand`) because the compiled
 entry needs it too: a subcommand never boots the host, so it must not pay for (or, in `uninstall`'s case,
 re-create) the staged asset cache. Otherwise the launch args: `--port` (stable default 24242,
-scans upward to the next free port on collision), `--host` (default `localhost`), `--no-open`,
+scans upward to the next free port on collision), `--host` (default `localhost`), `--tailscale` (see
+*Tailscale mode*), `--no-open`,
 `--no-analytics` (**per-run suppression of additional analytics only** — basic events remain on;
 the durable additional-data choice is Settings → Privacy, see [[submodule-server-analytics]]),
 `--verbose` (debug-level logging — threaded to `bootHost` as `verbose: true`; the log files under
@@ -49,8 +51,30 @@ module is that variable's single reader — same pattern as `THINKRAIL_NO_ANALYT
 it too),
 `-v`/`--version` (print the baked version and exit), `-h`/`--help`, and one positional `project-dir` (a
 git repo to open as a project on boot, best-effort). Env defaults: `THINKRAIL_PORT` / `THINKRAIL_HOST` /
-`THINKRAIL_STATIC_DIR` (flag > env > default). `THINKRAIL_NO_ANALYTICS` is documented in `--help` but
+`THINKRAIL_STATIC_DIR` (flag > env > default); `THINKRAIL_TAILSCALE` enables Tailscale mode for any value but
+empty/`0`/`false`. `THINKRAIL_NO_ANALYTICS` is documented in `--help` but
 deliberately **not** parsed here — the host's analytics module is its single reader (see below).
+
+## Tailscale mode
+
+`--tailscale` serves the host to other devices on the user's tailnet (a phone) without exposing it on the
+LAN. Auth stays external per [[architecture]] decision 7: tailnet ACLs and device identity, no login or token.
+
+- `src/tailscale.ts` runs `tailscale status --json` before `bootHost` under `@thinkrail/shared/spawn`'s
+  `spawnSyncCaptured` with a 5 s budget. `server/subprocess`'s `runBounded` is not on `@thinkrail/server`'s
+  public surface, and a synchronous bounded run is harmless before boot: no event loop is serving yet.
+  The pure `parseTailscaleStatus` reads `BackendState`, the IPv4 in `Self.TailscaleIPs` and `Self.DNSName`.
+- The host binds to that IPv4 only (`Bun.serve` takes one hostname), so `localhost` does not answer: the
+  local browser opens `http://<tailnet-ip>:<port>`, and the startup mark plus an extra line show the phone
+  URL `http://<MagicDNS name, trailing dot dropped>:<port>`, or the IP when MagicDNS is off. Both use the
+  port `bootHost` resolved, not the requested one.
+- Failure is one line and exit 1, never a fallback to another address: the CLI missing from PATH, a
+  daemon that does not answer in 5 s, a daemon that is not running, a state other than `Running` (logged
+  out, stopped), or no IPv4. `--tailscale`/`THINKRAIL_TAILSCALE` together with `--host`/`THINKRAIL_HOST` is
+  a parse error: two sources for one bind address.
+- Plain `http://` only; HTTPS via `tailscale serve`/`cert` (secure-context browser APIs), a QR code, and the
+  desktop app (loopback-only) are out of scope. The web client needs no change: its WS URL and HTTP routes
+  are same-origin.
 
 ## Update advisory
 

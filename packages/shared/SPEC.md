@@ -322,5 +322,9 @@ bundled into `apps/web`. Exposed through explicit subpath exports, not a barrel.
 - Detect occupancy by **probing with a TCP connect**, not by catching a bind error: `Bun.serve` does not
   report `EADDRINUSE` for a busy `localhost` port on every platform (it can share the port via
   `SO_REUSEPORT`), so a bind-and-catch check is unreliable. A refused connection means free.
+- A probe that times out counts as busy, so the budget must outlast a refusal: 300 ms for loopback, 3 s
+  for any other address. Windows answers a connect to a closed port on a non-loopback local address
+  (e.g. the tailnet IP behind `thinkrail --tailscale`) with `ECONNREFUSED` only after ~2 s of SYN
+  retries; the short budget marked every port busy and pushed the host onto a random ephemeral port.
 - `findFreePort` scans upward from `preferred` (predictable: `24242 → 24243 → …`) and falls back to an
   OS-assigned ephemeral port if the whole scan range is taken.

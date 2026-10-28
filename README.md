@@ -147,6 +147,10 @@ thinkrail ~/code/my-repo
 `thinkrail` needs `git` on your PATH and a model provider — sign in with JetBrains AI from the app or use
 your own provider credentials. `thinkrail --help` lists the flags; `thinkrail --version` prints the build.
 
+To use ThinkRail from your phone, put both devices on the same [Tailscale](https://tailscale.com) tailnet
+and run `thinkrail --tailscale`: the host listens only on this machine's tailnet address and prints the
+URL to open on the phone. Your tailnet's access controls decide who can reach it; ThinkRail adds no login.
+
 <details>
 <summary><strong>Nightly builds, pinned versions, updates, and uninstall</strong></summary>
 
