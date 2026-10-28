@@ -61,3 +61,60 @@ describe("system and failure notices", () => {
 		}
 	});
 });
+
+function userRow(text: string): ChatRow {
+	return { kind: "user", id: "u", message: { role: "user", content: text, timestamp: 0 } };
+}
+
+function userBody(html: string): string {
+	const start = html.indexOf('data-testid="user-message-body"');
+	expect(start).toBeGreaterThan(-1);
+	return html.slice(start);
+}
+
+describe("user messages render Markdown", () => {
+	test("headings, lists, code, links and tables render inside the user bubble body", () => {
+		const body = userBody(
+			renderRow(
+				userRow(
+					"## Done when\n\n- first\n- second\n\n1. one\n\nRun `bun test` and see [docs](https://example.com) **now**.\n\n```ts\nconst x = 1;\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+				),
+				false,
+			),
+		);
+		expect(body).toContain("<h2>Done when</h2>");
+		expect(body).toContain("<li>first</li>");
+		expect(body).toContain("<ol>");
+		expect(body).toContain(">bun test</code>");
+		expect(body).toContain('href="https://example.com"');
+		expect(body).toContain("<strong>now</strong>");
+		expect(body).toContain("const x = 1;");
+		expect(body).toContain("<table");
+		expect(body).not.toContain("## Done when");
+	});
+
+	test("single newlines stay line breaks and raw HTML stays text", () => {
+		const body = userBody(renderRow(userRow("first line\nsecond line\n<div>inert</div>"), false));
+		expect(body).toContain("first line<br/>");
+		expect(body).toContain("second line");
+		expect(body).not.toContain("<div>inert");
+	});
+
+	test("a large message still collapses behind the toggle once the agent responded", () => {
+		const html = renderRow(userRow(`- item\n${"word ".repeat(120)}`), false);
+		expect(userBody(html)).toContain('data-collapsed="true"');
+		expect(html).toContain('data-testid="user-message-toggle"');
+	});
+
+	test("the skill invocation's user request renders Markdown", () => {
+		const html = renderRow(
+			userRow(
+				'<skill name="review" location="/s/review/SKILL.md">\nbody\n</skill>\n\n## Focus\n\n- src/app.ts',
+			),
+			false,
+		);
+		const request = html.slice(html.indexOf('data-testid="skill-user-request"'));
+		expect(request).toContain("<h2>Focus</h2>");
+		expect(request).toContain("<li>src/app.ts</li>");
+	});
+});

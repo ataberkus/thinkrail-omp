@@ -49,6 +49,7 @@ import { ToolCard } from "./ToolCard";
 import { ToolRendererBody } from "./ToolRendererBody";
 import { getToolChrome, getToolSummary } from "./toolRegistry";
 import type { CompactionState } from "./types";
+import { UserMarkdown } from "./UserMarkdown";
 
 function ChatTurnViewImpl({
 	row,
@@ -196,7 +197,7 @@ function userAttachments(content: UserMessage["content"], names?: string[]) {
 }
 
 const USER_BUBBLE_BASE =
-	"whitespace-pre-wrap [overflow-wrap:anywhere] rounded-lg border border-bubble-user-border bg-clip-padding bg-bubble-user-bg px-12 py-8 tr-text-reading text-text-muted";
+	"[overflow-wrap:anywhere] rounded-lg border border-bubble-user-border bg-clip-padding bg-bubble-user-bg px-12 py-8 tr-text-reading text-text-muted";
 const USER_BUBBLE = cn("max-w-[85%]", USER_BUBBLE_BASE);
 
 // In unbounded chat-width mode the transcript row is a fixed measure that can be far wider than the
@@ -299,7 +300,7 @@ function UserTurn({
 					<SkillInvocationCard foldId={`${id}:skill`} invocation={skill} />
 					{skill.userMessage ? (
 						<div data-testid="skill-user-request" className={USER_BUBBLE}>
-							{skill.userMessage}
+							<UserMarkdown text={skill.userMessage} />
 						</div>
 					) : null}
 				</div>
@@ -323,7 +324,7 @@ function UserTurn({
 							))}
 						</div>
 					) : null}
-					<div data-testid="review-package-card" className="whitespace-normal">
+					<div data-testid="review-package-card">
 						<span data-testid="review-package-summary" className="block text-text-default">
 							{reviewPackageLabel(t, review)}
 						</span>
@@ -370,11 +371,11 @@ function PlainUserTurn({
 						data-collapsed={collapsed || undefined}
 						className={cn(
 							collapsed
-								? "line-clamp-3"
+								? "line-clamp-3 max-h-[3lh]"
 								: large && "max-h-[60vh] overflow-y-auto overscroll-contain",
 						)}
 					>
-						{text}
+						<UserMarkdown text={text} />
 					</div>
 					{large ? (
 						<button

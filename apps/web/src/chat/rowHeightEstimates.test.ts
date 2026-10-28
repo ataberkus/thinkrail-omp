@@ -102,6 +102,12 @@ describe("chat row height estimates", () => {
 		expect(small).toBeLessThanOrEqual(huge);
 	});
 
+	test("estimates a multi-line user list by its rendered lines, not its character count", () => {
+		const list = estimateChatRowHeight(userRow("list", "- one\n- two\n- three\n- four"));
+		const line = estimateChatRowHeight(userRow("line", "- one - two - three - four"));
+		expect(list).toBeGreaterThanOrEqual(line + 3 * 20);
+	});
+
 	test("reuses a mounted estimate while streaming and refreshes it for a virtualizer remount", () => {
 		const cache = new Map();
 		const id = "assistant-stream:text:0";

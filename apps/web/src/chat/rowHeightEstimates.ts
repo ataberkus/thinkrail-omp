@@ -33,7 +33,7 @@ function fenceEnd(line: string, marker: "`" | "~", length: number): boolean {
 	return (expression.exec(line)?.[1]?.length ?? 0) >= length;
 }
 
-export function estimateMarkdownHeight(text: string): number {
+export function estimateMarkdownHeight(text: string, columns = PROSE_COLUMNS): number {
 	let height = 8;
 	let blankRun = false;
 	let fence: { marker: "`" | "~"; length: number } | null = null;
@@ -67,7 +67,7 @@ export function estimateMarkdownHeight(text: string): number {
 			if (!blankRun) height += BLOCK_GAP;
 			blankRun = true;
 		} else {
-			height += wrappedLines(line) * PROSE_LINE_HEIGHT;
+			height += wrappedLines(line, columns) * PROSE_LINE_HEIGHT;
 			blankRun = false;
 		}
 		if (height >= MAX_ESTIMATED_HEIGHT) return MAX_ESTIMATED_HEIGHT;
@@ -139,7 +139,7 @@ export function estimateChatRowHeight(row: ChatRow): number {
 			if (text.length > LARGE_USER_MESSAGE) {
 				return clampHeight(24 + 3 * PROSE_LINE_HEIGHT + 24 + attachments);
 			}
-			return clampHeight(24 + wrappedLines(text, 62) * PROSE_LINE_HEIGHT + attachments);
+			return clampHeight(16 + estimateMarkdownHeight(text, 62) + attachments);
 		}
 		case "system":
 			return clampHeight(20 + wrappedLines(row.text ?? "") * PROSE_LINE_HEIGHT);
