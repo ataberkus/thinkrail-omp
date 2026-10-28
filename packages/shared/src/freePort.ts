@@ -1,7 +1,8 @@
 import { connect, createServer } from "node:net";
 
 const DEFAULT_HOST = "localhost";
-const PROBE_TIMEOUT_MS = 300;
+const LOOPBACK_PROBE_TIMEOUT_MS = 300;
+const ADDRESS_PROBE_TIMEOUT_MS = 3_000;
 const DEFAULT_SCAN_ATTEMPTS = 20;
 
 function isConnectionRefused(err: unknown): boolean {
@@ -23,7 +24,8 @@ export function isPortFree(port: number, host: string = DEFAULT_HOST): Promise<b
 			socket.destroy();
 			resolve(free);
 		};
-		socket.setTimeout(PROBE_TIMEOUT_MS);
+		const loopback = host === "localhost" || host === "::1" || host.startsWith("127.");
+		socket.setTimeout(loopback ? LOOPBACK_PROBE_TIMEOUT_MS : ADDRESS_PROBE_TIMEOUT_MS);
 		socket.once("connect", () => finish(false));
 		socket.once("timeout", () => finish(false));
 		socket.once("error", (err) => finish(isConnectionRefused(err)));

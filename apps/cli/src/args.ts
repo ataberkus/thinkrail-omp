@@ -4,6 +4,7 @@ export const DEFAULT_HOST = "localhost";
 export interface CliOptions {
 	port: number;
 	host: string;
+	tailscale: boolean;
 	open: boolean;
 	noAnalytics: boolean;
 	verbose: boolean;
@@ -35,6 +36,9 @@ unless you ask for it to go). Both take \`--help\`.
 Options:
   --port <n>     Listen port (default ${DEFAULT_PORT}; falls back to a free port if taken).
   --host <h>     Bind host (default ${DEFAULT_HOST}).
+  --tailscale    Serve on this machine's Tailscale address and print the URL to open
+                 on another device in the tailnet (e.g. a phone). Needs the \`tailscale\`
+                 CLI, logged in. Cannot be combined with --host.
   --no-open      Don't open the browser (e.g. headless / remote host).
   --no-analytics Disable additional usage analytics this run.
                  The saved sharing preference lives in Settings → Privacy.
@@ -48,6 +52,7 @@ Arguments:
 
 Env:
   THINKRAIL_PORT / THINKRAIL_HOST   Defaults for --port / --host.
+  THINKRAIL_TAILSCALE                  Same as --tailscale (any value except empty, 0 or false).
   THINKRAIL_STATIC_DIR                 Override the built web app served by the host.
   THINKRAIL_NO_ANALYTICS               Same as --no-analytics (any non-empty value; read by the host).
   THINKRAIL_LOG_LEVEL                  Log level: debug|info|warn|error (default info; read by the host).`;
@@ -62,6 +67,7 @@ function readFlagValue(arg: string, next: string | undefined): { value: string; 
 export function parseArgs(argv: readonly string[], env: ParseEnv = {}): CliOptions {
 	let port: number | undefined;
 	let host: string | undefined;
+	let tailscale = false;
 	let open = true;
 	let noAnalytics = false;
 	let verbose = false;
@@ -77,6 +83,8 @@ export function parseArgs(argv: readonly string[], env: ParseEnv = {}): CliOptio
 			noAnalytics = true;
 		} else if (arg === "--verbose") {
 			verbose = true;
+		} else if (arg === "--tailscale") {
+			tailscale = true;
 		} else if (arg === "-h" || arg === "--help") {
 			help = true;
 		} else if (arg === "-v" || arg === "--version") {
@@ -105,10 +113,20 @@ export function parseArgs(argv: readonly string[], env: ParseEnv = {}): CliOptio
 	const envPort = env.THINKRAIL_PORT !== undefined ? Number(env.THINKRAIL_PORT) : undefined;
 	const resolvedPort =
 		port ?? (envPort !== undefined && Number.isInteger(envPort) ? envPort : DEFAULT_PORT);
+	const envTailscale = env.THINKRAIL_TAILSCALE?.trim().toLowerCase();
+	const resolvedTailscale =
+		tailscale || (envTailscale !== undefined && !["", "0", "false"].includes(envTailscale));
+	const explicitHost = host ?? env.THINKRAIL_HOST;
+	if (resolvedTailscale && explicitHost !== undefined) {
+		throw new Error(
+			"--tailscale cannot be combined with --host / THINKRAIL_HOST: Tailscale mode picks the bind address.",
+		);
+	}
 
 	return {
 		port: resolvedPort,
-		host: host ?? env.THINKRAIL_HOST ?? DEFAULT_HOST,
+		host: explicitHost ?? DEFAULT_HOST,
+		tailscale: resolvedTailscale,
 		open,
 		noAnalytics,
 		verbose,
