@@ -479,6 +479,15 @@ re-opened transcripts provider-valid.
     or stealth tier that rate-limits or disappears), else the `default` pick; `default`
     = `preferredDefaultModel`; `null` when nothing is authenticated. This is the primitive the `assist` tasks
     (plan summaries, PR drafting) run on — the only place model **dispatch** happens outside a session.
+  - `readOnlyAgent` — `runReadOnlyAgent(request)`: one **ephemeral** `createAgentSession` borrowing a live
+    chat's folder, model, thinking level, settings and runtime generation (`sessionRunSnapshot`), with
+    `SessionManager.inMemory`, `restrictToolNames` to read/grep/glob, no MCP/LSP/extension discovery/skills/
+    rules/context files, `hasUI: false` and the caller's system prompt; always disposed, never touches the
+    chat's transcript. Its guard is the `agent.beforeToolCall` hook (restricted sessions drop inline
+    extensions), chained to any prior hook: `lookupBlockReason` refuses URIs, `~`, `..`, absolute or
+    symlinked escapes from the folder, `.env` secrets and `gitignore: false` greps; every call, blocked
+    ones included, counts toward `maxLookups`, past which calls are refused with "write it now". Accepted
+    lookups go to `onStep`; the signal aborts the session. ✨ Enhance (`assist`) is its only caller.
   - `webUiContext` — `createWebUiContext(sessionId, currentToolCall?)` builds the `ExtensionUIContext` pi
     calls (dialogs round-trip to the browser, fire-and-forget methods push). A dialog names the tool call
     it is about (`toolCallId`) so the web asks on that call's card: a dialog anchors only while **exactly
@@ -969,7 +978,8 @@ re-opened transcripts provider-valid.
   providers derive their own installation identity); `migratePiAgentDataOnBoot` (the one-time pi data
   import `host` boot runs, `piMigration.ts`: a pi installation's chats, logins and user MCP servers copied
   into omp's agent dir; [[pi-compatibility]] "pi data import");
-  `completeOnce`/`pickModel` +
+  `completeOnce`/`pickModel` + `runReadOnlyAgent`/`lookupBlockReason` +
+  `ReadOnlyAgentRequest`/`ReadOnlyAgentStep`/`ReadOnlyTool` + `sessionRunSnapshot`/`SessionRunSnapshot` +
   `OneShotRequest`/`OneShotResult`/`ModelTier`; the `webUiContext` seams; the `toolResponses` mailbox
   and pure helpers (`createToolResponseWaiters`/`toolResponseSessionServices`/`assessRespondability`/
   `describeToolResponse`/`buildToolResponseMessage`/`awaitingToolCallId`); normalized-state operations

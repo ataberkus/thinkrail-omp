@@ -10,7 +10,7 @@ tags: [pi, oneshot, public-surface-checked]
 
 ## Responsibility
 
-Small, **best-effort** agentic helpers that run a single cheap-model completion — the "ad-hoc one-shot
+Small, **best-effort** agentic helpers — mostly a single cheap-model completion, the "ad-hoc one-shot
 task service." Each task owns its prompt, output parsing/guards, and graceful-degrade fallback; it never
 blocks or crashes its caller. The current task drafts a completed plan's summary when the agent wrote
 none. Naming chats and workspaces is **not** an assist task: the main agent names them through
@@ -23,9 +23,10 @@ prompt (`prompt.enhance`) is the third. The tasks are a **library surface** — 
 
 - **Owns:**
   - The task catalog + their prompts, output guards, and fallbacks. Always time-boxed
-    (`AbortSignal.timeout`) and bounded (`maxTokens`).
-  - `setOneShotRunner(fn)` — a test seam swapping the one-shot runner (default = `agent.completeOnce`) so
-    tasks unit-test against a fake with no pi/auth/network.
+    (`AbortSignal.timeout`) and bounded (`maxTokens`, or a lookup cap for the read-only run).
+  - `setOneShotRunner(fn)` / `setReadOnlyRunner(fn)` — test seams swapping the one-shot runner (default
+    `agent.completeOnce`) and the read-only agent runner (default `agent.runReadOnlyAgent`) so tasks
+    unit-test against a fake with no pi/auth/network.
   - `suggestPlanSummary(steps)` \u2192 a short **Markdown** handoff note for a COMPLETED plan, drafted from its
     finished steps (`{ title, summary?, verification? }[]`, built by the caller \u2014 assist reads no store),
     through the same tool-free cheap-model path, or `null` (best-effort: `null`, never throws, on no auth /
@@ -39,21 +40,23 @@ prompt (`prompt.enhance`) is the third. The tasks are a **library surface** — 
     best-effort terms. With a `template` the draft keeps the template's headings and checklist and fills
     their bodies; `toPrDescription(raw)` is the output guard (strip a code fence, clamp length, `null` when
     empty).
-  - `suggestPromptEnhancement({ draft, conversation? })` → the message box's ✨ Enhance rewrite: the draft
-    expanded into a grounded engineering prompt (Request / Inferred requirements / Assumptions / Done when,
-    by intent; a question stays a question) in the draft's language, or `null` on the same best-effort terms
+  - `suggestPromptEnhancement({ sessionId, draft, conversation?, images?, signal?, onStep? })` → the
+    message box's ✨ Enhance rewrite: the draft expanded into an engineering prompt grounded in the chat's
+    repository (Request / Inferred requirements / Assumptions / Done when, by intent; a question stays a
+    question) in the draft's language, or `null` on the same best-effort terms, on cancel, for a gone chat,
     and for an empty or over-20 000-character draft. The input is the draft plus at most the last 6
     `user`/`assistant` turns (the latest assistant reply clipped to 6 000 characters, older turns to 1 500,
     both ends kept), wrapped in `<conversation>` / `<draft>` with tag lookalikes defused so quoted text
-    cannot close them. It adapts omp-companion's enhancer, minus its read-only repository lookups: one
-    tool-free completion cannot read the code, so the prompt forbids naming paths or symbols the draft and
-    conversation do not contain. `toEnhancedPrompt(raw)` is the output guard (unwrap a fence around the
-    whole prompt, not one that merely opens it; `null` when empty).
-- **Public surface (barrel):** `setOneShotRunner`, `suggestPlanSummary`, `toPlanSummary`,
-  `suggestPrDescription`, `toPrDescription`, `suggestPromptEnhancement`, `toEnhancedPrompt`,
-  `OneShotRunner`, `PlanSummaryStep`, `PrDescriptionInput`, `PromptEnhanceInput`, `PromptEnhanceMessage`.
-- **Allowed deps:** `agent` (the `completeOnce`/`OneShotRequest`/`OneShotResult` primitive, via its
-  barrel); Node.
+    cannot close them; attached images ride along. It ports omp-companion's enhancer whole: one
+    `agent.runReadOnlyAgent` run on the chat's own model and thinking level in the chat's folder, at most
+    8 read/grep/glob lookups, 180 s; `onStep` reports each lookup. `toEnhancedPrompt(raw)` is the output
+    guard (unwrap a fence around the whole prompt, not one that merely opens it; `null` when empty).
+- **Public surface (barrel):** `setOneShotRunner`, `setReadOnlyRunner`, `suggestPlanSummary`,
+  `toPlanSummary`, `suggestPrDescription`, `toPrDescription`, `suggestPromptEnhancement`,
+  `toEnhancedPrompt`, `OneShotRunner`, `ReadOnlyRunner`, `PlanSummaryStep`, `PrDescriptionInput`,
+  `PromptEnhanceInput`, `PromptEnhanceMessage`.
+- **Allowed deps:** `agent` (the `completeOnce`/`OneShotRequest`/`OneShotResult` and
+  `runReadOnlyAgent`/`ReadOnlyAgentRequest`/`ReadOnlyAgentStep` primitives, via its barrel); Node.
 - **Forbidden:** `host`; **`@oh-my-pi/pi-ai` / `pi-coding-agent` directly** (model access + dispatch
   belong to `agent`); reaching into another feature's internals.
 
@@ -62,5 +65,6 @@ prompt (`prompt.enhance`) is the third. The tasks are a **library surface** — 
 - Every task **degrades to `null`** — a failure must never block its caller or surface as an error. Wrap
   the runner call; the caller decides what (if anything) to write instead.
 - Never trust model formatting: cap `maxTokens`, then normalize/clamp the text yourself.
-- These are stateless, side-effect-free `fetch`es on the shared loop (no disk, no tools) — safe to run in
-  parallel; no manager/registry needed.
+- These are stateless and side-effect-free — the one-shots are tool-free `fetch`es, the read-only run
+  only reads inside the chat's folder and persists nothing — safe to run in parallel; no manager/registry
+  needed.

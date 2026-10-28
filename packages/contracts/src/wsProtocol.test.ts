@@ -231,10 +231,12 @@ test("tool responses replace the ask-only answer method at v93", () => {
 	expect(WS_METHODS.sessionAnswerQuestion).toBe("session.answerQuestion");
 });
 
-test("message-box prompt enhancement is pinned to v94", () => {
-	expect(PROTOCOL_VERSION).toBe(94);
-	expect(PROMPT_ENHANCE_PROTOCOL_VERSION).toBe(94);
+test("repository-reading prompt enhancement is pinned to v95", () => {
+	expect(PROTOCOL_VERSION).toBe(95);
+	expect(PROMPT_ENHANCE_PROTOCOL_VERSION).toBe(95);
 	expect(WS_METHODS.promptEnhance).toBe("prompt.enhance");
+	expect(WS_METHODS.promptEnhanceCancel).toBe("prompt.enhanceCancel");
+	expect(WS_CHANNELS.promptEnhanceProgress).toBe("prompt.enhanceProgress");
 });
 
 test("user theme files are pinned to v92", () => {

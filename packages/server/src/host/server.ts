@@ -128,6 +128,7 @@ import {
 	observeCurrentSetup,
 	setupObservation,
 } from "./productAnalytics";
+import { setPromptEnhanceProgressPublisher } from "./promptEnhance";
 import { RequestReplayCache } from "./requestReplayCache";
 import {
 	installRequestReviewSeam,
@@ -768,6 +769,14 @@ export async function createServer(options: CreateServerOptions = {}): Promise<R
 		if (!ws) return;
 		try {
 			ws.send(JSON.stringify({ channel: WS_CHANNELS.providerLogin, data: push }));
+		} catch {}
+	});
+
+	setPromptEnhanceProgressPublisher((clientKey, progress) => {
+		const ws = sockets.get(clientKey);
+		if (!ws) return;
+		try {
+			ws.send(JSON.stringify({ channel: WS_CHANNELS.promptEnhanceProgress, data: progress }));
 		} catch {}
 	});
 

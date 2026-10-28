@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import type { Message } from "@oh-my-pi/pi-ai";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Message } from "@oh-my-pi/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "pi-faux";
 import { getSessionMessages } from "./agentSessionManager";
-import { startMcpHarness, type McpHarness } from "./mcp/fixtures/harness";
-import { lookupBlockReason, runReadOnlyAgent, type ReadOnlyAgentStep } from "./readOnlyAgent";
+import { type McpHarness, startMcpHarness } from "./mcp/fixtures/harness";
+import { lookupBlockReason, type ReadOnlyAgentStep, runReadOnlyAgent } from "./readOnlyAgent";
 
 let h: McpHarness;
 beforeAll(async () => {
@@ -21,7 +21,12 @@ interface ToolResultView {
 const toolResults = (messages: readonly Message[]): ToolResultView[] =>
 	messages.flatMap((m) =>
 		m.role === "toolResult"
-			? [{ error: m.isError === true, text: m.content.map((c) => ("text" in c ? c.text : "")).join("") }]
+			? [
+					{
+						error: m.isError === true,
+						text: m.content.map((c) => ("text" in c ? c.text : "")).join(""),
+					},
+				]
 			: [],
 	);
 
@@ -31,9 +36,19 @@ test("lookupBlockReason keeps lookups inside the folder", () => {
 	expect(lookupBlockReason("grep", { pattern: "x" }, cwd)).toBeNull();
 	expect(lookupBlockReason("glob", { path: "src/**/*.ts;!**/*.test.ts" }, cwd)).toBeNull();
 	expect(lookupBlockReason("read", { path: join(cwd, "a.ts") }, cwd)).toBeNull();
-	for (const path of ["../x", "src/../../x", join("/", "etc", "passwd"), "~/.ssh", "skill://x", "https://a.b"])
+	for (const path of [
+		"../x",
+		"src/../../x",
+		join("/", "etc", "passwd"),
+		"~/.ssh",
+		"skill://x",
+		"https://a.b",
+	])
 		expect(lookupBlockReason("read", { path }, cwd)).not.toBeNull();
 	expect(lookupBlockReason("grep", { pattern: "x", path: "src;../other" }, cwd)).not.toBeNull();
+	expect(lookupBlockReason("read", { path: "config/.env.local" }, cwd)).not.toBeNull();
+	expect(lookupBlockReason("read", { path: ".env.example" }, cwd)).toBeNull();
+	expect(lookupBlockReason("grep", { pattern: "x", gitignore: false }, cwd)).not.toBeNull();
 	expect(lookupBlockReason("bash", { command: "ls" }, cwd)).not.toBeNull();
 });
 
@@ -47,11 +62,14 @@ test("runs read-only in the chat folder, blocks escapes and over-budget lookups,
 		(context) => {
 			tools = (context.tools ?? []).map((t) => t.name).sort();
 			systemPrompt = String(context.systemPrompt);
-			return fauxAssistantMessage([
-				fauxToolCall("read", { path: "a.txt" }, { id: "r1" }),
-				fauxToolCall("read", { path: "../escape.txt" }, { id: "r2" }),
-				fauxToolCall("glob", { path: "*.txt" }, { id: "g1" }),
-			], { stopReason: "toolUse" });
+			return fauxAssistantMessage(
+				[
+					fauxToolCall("read", { path: "a.txt" }, { id: "r1" }),
+					fauxToolCall("read", { path: "../escape.txt" }, { id: "r2" }),
+					fauxToolCall("glob", { path: "*.txt" }, { id: "g1" }),
+				],
+				{ stopReason: "toolUse" },
+			);
 		},
 		(context) => {
 			final = toolResults(context.messages);
@@ -63,7 +81,7 @@ test("runs read-only in the chat folder, blocks escapes and over-budget lookups,
 		sessionId,
 		system: "ENHANCER_SYSTEM",
 		prompt: "draft",
-		maxLookups: 1,
+		maxLookups: 2,
 		signal: new AbortController().signal,
 		onStep: (s) => steps.push(s),
 	});

@@ -82,7 +82,7 @@ import {
 	type SendMode,
 	track,
 } from "../analytics";
-import { suggestPrDescription, suggestPromptEnhancement } from "../assist";
+import { suggestPrDescription } from "../assist";
 import {
 	cancelLogin,
 	connectJbcentral,
@@ -258,6 +258,7 @@ import {
 	observeSetupRead,
 	providerAvailability,
 } from "./productAnalytics";
+import { cancelPromptEnhance, enhancePrompt } from "./promptEnhance";
 import { startPlanReview } from "./requestReview";
 import { withChangeLock, withReviewLock } from "./reviewLock";
 import { runObservation } from "./runAnalytics";
@@ -666,7 +667,8 @@ const handlers: WsHandlers = {
 	"pr.generate": async (params) => ({
 		body: await suggestPrDescription(await prDraftInput(params)),
 	}),
-	"prompt.enhance": async (params) => ({ text: await suggestPromptEnhancement(params) }),
+	"prompt.enhance": (params, ctx) => enhancePrompt(params, ctx.clientKey),
+	"prompt.enhanceCancel": (params, ctx) => cancelPromptEnhance(params.requestId, ctx.clientKey),
 	"pr.ready": async (p) => {
 		recordWorkspaceActivity(p.workspaceId);
 		await readyPr(p);
