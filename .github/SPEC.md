@@ -131,10 +131,10 @@ departure from upstream's single private release controller. Every push to `main
 `workflow_dispatch` publishes on demand with inputs `channel` (`nightly|stable`), `bump`
 (`major|minor|patch|explicit`) and `version` (for `explicit`). The one `release` concurrency group queues
 runs, so each computes its version after the previous one tagged. One job runs `next-version.sh` once and
-every target consumes that version and channel. A gate job runs `bun install --frozen-lockfile`, `lint`,
-`typecheck` and `test` on the released commit before any build.
+every target consumes that version and channel. The release runs no tests or smokes: it only proves every
+target builds and packages (PR CI owns verification).
 A fail-fast matrix runs `build-binary` on the five target/runner pairs of the table below (Linux legs
-first install `desktop-apt` for the action's `xvfb-run` smokes) and uploads only `artifact-path` and
+first install `desktop-apt`) and uploads only `artifact-path` and
 `desktop-artifact-path`; the app archive and updater manifest/archive never ship. The publish job requires
 exactly those ten files, writes `SHA256SUMS` (`sha256sum` basenames) over them, creates `v<version>` at the
 dispatched commit or skips it when it already points there (failing when it points elsewhere), then
@@ -159,8 +159,8 @@ Its stable public outputs are:
 - `desktop-update-manifest-path` / `desktop-update-archive-path` — Electrobun's updater metadata and
   full application archive, both non-empty on every desktop target.
 
-The recipe stamps the shared version, builds and smokes the CLI, invokes the normal Electrobun dev and
-channel builds, runs expanded-app and first-install smoke, then collects exact target/channel outputs.
+The recipe stamps the shared version, builds the CLI, invokes the normal Electrobun dev and channel
+builds, then collects exact target/channel outputs. It runs no smokes; artifact smokes live in PR CI.
 Update outputs preserve Electrobun's generated basenames and compressed bytes. The manifest is the exact
 `<stable|canary>-<macos|win|linux>-<arm64|x64>-update.json`. Its `artifact.file` is the archive basename:
 `stable-<platform>-ThinkRail[.app].tar.zst` for stable or

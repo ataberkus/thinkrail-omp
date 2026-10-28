@@ -237,11 +237,7 @@ test("source-map credentials reach only the web and desktop build steps", () => 
 	const credentialed = action.runs.steps
 		.filter((step) => step.env && "POSTHOG_CLI_API_KEY" in step.env)
 		.map((step) => step.name);
-	expect(credentialed).toEqual([
-		"Build web UI",
-		"Build and smoke desktop app",
-		"Package desktop installer",
-	]);
+	expect(credentialed).toEqual(["Build web UI", "Build desktop app", "Package desktop installer"]);
 });
 
 test("Windows packaging places System32 tar ahead of Git tar", () => {

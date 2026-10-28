@@ -1,7 +1,7 @@
 name: Build ThinkRail native artifacts
 description: >-
-  Stamps the shared release identity, builds the web UI, compiles and smokes the native CLI binary,
-  packages and smokes the native Electrobun desktop app, and exposes both release artifacts.
+  Stamps the shared release identity, builds the web UI, compiles the native CLI binary, builds and
+  packages the native Electrobun desktop app, and exposes both release artifacts.
 
 inputs:
   version:
@@ -113,30 +113,14 @@ runs:
           echo "path=$path"
         } >> "$GITHUB_OUTPUT"
 
-    - name: Smoke CLI binary
-      shell: bash
-      run: bun run smoke:binary "${{ steps.resolve-cli.outputs.path }}"
-
-    - name: Build and smoke desktop app
+    - name: Build desktop app
       shell: bash
       env:
-        TARGET: ${{ inputs.target }}
         THINKRAIL_SOURCEMAPS_RELEASE: ${{ inputs.posthog-cli-api-key != '' && inputs.version || '' }}
         POSTHOG_CLI_API_KEY: ${{ inputs.posthog-cli-api-key }}
         POSTHOG_CLI_PROJECT_ID: ${{ inputs.posthog-cli-project-id }}
         POSTHOG_CLI_HOST: https://eu.posthog.com
-      run: |
-        set -eu
-        bun run desktop:build
-        unset THINKRAIL_SOURCEMAPS_RELEASE POSTHOG_CLI_API_KEY POSTHOG_CLI_PROJECT_ID POSTHOG_CLI_HOST
-        launcher=$(bun -e 'import { locateDesktopLauncher } from "@thinkrail/artifact-tests"; console.log(locateDesktopLauncher("apps/desktop"));')
-        case "$TARGET" in
-          bun-linux-*)
-            env LIBGL_ALWAYS_SOFTWARE=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 \
-              xvfb-run -a bun run smoke:desktop "$launcher"
-            ;;
-          *) bun run smoke:desktop "$launcher" ;;
-        esac
+      run: bun run desktop:build
 
     - name: Package desktop installer
       shell: bash
@@ -226,27 +210,3 @@ runs:
           echo "update-manifest-path=$update_manifest_path"
           echo "update-archive-path=$update_archive_path"
         } >> "$GITHUB_OUTPUT"
-
-    - name: Smoke desktop first-install artifact
-      shell: bash
-      env:
-        CHANNEL: ${{ inputs.channel }}
-        TARGET: ${{ inputs.target }}
-      run: |
-        set -eu
-        case "$CHANNEL" in
-          nightly) environment="canary" ;;
-          stable) environment="stable" ;;
-          *) echo "::error::unsupported release channel $CHANNEL"; exit 1 ;;
-        esac
-        case "$TARGET" in
-          bun-linux-*)
-            env LIBGL_ALWAYS_SOFTWARE=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 \
-              xvfb-run -a bun run smoke:desktop:installer \
-              "${{ steps.resolve-desktop.outputs.path }}" "$environment"
-            ;;
-          *)
-            bun run smoke:desktop:installer \
-              "${{ steps.resolve-desktop.outputs.path }}" "$environment"
-            ;;
-        esac
