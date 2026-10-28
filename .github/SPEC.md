@@ -127,10 +127,12 @@ job on main every PR and merge group kept its own copy, about half of the reposi
 ## Fork release
 
 This fork cannot use the private signing pipeline, so `.github/workflows/release.yml` is a deliberate
-departure from upstream's single private release controller. It is `workflow_dispatch`-only with inputs
-`channel` (`nightly|stable`), `bump` (`major|minor|patch|explicit`) and `version` (for `explicit`).
-One job runs `next-version.sh` once and every target consumes that version. A gate job runs
-`bun install --frozen-lockfile`, `lint`, `typecheck` and `test` on the dispatched commit before any build.
+departure from upstream's single private release controller. Every push to `main` publishes a nightly;
+`workflow_dispatch` publishes on demand with inputs `channel` (`nightly|stable`), `bump`
+(`major|minor|patch|explicit`) and `version` (for `explicit`). The one `release` concurrency group queues
+runs, so each computes its version after the previous one tagged. One job runs `next-version.sh` once and
+every target consumes that version and channel. A gate job runs `bun install --frozen-lockfile`, `lint`,
+`typecheck` and `test` on the released commit before any build.
 A fail-fast matrix runs `build-binary` on the five target/runner pairs of the table below (Linux legs
 first install `desktop-apt` for the action's `xvfb-run` smokes) and uploads only `artifact-path` and
 `desktop-artifact-path`; the app archive and updater manifest/archive never ship. The publish job requires
@@ -138,7 +140,8 @@ exactly those ten files, writes `SHA256SUMS` (`sha256sum` basenames) over them, 
 dispatched commit or skips it when it already points there (failing when it points elsewhere), then
 `gh release create`s the release: nightly as a prerelease, stable as latest, the shapes `install.sh` /
 `install.ps1` resolve. A re-run finding the release replaces its assets instead of creating another.
-Secrets: `POSTHOG_PROJECT_KEY` (required, checked before building) and optional `POSTHOG_CLI_API_KEY` /
+Secrets are all optional: `POSTHOG_PROJECT_KEY` (when unset the release builds without analytics, with a
+warning; when set it must be `phc_…`, checked before building) and `POSTHOG_CLI_API_KEY` /
 `POSTHOG_CLI_PROJECT_ID`. Every artifact is unsigned and the release notes say so; the signing and
 verification gates of the sections below apply only to upstream's private pipeline. Installers and CLI
 self-update still default to `JetBrains/thinkrail`; fork users set `THINKRAIL_REPO`.
@@ -198,10 +201,12 @@ additional installer formats are outside this contract.
 The release controller supplies an explicit public `source_sha`. The public recipe stamps only
 `packages/shared/src/version.ts` with `{ version, channel, commit, posthogProjectKey }`; CLI, desktop
 configuration, analytics, and `server.welcome.appVersion` consume that same identity. The action's
-required `posthog-project-key` input is the only source of the app's analytics key — the repository
-carries none — and stamping fails closed when it is empty or the channel is not `nightly|stable`. It
-is a public ingestion key, not a service credential, so hosted native jobs may receive it; the private
-workflow passes it from its secret store and the stamp step never echoes it. The private workflow's own commit
+`posthog-project-key` input is the only source of the app's analytics key — the repository carries
+none. Stamping fails closed when the key is neither empty nor `phc_…`, or the channel is not
+`nightly|stable`; an empty key stamps `""`, the analytics-free identity of dev builds, which the fork
+workflow uses when it has no key. It is a public ingestion key, not a service credential, so hosted native
+jobs may receive it; the private workflow passes it from its secret store and the stamp step never echoes
+it. The private workflow's own commit
 is never product identity.
 
 The version itself comes from `.github/scripts/next-version.sh`, the one public version policy. It reads

@@ -1,9 +1,12 @@
 name: Release
 
-# Fork-owned public release controller (see .github/SPEC.md → Fork release). Builds every native target
-# through .github/actions/build-binary at one version, checksums the final bytes, tags v<version> and
-# publishes a GitHub Release whose asset names match install.sh / install.ps1. Artifacts are unsigned.
+# Fork-owned public release controller (see .github/SPEC.md → Fork release). Every push to main publishes
+# a nightly; a manual dispatch publishes a nightly or stable. Builds every native target through
+# .github/actions/build-binary at one version, checksums the final bytes, tags v<version> and publishes a
+# GitHub Release whose asset names match install.sh / install.ps1. Artifacts are unsigned.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       channel:
@@ -35,21 +38,23 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.next.outputs.version }}
+      channel: ${{ steps.next.outputs.channel }}
     steps:
-      - name: Require PostHog project key
+      - name: Check PostHog project key
         env:
           POSTHOG_PROJECT_KEY: ${{ secrets.POSTHOG_PROJECT_KEY }}
         run: |
           case "$POSTHOG_PROJECT_KEY" in
+            "") echo "::warning::POSTHOG_PROJECT_KEY is not set; this release ships without analytics" ;;
             phc_?*) ;;
-            *) echo "::error::repository secret POSTHOG_PROJECT_KEY must be set to a phc_ project key"; exit 1 ;;
+            *) echo "::error::repository secret POSTHOG_PROJECT_KEY must be a phc_ project key"; exit 1 ;;
           esac
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - id: next
         env:
-          CHANNEL: ${{ inputs.channel }}
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
           BUMP: ${{ inputs.bump }}
           VERSION: ${{ inputs.version }}
         run: |
@@ -66,7 +71,10 @@ jobs:
             *) echo "::error::unsupported release channel $CHANNEL"; exit 1 ;;
           esac
           echo "Releasing $CHANNEL v$version from $GITHUB_SHA"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "channel=$CHANNEL"
+          } >> "$GITHUB_OUTPUT"
 
   gate:
     name: Lint, typecheck & unit tests
@@ -110,7 +118,7 @@ jobs:
         uses: ./.github/actions/build-binary
         with:
           version: ${{ needs.version.outputs.version }}
-          channel: ${{ inputs.channel }}
+          channel: ${{ needs.version.outputs.channel }}
           target: ${{ matrix.target }}
           posthog-project-key: ${{ secrets.POSTHOG_PROJECT_KEY }}
           posthog-cli-api-key: ${{ secrets.POSTHOG_CLI_API_KEY }}
@@ -186,7 +194,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: v${{ needs.version.outputs.version }}
-          CHANNEL: ${{ inputs.channel }}
+          CHANNEL: ${{ needs.version.outputs.channel }}
         run: |
           set -eu
           if gh release view "$TAG" > /dev/null 2>&1; then
