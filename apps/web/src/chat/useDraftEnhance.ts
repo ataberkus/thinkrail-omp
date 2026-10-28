@@ -1,4 +1,11 @@
-import { type ImageContent, type PromptEnhanceProgress, WS_CHANNELS } from "@thinkrail/contracts";
+import {
+	type ImageContent,
+	type PromptEnhanceFailure,
+	type PromptEnhanceProgress,
+	WS_CHANNELS,
+	type WsResult,
+} from "@thinkrail/contracts";
+import type { MessageKey } from "@thinkrail/locales";
 import { t as translate } from "@thinkrail/locales/react";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { toast, useAppStore } from "@/store";
@@ -11,8 +18,20 @@ import {
 	supportsPromptEnhance,
 } from "./draftEnhance";
 
-// Outlives the host's 180 s run so its `null` arrives instead of a client timeout.
-const ENHANCE_REQUEST_TIMEOUT_MS = 190_000;
+// Outlives the host's 240 s run so its `timeout` answer arrives instead of a client timeout.
+const ENHANCE_REQUEST_TIMEOUT_MS = 250_000;
+
+const FAILURE_KEYS: Partial<Record<PromptEnhanceFailure, MessageKey>> = {
+	tooLong: "chat.composer.enhance.failedTooLong",
+	unavailable: "chat.composer.enhance.failedUnavailable",
+	timeout: "chat.composer.enhance.failedTimeout",
+	emptyOutput: "chat.composer.enhance.failedEmpty",
+};
+
+function failureMessage({ reason, error }: WsResult<"prompt.enhance">): string {
+	if (reason === "error" && error) return translate("chat.composer.enhance.failedWith", { error });
+	return translate((reason && FAILURE_KEYS[reason]) || "chat.composer.enhance.failed");
+}
 
 interface EnhanceRun {
 	sessionId: string;
@@ -32,7 +51,7 @@ export function useDraftEnhance(
 	const supported = useAppStore((s) => supportsPromptEnhance(s.protocolVersion));
 	const runRef = useRef<EnhanceRun | null>(null);
 	const [runningFor, setRunningFor] = useState<string | null>(null);
-	const [step, setStep] = useState<PromptEnhanceProgress["step"] | null>(null);
+	const [progress, setProgress] = useState<PromptEnhanceProgress | null>(null);
 	const shownRef = useRef(sessionId);
 	useEffect(() => {
 		shownRef.current = sessionId;
@@ -44,23 +63,19 @@ export function useDraftEnhance(
 		else useAppStore.getState().setChatDraft(target, text);
 	};
 
-	const finish = (run: EnhanceRun, text: string | null, error?: unknown) => {
+	const finish = (run: EnhanceRun, text: string | null, failure: string) => {
 		if (runRef.current !== run) return;
 		runRef.current = null;
 		run.unsubscribe();
 		setRunningFor(null);
-		setStep(null);
+		setProgress(null);
 		const current = useAppStore.getState().sessions[run.sessionId]?.draft;
 		const outcome = enhanceOutcome(run.original, current, text);
 		if (outcome === "dropped") return;
 		if (outcome === "failed") {
-			const message =
-				error === undefined
-					? translate("chat.composer.enhance.failed")
-					: translate("chat.composer.enhance.failedWith", { error: errorText(error) });
 			const composer = shownRef.current === run.sessionId ? composerRef.current : null;
-			if (composer) composer.showError(message);
-			else toast.error(message);
+			if (composer) composer.showError(failure);
+			else toast.error(failure);
 			return;
 		}
 		const enhanced = text ?? "";
@@ -97,7 +112,7 @@ export function useDraftEnhance(
 				runRef.current = null;
 				active.unsubscribe();
 				setRunningFor(null);
-				setStep(null);
+				setProgress(null);
 				void getTransport()
 					.request("prompt.enhanceCancel", { requestId: active.requestId })
 					.catch(() => {});
@@ -109,9 +124,9 @@ export function useDraftEnhance(
 		if (!canEnhanceDraft(original)) return;
 		const requestId = crypto.randomUUID();
 		const unsubscribe = getTransport().subscribe(WS_CHANNELS.promptEnhanceProgress, (data) => {
-			const progress = data as PromptEnhanceProgress;
-			if (progress.requestId === requestId && runRef.current?.requestId === requestId)
-				setStep(progress.step);
+			const update = data as PromptEnhanceProgress;
+			if (update.requestId === requestId && runRef.current?.requestId === requestId)
+				setProgress(update);
 		});
 		const run = { sessionId, requestId, original, unsubscribe };
 		runRef.current = run;
@@ -130,8 +145,13 @@ export function useDraftEnhance(
 				{ timeoutMs: ENHANCE_REQUEST_TIMEOUT_MS },
 			)
 			.then(
-				({ text }) => finish(run, text),
-				(error: unknown) => finish(run, null, error),
+				(result) => finish(run, result.text, failureMessage(result)),
+				(error: unknown) =>
+					finish(
+						run,
+						null,
+						translate("chat.composer.enhance.failedWith", { error: errorText(error) }),
+					),
 			);
 	};
 
@@ -139,7 +159,7 @@ export function useDraftEnhance(
 	return {
 		running: runningFor === sessionId,
 		blocked: runningFor !== null && runningFor !== sessionId,
-		step: runningFor === sessionId ? step : null,
+		progress: runningFor === sessionId ? progress : null,
 		toggle,
 	};
 }

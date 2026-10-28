@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createAgentSession, getAgentDir, SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { resolveRoleSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { ImageContent } from "@thinkrail/contracts";
 import { sessionRunSnapshot } from "./agentSessionManager";
 
@@ -14,12 +15,16 @@ export interface ReadOnlyAgentStep {
 export interface ReadOnlyAgentRequest {
 	/** The live chat whose folder, model and thinking level the run borrows. */
 	sessionId: string;
+	/** omp `modelRoles` entry that, when set and available, replaces the chat's model and thinking level. */
+	modelRole?: string | undefined;
 	system: string;
 	prompt: string;
 	images?: ImageContent[] | undefined;
 	maxLookups: number;
 	signal: AbortSignal;
 	onStep?: ((step: ReadOnlyAgentStep) => void) | undefined;
+	/** Called once before the run with the display name of the model it runs on. */
+	onModel?: ((model: string) => void) | undefined;
 }
 
 const TOOLS: readonly ReadOnlyTool[] = ["read", "grep", "glob"];
@@ -75,15 +80,24 @@ function stepTarget(tool: ReadOnlyTool, args: Record<string, unknown>): string {
 }
 
 /**
- * One ephemeral, read-only agent run in a live chat's folder on that chat's model and effort: only
- * read / grep / glob inside the folder, at most `maxLookups` of them, nothing persisted. Resolves with
- * the final assistant text, `null` when the chat has no usable model; rejects on abort or engine error.
+ * One ephemeral, read-only agent run in a live chat's folder on `modelRole`'s model when configured,
+ * else that chat's model and effort: only read / grep / glob inside the folder, at most `maxLookups`
+ * of them, nothing persisted. Resolves with the final assistant text, `null` when the chat has no
+ * usable model; rejects on abort or engine error.
  */
 export async function runReadOnlyAgent(req: ReadOnlyAgentRequest): Promise<string | null> {
 	const snapshot = sessionRunSnapshot(req.sessionId);
 	if (!snapshot) return null;
 	req.signal.throwIfAborted();
 	const { cwd, generation } = snapshot;
+	const role = req.modelRole
+		? resolveRoleSelection(
+				[req.modelRole],
+				snapshot.settings,
+				generation.runtime.modelRegistry.getAvailable(),
+			)
+		: undefined;
+	const thinkingLevel = role ? role.thinkingLevel : snapshot.thinkingLevel;
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir: getAgentDir(),
@@ -91,8 +105,8 @@ export async function runReadOnlyAgent(req: ReadOnlyAgentRequest): Promise<strin
 		authStorage: generation.runtime.authStorage,
 		modelRegistry: generation.runtime.modelRegistry,
 		sessionManager: SessionManager.inMemory(cwd),
-		model: snapshot.model,
-		...(snapshot.thinkingLevel ? { thinkingLevel: snapshot.thinkingLevel } : {}),
+		model: role?.model ?? snapshot.model,
+		...(thinkingLevel ? { thinkingLevel } : {}),
 		systemPrompt: req.system,
 		toolNames: [...TOOLS],
 		restrictToolNames: true,
@@ -107,6 +121,7 @@ export async function runReadOnlyAgent(req: ReadOnlyAgentRequest): Promise<strin
 		hasUI: false,
 	});
 	const abort = () => void session.abort().catch(() => {});
+	if (session.model) req.onModel?.(session.model.name || session.model.id);
 	try {
 		let lookups = 0;
 		const prior = session.agent.beforeToolCall;

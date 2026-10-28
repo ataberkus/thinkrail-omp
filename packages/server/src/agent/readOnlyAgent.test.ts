@@ -2,8 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { fauxAssistantMessage, fauxToolCall } from "pi-faux";
-import { getSessionMessages } from "./agentSessionManager";
+import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "pi-faux";
+import { getSessionMessages, sessionRunSnapshot } from "./agentSessionManager";
 import { type McpHarness, startMcpHarness } from "./mcp/fixtures/harness";
 import { lookupBlockReason, type ReadOnlyAgentStep, runReadOnlyAgent } from "./readOnlyAgent";
 
@@ -116,6 +116,52 @@ test("abort rejects the run", async () => {
 			signal: controller.signal,
 		}),
 	).rejects.toThrow();
+});
+
+test("a configured model role replaces the chat's model and is the one named; an unset one keeps it", async () => {
+	const role = createFauxCore({
+		provider: "faux-role",
+		api: "faux-role",
+		models: [{ id: "role-model" }],
+	});
+	h.runtime.registerProvider("faux-role", {
+		api: role.api,
+		apiKey: "test",
+		baseUrl: "http://faux.local",
+		streamSimple: role.streamSimple,
+		models: [
+			{
+				id: "role-model",
+				name: "role-model",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 100_000,
+				maxTokens: 4096,
+				api: role.api,
+			},
+		],
+	});
+	const { sessionId } = await h.chat();
+	const named: string[] = [];
+	const run = (modelRole: string) =>
+		runReadOnlyAgent({
+			sessionId,
+			modelRole,
+			system: "S",
+			prompt: "d",
+			maxLookups: 8,
+			signal: new AbortController().signal,
+			onModel: (model) => named.push(model),
+		});
+	sessionRunSnapshot(sessionId)?.settings.setModelRole("enhance", "faux-role/role-model");
+	role.setResponses([fauxAssistantMessage("FROM_ROLE")]);
+	h.faux.setResponses([fauxAssistantMessage("FROM_CHAT")]);
+	expect(await run("enhance")).toBe("FROM_ROLE");
+	expect(await run("unset-role")).toBe("FROM_CHAT");
+	expect(named[0]).toBe("role-model");
+	expect(named).toHaveLength(2);
+	expect(named[1]).not.toBe("role-model");
 });
 
 test("an unknown chat yields null", async () => {

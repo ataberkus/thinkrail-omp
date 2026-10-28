@@ -6,7 +6,7 @@ const DRAFT = "add search to the feature list in the project json";
 test("✨ Enhance reads the repository, shows its lookups and grounds the rewrite", {
 	tag: "@agent",
 }, async ({ page }) => {
-	test.setTimeout(240_000);
+	test.setTimeout(300_000);
 	await openWorkspaceChat(page);
 	const input = page.getByTestId("chat-input");
 	await input.fill(DRAFT);
@@ -14,9 +14,11 @@ test("✨ Enhance reads the repository, shows its lookups and grounds the rewrit
 
 	const status = page.getByTestId("composer-enhance-status");
 	await expect(status).toBeVisible();
-	await expect(status).toHaveText(/^(Reading|Searching for|Listing) .+…$/, { timeout: 120_000 });
+	await expect(status).toHaveText(/^(Reading|Searching for|Listing) .+… · .+$/, {
+		timeout: 120_000,
+	});
 
-	await expect(input).not.toHaveValue(DRAFT, { timeout: 200_000 });
+	await expect(input).not.toHaveValue(DRAFT, { timeout: 250_000 });
 	await expect(status).toBeHidden();
 	await expect(input).toHaveValue(/sample\.json/);
 	await expect(input).toHaveValue(/features/);

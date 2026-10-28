@@ -232,16 +232,16 @@ test("tool responses replace the ask-only answer method at v93", () => {
 	expect(WS_METHODS.sessionAnswerQuestion).toBe("session.answerQuestion");
 });
 
-test("repository-reading prompt enhancement is pinned to v95", () => {
-	expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(PROMPT_ENHANCE_PROTOCOL_VERSION);
-	expect(PROMPT_ENHANCE_PROTOCOL_VERSION).toBe(95);
+test("repository-reading prompt enhancement with failure reasons and the model is pinned to v97", () => {
+	expect(PROTOCOL_VERSION).toBe(97);
+	expect(PROMPT_ENHANCE_PROTOCOL_VERSION).toBe(97);
 	expect(WS_METHODS.promptEnhance).toBe("prompt.enhance");
 	expect(WS_METHODS.promptEnhanceCancel).toBe("prompt.enhanceCancel");
 	expect(WS_CHANNELS.promptEnhanceProgress).toBe("prompt.enhanceProgress");
 });
 
 test("provider plan usage is pinned to v96", () => {
-	expect(PROTOCOL_VERSION).toBe(96);
+	expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(PROVIDER_USAGE_PROTOCOL_VERSION);
 	expect(PROVIDER_USAGE_PROTOCOL_VERSION).toBe(96);
 	expect(WS_METHODS.providerUsage).toBe("provider.usage");
 });

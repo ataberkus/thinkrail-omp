@@ -608,10 +608,11 @@ enabled/confirmed choice before entering analytics attribution.
   reports `published: null` (unknown) rather than the fetch repository's answer; `workspace.push` stamps activity
   like `pr.open` and drops the worktree's review cache through `pr`; `pr.generate` is composed here —
   `pr` gathers the bounded input (`prDraftInput`), `assist` drafts — so `pr` gains no `assist` edge;
-  `prompt.enhance` (v95, `promptEnhance.ts`) runs `assist.suggestPromptEnhancement` under a per-client
-  `requestId → AbortController` (`prompt.enhanceCancel` aborts it) and pushes each lookup on
-  `prompt.enhanceProgress` to the requesting socket only; a dropped socket does not cancel it, since the
-  request replay cache keeps the client until the run settles (180 s bound). **Review
+  `prompt.enhance` (v97, `promptEnhance.ts`) runs `assist.suggestPromptEnhancement` under a per-client
+  `requestId → AbortController` (`prompt.enhanceCancel` aborts it), pushes its model once it starts and each
+  lookup (with that model) on `prompt.enhanceProgress` to the requesting socket only, and returns the
+  rewrite or `assist`'s failure reason; a dropped socket does not cancel it, since the
+  request replay cache keeps the client until the run settles (240 s bound). **Review
   actions (v88):** `pr.ready` / `pr.merge` / `pr.reopen` / `workspace.deleteRemoteBranch` delegate to `pr` and
   stamp activity like a push; the snapshot follows on the client's next fresh `workspace.branchStatus`
   (a merged review needs the provider's merge time, which only the lookup has). `skipFetch` on

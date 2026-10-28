@@ -44,6 +44,7 @@ import type {
 	Project,
 	ProjectPathStatus,
 	ProjectTrustSummary,
+	PromptEnhanceFailure,
 	PromptEnhanceMessage,
 	ProviderStatusReport,
 	ProviderUsageSnapshot,
@@ -124,9 +125,9 @@ export type TemplateReadLocation =
 	| { projectId: string; workspaceId?: never }
 	| { workspaceId?: never; projectId?: never };
 
-export const PROTOCOL_VERSION = 96;
+export const PROTOCOL_VERSION = 97;
 export const PROVIDER_USAGE_PROTOCOL_VERSION = 96;
-export const PROMPT_ENHANCE_PROTOCOL_VERSION = 95;
+export const PROMPT_ENHANCE_PROTOCOL_VERSION = 97;
 export const TOOL_RESPONSE_PROTOCOL_VERSION = 93;
 export const USER_THEMES_PROTOCOL_VERSION = 92;
 export const HOST_ENVIRONMENT_PROTOCOL_VERSION = 91;
@@ -706,7 +707,7 @@ export interface WsMethodMap {
 			conversation?: PromptEnhanceMessage[];
 			images?: ImageContent[];
 		};
-		result: { text: string | null };
+		result: { text: string | null; reason?: PromptEnhanceFailure; error?: string };
 	};
 	"prompt.enhanceCancel": { params: { requestId: string }; result: Ack };
 	"pr.ready": {

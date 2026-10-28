@@ -40,21 +40,27 @@ prompt (`prompt.enhance`) is the third. The tasks are a **library surface** — 
     best-effort terms. With a `template` the draft keeps the template's headings and checklist and fills
     their bodies; `toPrDescription(raw)` is the output guard (strip a code fence, clamp length, `null` when
     empty).
-  - `suggestPromptEnhancement({ sessionId, draft, conversation?, images?, signal?, onStep? })` → the
-    message box's ✨ Enhance rewrite: the draft expanded into an engineering prompt grounded in the chat's
-    repository (Request / Inferred requirements / Assumptions / Done when, by intent; a question stays a
-    question) in the draft's language, or `null` on the same best-effort terms, on cancel, for a gone chat,
-    and for an empty or over-20 000-character draft. The input is the draft plus at most the last 6
-    `user`/`assistant` turns (the latest assistant reply clipped to 6 000 characters, older turns to 1 500,
+  - `suggestPromptEnhancement({ sessionId, draft, conversation?, images?, signal?, onStep?, onModel? })` →
+    the message box's ✨ Enhance rewrite: the draft expanded into an engineering prompt grounded in the
+    chat's repository (Request / Inferred requirements / Assumptions / Done when, by intent; a question
+    stays a question) in the draft's language, as `{ text }`. It never throws: with no rewrite it returns
+    `{ text: null, reason }` — `empty`, `tooLong` (over 200 000 characters, omp-companion's limit),
+    `unavailable` (chat gone or no model), `timeout`, `cancelled`, `emptyOutput`, or `error` with the
+    engine message's first line, as omp-companion shows its failures. The input is the draft plus
+    at most the last 6 `user`/`assistant` turns (the latest assistant reply clipped to 6 000 characters,
+    older turns to 1 500,
     both ends kept), wrapped in `<conversation>` / `<draft>` with tag lookalikes defused so quoted text
     cannot close them; attached images ride along. It ports omp-companion's enhancer whole: one
-    `agent.runReadOnlyAgent` run on the chat's own model and thinking level in the chat's folder, at most
-    12 read/grep/glob lookups, 180 s; `onStep` reports each lookup. `toEnhancedPrompt(raw)` is the output
+    `agent.runReadOnlyAgent` run in the chat's folder on omp's `modelRoles.enhance` (its own thinking level,
+    else omp's default) when that resolves to an available model — the same `config.yml` key omp-companion
+    reads, so both share one Enhance model — otherwise on the chat's own model and thinking level; at most
+    12 read/grep/glob lookups, 240 s; `onModel` names the model once it starts and `onStep` reports each
+    lookup. `toEnhancedPrompt(raw)` is the output
     guard (unwrap a fence around the whole prompt, not one that merely opens it; `null` when empty).
 - **Public surface (barrel):** `setOneShotRunner`, `setReadOnlyRunner`, `suggestPlanSummary`,
   `toPlanSummary`, `suggestPrDescription`, `toPrDescription`, `suggestPromptEnhancement`,
   `toEnhancedPrompt`, `OneShotRunner`, `ReadOnlyRunner`, `PlanSummaryStep`, `PrDescriptionInput`,
-  `PromptEnhanceInput`, `PromptEnhanceMessage`.
+  `PromptEnhanceInput`, `PromptEnhanceMessage`, `PromptEnhanceResult`.
 - **Allowed deps:** `agent` (the `completeOnce`/`OneShotRequest`/`OneShotResult` and
   `runReadOnlyAgent`/`ReadOnlyAgentRequest`/`ReadOnlyAgentStep` primitives, via its barrel); Node.
 - **Forbidden:** `host`; **`@oh-my-pi/pi-ai` / `pi-coding-agent` directly** (model access + dispatch

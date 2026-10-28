@@ -1,4 +1,4 @@
-import type { ImageContent } from "@thinkrail/contracts";
+import type { ImageContent, PromptEnhanceFailure } from "@thinkrail/contracts";
 import {
 	completeOnce,
 	type OneShotRequest,
@@ -268,8 +268,8 @@ By intent:
 
 Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.`;
 
-const PROMPT_ENHANCE_TIMEOUT_MS = 180_000;
-const PROMPT_ENHANCE_MAX_DRAFT = 20_000;
+const PROMPT_ENHANCE_TIMEOUT_MS = 240_000;
+const PROMPT_ENHANCE_MAX_DRAFT = 200_000;
 const PROMPT_ENHANCE_TAIL = 6;
 
 export interface PromptEnhanceMessage {
@@ -283,41 +283,57 @@ export interface PromptEnhanceInput {
 	draft: string;
 	conversation?: PromptEnhanceMessage[] | undefined;
 	images?: ImageContent[] | undefined;
-	/** Cancels the run; the result is then `null`. */
+	/** Cancels the run; the result is then `cancelled`. */
 	signal?: AbortSignal | undefined;
 	onStep?: ((step: ReadOnlyAgentStep) => void) | undefined;
+	/** The display name of the model the run uses, once it starts. */
+	onModel?: ((model: string) => void) | undefined;
 }
+
+export type PromptEnhanceResult =
+	| { text: string }
+	| { text: null; reason: PromptEnhanceFailure; error?: string };
 
 /**
  * Rewrite a message-box draft into a complete prompt grounded in the chat's repository: a read-only
- * agent run on the chat's model and effort, at most {@link PROMPT_ENHANCE_MAX_LOOKUPS} lookups,
- * time-boxed. Returns Markdown or `null` (never throws) when the draft is empty or too long, the chat
- * is gone, it is cancelled or times out, or the output is unusable.
+ * agent run on omp's `enhance` model role when set, else the chat's model and effort, at most
+ * {@link PROMPT_ENHANCE_MAX_LOOKUPS} lookups, time-boxed. Never throws: a run with no rewrite says why
+ * (empty or too-long draft, no chat or model, timeout, cancel, unusable output, engine error).
  */
-export async function suggestPromptEnhancement(input: PromptEnhanceInput): Promise<string | null> {
-	const prompt = buildPromptEnhanceInput(input);
-	if (!prompt) return null;
+export async function suggestPromptEnhancement(
+	input: PromptEnhanceInput,
+): Promise<PromptEnhanceResult> {
+	const { draft } = input;
+	if (typeof draft !== "string" || !draft.trim()) return { text: null, reason: "empty" };
+	if (draft.length > PROMPT_ENHANCE_MAX_DRAFT) return { text: null, reason: "tooLong" };
 	const timeout = AbortSignal.timeout(PROMPT_ENHANCE_TIMEOUT_MS);
 	try {
-		const text = await runReadOnly({
+		const raw = await runReadOnly({
 			sessionId: input.sessionId,
+			modelRole: "enhance",
 			system: PROMPT_ENHANCE_SYSTEM,
-			prompt,
+			prompt: buildPromptEnhanceInput(draft, input.conversation),
 			images: input.images,
 			maxLookups: PROMPT_ENHANCE_MAX_LOOKUPS,
 			signal: input.signal ? AbortSignal.any([input.signal, timeout]) : timeout,
 			onStep: input.onStep,
+			onModel: input.onModel,
 		});
-		return text === null ? null : toEnhancedPrompt(text);
-	} catch {
-		return null;
+		if (raw === null) return { text: null, reason: "unavailable" };
+		const text = toEnhancedPrompt(raw);
+		return text === null ? { text: null, reason: "emptyOutput" } : { text };
+	} catch (error) {
+		if (input.signal?.aborted) return { text: null, reason: "cancelled" };
+		if (timeout.aborted) return { text: null, reason: "timeout" };
+		const message = (error instanceof Error ? error.message : String(error)).trim().split("\n")[0];
+		return { text: null, reason: "error", ...(message ? { error: message } : {}) };
 	}
 }
 
-function buildPromptEnhanceInput({ draft, conversation }: PromptEnhanceInput): string | null {
-	if (typeof draft !== "string" || !draft.trim() || draft.length > PROMPT_ENHANCE_MAX_DRAFT) {
-		return null;
-	}
+function buildPromptEnhanceInput(
+	draft: string,
+	conversation: PromptEnhanceInput["conversation"],
+): string {
 	const tail = (Array.isArray(conversation) ? conversation : [])
 		.filter(
 			(m): m is PromptEnhanceMessage =>

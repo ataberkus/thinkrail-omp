@@ -1,4 +1,4 @@
-import type { PromptEnhanceProgress, WsParams } from "@thinkrail/contracts";
+import type { PromptEnhanceProgress, WsParams, WsResult } from "@thinkrail/contracts";
 import { suggestPromptEnhancement } from "../assist";
 
 type ProgressPublisher = (clientKey: string, progress: PromptEnhanceProgress) => void;
@@ -10,25 +10,31 @@ export function setPromptEnhanceProgressPublisher(fn: ProgressPublisher): void {
 	publishProgress = fn;
 }
 
-/** Runs one ✨ Enhance for `clientKey`, pushing each lookup to that client until it settles or is cancelled. */
+/** Runs one ✨ Enhance for `clientKey`, pushing its model and each lookup to that client until it settles or is cancelled. */
 export async function enhancePrompt(
 	params: WsParams<"prompt.enhance">,
 	clientKey: string,
-): Promise<{ text: string | null }> {
+): Promise<WsResult<"prompt.enhance">> {
 	const key = `${clientKey}\0${params.requestId}`;
 	running.get(key)?.abort();
 	const controller = new AbortController();
 	running.set(key, controller);
+	let model = "";
+	const publish = (step: PromptEnhanceProgress["step"]) =>
+		publishProgress(clientKey, { requestId: params.requestId, model, step });
 	try {
-		const text = await suggestPromptEnhancement({
+		return await suggestPromptEnhancement({
 			sessionId: params.sessionId,
 			draft: params.draft,
 			conversation: params.conversation,
 			images: params.images,
 			signal: controller.signal,
-			onStep: (step) => publishProgress(clientKey, { requestId: params.requestId, step }),
+			onModel: (name) => {
+				model = name;
+				publish(null);
+			},
+			onStep: publish,
 		});
-		return { text };
 	} finally {
 		if (running.get(key) === controller) running.delete(key);
 	}

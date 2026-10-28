@@ -241,11 +241,25 @@ export interface PromptEnhanceMessage {
 	text: string;
 }
 
-/** `prompt.enhanceProgress` (v95): one repository lookup the enhancer is making for `requestId`. */
+/**
+ * `prompt.enhanceProgress` (v97): the model enhancing for `requestId` (sent once with `step: null` when the
+ * run starts) and each repository lookup it makes.
+ */
 export interface PromptEnhanceProgress {
 	requestId: string;
-	step: { tool: "read" | "grep" | "glob"; target: string };
+	model: string;
+	step: { tool: "read" | "grep" | "glob"; target: string } | null;
 }
+
+/** `prompt.enhance` (v97): why a run returned no rewrite; `error` carries the engine's message. */
+export type PromptEnhanceFailure =
+	| "empty"
+	| "tooLong"
+	| "unavailable"
+	| "timeout"
+	| "cancelled"
+	| "emptyOutput"
+	| "error";
 
 export type ReviewProvider = "github" | "gitlab";
 

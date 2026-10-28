@@ -962,14 +962,15 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
 - **Prompt enhance** (`Composer` control, `useDraftEnhance.ts` orchestration, pure rules in the store-free
   `draftEnhance.ts`) — ported from omp-companion's ✨ Enhance. A Remix `RiSparkling2Line` `IconButton ghost m`
   (`composer-enhance`) leads the trailing cluster, rendered only from a `PROMPT_ENHANCE_PROTOCOL_VERSION`
-  (v95) host; `Cmd/Ctrl+Shift+E` in the message box does the same. It is disabled for an empty draft or a
+  (v97) host; `Cmd/Ctrl+Shift+E` in the message box does the same. It is disabled for an empty draft or a
   `/` command, and while another chat's enhance runs in this view. A click mints a `requestId` and sends
   the chat's `sessionId`, the trimmed draft, the last 6 user/assistant turns (`enhanceConversation`: each
   assistant run reduced to its last reply with text) and the composer's attached images to
-  `prompt.enhance` with a client timeout (190 s) outliving the host's. **While it runs** the textarea is
-  `readOnly`, send is disarmed, a `composer-enhance-status` chip shows the latest repository lookup from
-  `prompt.enhanceProgress` (*Reading / Searching for / Listing {target}…*, *Enhancing prompt…* before the
-  first), and the control turns into `RiCloseLine` *Cancel enhance* (`data-running`, `selected`) — a second
+  `prompt.enhance` with a client timeout (250 s) outliving the host's. **While it runs** the textarea is
+  `readOnly`, send is disarmed, a `composer-enhance-status` chip shows the latest repository lookup and the
+  model from `prompt.enhanceProgress` (*Reading / Searching for / Listing {target}…*, *Enhancing prompt…*
+  before the first, then ` · {model}`, as the companion's status line names it), and the control turns into
+  `RiCloseLine` *Cancel enhance* (`data-running`, `selected`) — a second
   click cancels instead of starting another: it sends `prompt.enhanceCancel`, drops any late answer, and
   says nothing. Streaming
   does not gate it: the send modes work again once it settles. **Settling** (`enhanceOutcome`) re-reads the
@@ -978,10 +979,12 @@ both message orders. *Rejected:* keeping the modal for non-MCP extensions — ev
   *Prompt enhanced* toast whose **Undo** restores the original; changed meanwhile (chat switched in this
   view, text inserted) → never overwritten, an info toast offers *Use enhanced prompt*; a session that no
   longer exists drops it. A run for a chat this view no longer shows writes that chat's store draft instead.
-  A `null` answer or a rejected request leaves the draft as is and shows the reason in the
-  `composer-command-error` chip (a toast when the chat is not shown). The host reads the repository on
-  the chat's own model and thinking level ([[submodule-server-assist]]), matching the companion; the
-  companion's role-chosen model setting is not carried over. Live coverage: `e2e/enhance.live.spec.ts`
+  A `null` answer or a rejected request leaves the draft as is and shows why in the
+  `composer-command-error` chip (a toast when the chat is not shown): the host's `reason` picks a specific
+  message (too long, no model, timed out, no rewrite, or the engine's own error text), else the generic
+  *check that a model is signed in*. The host reads the repository on
+  omp's `modelRoles.enhance` model when it is available, else the chat's own model and thinking level
+  ([[submodule-server-assist]]), matching the companion. Live coverage: `e2e/enhance.live.spec.ts`
   (@agent).
 - **Queued messages: the pending strip** (`QueueStrip.tsx`, props-driven: `queue` + `onEdit`/`onRemove`)
   — the web mirror of pi's interactive-mode pending-messages area. A **streaming send never renders an

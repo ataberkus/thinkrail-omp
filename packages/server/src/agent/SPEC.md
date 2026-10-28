@@ -483,14 +483,18 @@ re-opened transcripts provider-valid.
     = `preferredDefaultModel`; `null` when nothing is authenticated. This is the primitive the `assist` tasks
     (plan summaries, PR drafting) run on — the only place model **dispatch** happens outside a session.
   - `readOnlyAgent` — `runReadOnlyAgent(request)`: one **ephemeral** `createAgentSession` borrowing a live
-    chat's folder, model, thinking level, settings and runtime generation (`sessionRunSnapshot`), with
+    chat's folder, settings and runtime generation (`sessionRunSnapshot`) and its model and thinking level
+    unless `request.modelRole` resolves (`resolveRoleSelection` over the chat's settings) to an available
+    model, which then runs at that role's thinking level, with
     `SessionManager.inMemory`, `restrictToolNames` to read/grep/glob, no MCP/LSP/extension discovery/skills/
     rules/context files, `hasUI: false` and the caller's system prompt; always disposed, never touches the
     chat's transcript. Its guard is the `agent.beforeToolCall` hook (restricted sessions drop inline
     extensions), chained to any prior hook: `lookupBlockReason` refuses URIs, `~`, `..`, absolute or
     symlinked escapes from the folder, `.env` secrets and `gitignore: false` greps; every call, blocked
-    ones included, counts toward `maxLookups`, past which calls are refused with "write it now". Accepted
-    lookups go to `onStep`; the signal aborts the session. ✨ Enhance (`assist`) is its only caller.
+    ones included, counts toward `maxLookups`, past which calls are refused ("write the rewritten prompt now
+    from what you have"). Accepted
+    lookups go to `onStep`, the model's display name to `onModel` once before the run; the signal aborts
+    the session. ✨ Enhance (`assist`) is its only caller.
   - `webUiContext` — `createWebUiContext(sessionId, currentToolCall?)` builds the `ExtensionUIContext` pi
     calls (dialogs round-trip to the browser, fire-and-forget methods push). A dialog names the tool call
     it is about (`toolCallId`) so the web asks on that call's card: a dialog anchors only while **exactly

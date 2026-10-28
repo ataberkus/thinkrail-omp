@@ -656,15 +656,17 @@ default, narrow cross-ring guards, and the quit-confirmation rule both clients d
   deleteBranch` → `MergePrResult { merged, branchDeleted, deleteError? }` — `merged: false` when GitHub only
   queued it (merge queue / auto-merge), in which case the branch is never deleted; a merge that landed while
   the branch deletion failed is a success with the reason), and **`workspace.deleteRemoteBranch`** (`{ workspaceId,
-  branch }` → `Ack`; `PUSH_AUTH_FAILED` as for a push) / **`prompt.enhance`** (v95,
+  branch }` → `Ack`; `PUSH_AUTH_FAILED` as for a push) / **`prompt.enhance`** (v95, reasons and model v97,
   `PROMPT_ENHANCE_PROTOCOL_VERSION`; `{ sessionId, requestId, draft, conversation?: PromptEnhanceMessage[],
-  images?: ImageContent[] }` → `{ text: string | null }`, the message box's best-effort rewrite of a draft,
-  grounded by read-only lookups in that chat's folder on its model; `requestId` is client-minted;
-  `conversation` is the client's recent `user`/`assistant` text, bounded again by the host; `null` when no
-  model answered, it was cancelled, the chat is gone or the draft is empty), **`prompt.enhanceCancel`**
-  (`{ requestId }` → `Ack`, aborts that client's run) and the push **`prompt.enhanceProgress`**
-  (`PromptEnhanceProgress { requestId, step: { tool: "read" | "grep" | "glob", target } }`, sent only to the
-  requesting client) /
+  images?: ImageContent[] }` → `{ text: string | null, reason?: PromptEnhanceFailure, error?: string }`, the
+  message box's best-effort rewrite of a draft, grounded by read-only lookups in that chat's folder;
+  `requestId` is client-minted; `conversation` is the client's recent `user`/`assistant` text, bounded again
+  by the host; a `null` text carries why — `empty` / `tooLong` / `unavailable` (chat gone or no model) /
+  `timeout` / `cancelled` / `emptyOutput` / `error`, the last with the engine message's first line in
+  `error`), **`prompt.enhanceCancel`** (`{ requestId }` → `Ack`, aborts that client's run) and the push
+  **`prompt.enhanceProgress`** (`PromptEnhanceProgress { requestId, model, step: { tool: "read" | "grep" |
+  "glob", target } | null }`: `model` is the display name of the model enhancing, sent with `step: null` once
+  the run starts and on every lookup; sent only to the requesting client) /
   **`project.setTrust`** (persist a project's trust grant → the updated `Project`; gates its committed
   cross-agent skill aliases; `resources: true` also grants pi-level resource trust, see Project trust) /
   **`skill.list`** (a pre-session, skill-only `SlashCommandInfo[]` preview for a `projectId`, resolved from

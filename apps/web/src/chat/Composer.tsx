@@ -158,16 +158,16 @@ const ENHANCE_STEP_KEYS = {
 	read: "chat.composer.enhance.stepRead",
 	grep: "chat.composer.enhance.stepGrep",
 	glob: "chat.composer.enhance.stepGlob",
-} as const satisfies Record<PromptEnhanceProgress["step"]["tool"], MessageKey>;
+} as const satisfies Record<NonNullable<PromptEnhanceProgress["step"]>["tool"], MessageKey>;
 
 /**
- * The ✨ Enhance control's state; `blocked` while another chat's enhance is still running here, `step`
- * the latest repository lookup of this chat's run.
+ * The ✨ Enhance control's state; `blocked` while another chat's enhance is still running here,
+ * `progress` the model and latest repository lookup of this chat's run.
  */
 export interface ComposerEnhance {
 	running: boolean;
 	blocked: boolean;
-	step: PromptEnhanceProgress["step"] | null;
+	progress: PromptEnhanceProgress | null;
 	toggle: (images: ImageContent[]) => void;
 }
 
@@ -346,6 +346,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 	};
 
 	const enhancing = enhance?.running ?? false;
+	const enhanceStep = enhance?.progress?.step;
+	const enhanceStatus = enhanceStep
+		? t(ENHANCE_STEP_KEYS[enhanceStep.tool], { target: enhanceStep.target })
+		: t("chat.composer.enhance.running");
+	const enhanceModel = enhance?.progress?.model;
+	const enhanceLabel = enhanceModel
+		? t("chat.composer.enhance.withModel", { status: enhanceStatus, model: enhanceModel })
+		: enhanceStatus;
 	const enhanceReady = !!enhance && !enhance.blocked && canEnhanceDraft(value);
 
 	const canSubmit = (raw: string) =>
@@ -617,15 +625,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 								/>
 							) : null}
 							{enhancing ? (
-								<FileChip
-									data-testid="composer-enhance-status"
-									icon={false}
-									label={
-										enhance?.step
-											? t(ENHANCE_STEP_KEYS[enhance.step.tool], { target: enhance.step.target })
-											: t("chat.composer.enhance.running")
-									}
-								/>
+								<FileChip data-testid="composer-enhance-status" icon={false} label={enhanceLabel} />
 							) : null}
 						</>
 					) : null
