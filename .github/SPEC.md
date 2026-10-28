@@ -161,6 +161,9 @@ Its stable public outputs are:
 
 The recipe stamps the shared version, builds the CLI, invokes the normal Electrobun dev and channel
 builds, then collects exact target/channel outputs. It runs no smokes; artifact smokes live in PR CI.
+macOS legs retry packaging up to three times, detaching any leftover `ThinkRail*` volume, because hosted
+runners' `hdiutil create -srcfolder` intermittently undersizes the image ("No space left on device",
+actions/runner-images#7522).
 Update outputs preserve Electrobun's generated basenames and compressed bytes. The manifest is the exact
 `<stable|canary>-<macos|win|linux>-<arm64|x64>-update.json`. Its `artifact.file` is the archive basename:
 `stable-<platform>-ThinkRail[.app].tar.zst` for stable or
