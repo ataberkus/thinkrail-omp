@@ -49,8 +49,13 @@ blocks in order into rows; `ChatTurnView` dispatches on row kind:
   Everything is parsed from the MESSAGE itself — never the review snapshot, which the next review
   replaces — so any transcript answers "what was sent" forever, on any client; the comment-row folds
   ride the shared fold cache (keyed
-  `rowId:<content-key>`), surviving virtualization. A **plain** user bubble (not a skill/review card)
-  whose text exceeds **500 characters** collapses to a `line-clamp` preview + a `Show more`/`Show less`
+  `rowId:<content-key>`), surviving virtualization. The **plain** user bubble and a skill invocation's user
+  request render their text as Markdown through `UserMarkdown` (`Markdown` + a local remark plugin that keeps
+  single newlines as line breaks, since prompts are typed line by line); skill/review parsing runs on the raw
+  text first, raw HTML stays inert (no `rehype-raw`), workspace-file links stay assistant-only, and copy
+  returns the raw source. The bubble therefore carries no `whitespace-pre-wrap`. A plain user bubble
+  whose text exceeds **500 characters** collapses to a `line-clamp` preview (plus `max-h-[3lh]`, because a
+  `pre`/table starts its own formatting context that line-clamp does not count) + a `Show more`/`Show less`
   toggle **inside the card** (within its padding, directly below the message body, so line-clamp truncates
   only the body's own element — never the control) once the agent has started responding to it: `UserTurn`
   folds on `useFold(`${id}:user-collapse`,
@@ -63,7 +68,8 @@ blocks in order into rows; `ChatTurnView` dispatches on row kind:
   integration supplies that state to the renderer. It remains client view state only, with no wire impact.
   Below 500 chars the bubble is unchanged. When expanded, a large body is height-capped with an internal
   scroll (`max-h-[60vh] overflow-y-auto`) so a huge paste never balloons the row into a multi-thousand-px
-  DOM node; and `estimateChatRowHeight` estimates a large user row at its collapsed size (the resting
+  DOM node; and `estimateChatRowHeight` estimates a small user row with the assistant Markdown estimate
+  at the bubble's narrower measure, and a large user row at its collapsed size (the resting
   state) rather than its full wrapped height — both prevent the virtualizer from over-reserving space and
   stranding a phantom empty gap during streaming. The retry countdown carries a `source` (`turn` =
   pi `auto_retry_*`; `summarization` = compaction/branch-summary `summarization_retry_*`, pi ≥0.81.1) —
