@@ -54,6 +54,7 @@
 	"scripts": {
 		"build": "turbo run build",
 		"dev": "bun scripts/dev.ts",
+		"tailscale": "bun scripts/tailscale.ts",
 		"dev:server": "turbo run dev --filter=@thinkrail/server",
 		"dev:web": "turbo run dev --filter=@thinkrail/web",
 		"build:web": "turbo run build --filter=@thinkrail/web",

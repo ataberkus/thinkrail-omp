@@ -38,7 +38,7 @@ engine architecture.
 
 ## Profile and topology
 
-Only the local-host profile ships. One Electrobun Bun process owns the native shell and server on the
+The local-host profile is the default. One Electrobun Bun process owns the native shell and server on the
 same event loop; the accepted in-process crash trade-off is unchanged. The host binds loopback port `0`
 and its actual port forms the window origin. The packaged `web/dist`, `/ws`, `/files`, and SPA fallback
 therefore remain same-origin and the web client has no desktop branch. A dynamic loopback port is never
@@ -48,6 +48,18 @@ Desktop, CLI, and source hosts do not exclude one another by data directory. Eve
 independent serving port and initializes its own in-process services. If multiple hosts use the same mutable
 state, their persistence and event streams are not coordinated and concurrent changes may overwrite one
 another.
+
+**Shared-host profile (opt-in).** When `THINKRAIL_DESKTOP_HOST_URL` (http/https) is set outside the neutral
+e2e host, the desktop embeds no server: no runtime bundle import, error reporter, or attribution claim.
+Startup requires `GET <origin>/health` to answer ok within 5 s; otherwise it throws
+`Could not reach the ThinkRail host at <origin>`, which surfaces through the ordinary start-failed dialog and
+quits. There is deliberately no fallback to an embedded host, which would split state across two hosts. The
+window does not load the remote origin directly: a non-loopback `http:` origin is not a secure context, so
+WebView `crypto.subtle` is missing and Electrobun's encrypted RPC bridge fails. Instead the desktop serves a
+loopback proxy on `127.0.0.1:0` that forwards HTTP and `/ws` frames to the host; that loopback origin is the
+window origin and navigation rule, and quit stops it. Routes/preferences are scoped by
+`backendProfileId: "shared:<remote origin>"`, separate from `"local"`. `bun run tailscale`
+([[module-repo-scripts]]) uses it to open the desktop beside phones on one Tailscale host.
 
 ## Startup and packaged runtime
 
@@ -591,6 +603,6 @@ release checks described in [[module-ci-release]].
 
 ## Deferred
 
-Shared/remote backend profiles, profile selection, multi-window/deep-link routing, CEF, and removing the
+Remote-host selection UI, profile switching, multi-window/deep-link routing, CEF, and removing the
 `user32` style-bit shim once blackboardsh/electrobun#558 ships. The update feed publication described above
 remains release-owned.
