@@ -16,7 +16,12 @@ import {
 	ResizablePanelGroup,
 } from "@thinkrail/ui/resizable";
 import { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
-import { readLayoutNavigationClock, readLayoutSelection, tupleKey } from "../../lib";
+import {
+	readLayoutNavigationClock,
+	readLayoutSelection,
+	tupleKey,
+	usePhoneViewport,
+} from "../../lib";
 import { projectWorkbenchRatio, restoreWorkbenchRatio } from "./auxiliaryPresentation";
 import { closeRequestTarget } from "./closeRequest";
 import {
@@ -450,25 +455,64 @@ export function Workbench({
 	const leftVisible = document.left.visible && document.left.groups.some((group) => !group.folded);
 	const rightVisible =
 		document.right.visible && document.right.groups.some((group) => !group.folded);
-	const visibleSideMinimums = (leftVisible ? 8 : 0) + (rightVisible ? 8 : 0);
+	const phone = usePhoneViewport();
+	const [phoneSheet, setPhoneSheet] = useState<LayoutSide | null>(null);
+	const centerNavigation = tupleKey(
+		workspaceId,
+		attention.lastFocusedCenterGroupId,
+		readLayoutSelection(attention, attention.lastFocusedCenterGroupId) ?? "",
+		String(readLayoutNavigationClock(attention, attention.lastFocusedCenterGroupId) ?? ""),
+	);
+	const [sheetTrigger, setSheetTrigger] = useState({
+		phone,
+		workspaceId,
+		left: leftVisible,
+		right: rightVisible,
+		centerNavigation,
+	});
+	if (
+		sheetTrigger.phone !== phone ||
+		sheetTrigger.workspaceId !== workspaceId ||
+		sheetTrigger.left !== leftVisible ||
+		sheetTrigger.right !== rightVisible ||
+		sheetTrigger.centerNavigation !== centerNavigation
+	) {
+		setSheetTrigger({
+			phone,
+			workspaceId,
+			left: leftVisible,
+			right: rightVisible,
+			centerNavigation,
+		});
+		if (sheetTrigger.phone !== phone || sheetTrigger.workspaceId !== workspaceId)
+			setPhoneSheet(null);
+		else if (phone && leftVisible && !sheetTrigger.left) setPhoneSheet("left");
+		else if (phone && rightVisible && !sheetTrigger.right) setPhoneSheet("right");
+		else if (sheetTrigger.centerNavigation !== centerNavigation) setPhoneSheet(null);
+	}
+	const phoneSheetSide =
+		phone && phoneSheet && (phoneSheet === "left" ? leftVisible : rightVisible) ? phoneSheet : null;
+	const leftInColumns = leftVisible && !phone;
+	const rightInColumns = rightVisible && !phone;
+	const visibleSideMinimums = (leftInColumns ? 8 : 0) + (rightInColumns ? 8 : 0);
 	const centerMinimumPercent = Math.min(
 		Math.max(10, 100 - visibleSideMinimums),
 		columnsWidth > 0 ? (LAYOUT_LIMITS.minCenterWidth / columnsWidth) * 100 : 10,
 	);
 	const leftOwnsBottomCorner =
-		leftVisible &&
+		leftInColumns &&
 		document.bottom.alignment !== "center-left" &&
 		document.bottom.alignment !== "full";
 	const rightOwnsBottomCorner =
-		rightVisible &&
+		rightInColumns &&
 		document.bottom.alignment !== "center-right" &&
 		document.bottom.alignment !== "full";
-	const leftInAlignedRow = leftVisible && !leftOwnsBottomCorner;
-	const rightInAlignedRow = rightVisible && !rightOwnsBottomCorner;
-	const desiredLeft = leftVisible
+	const leftInAlignedRow = leftInColumns && !leftOwnsBottomCorner;
+	const rightInAlignedRow = rightInColumns && !rightOwnsBottomCorner;
+	const desiredLeft = leftInColumns
 		? projectWorkbenchRatio(document.left.width, workbenchWidth, columnsWidth) * 100
 		: 0;
-	const desiredRight = rightVisible
+	const desiredRight = rightInColumns
 		? projectWorkbenchRatio(document.right.width, workbenchWidth, columnsWidth) * 100
 		: 0;
 	const sideCompression = Math.min(1, 90 / Math.max(Number.EPSILON, desiredLeft + desiredRight));
@@ -781,15 +825,25 @@ export function Workbench({
 		chatFirstPrompts,
 		canFocusAdjacentGroup,
 	};
-	const sideStack = (side: LayoutSide) => (
+	const sideStack = (side: LayoutSide, onHide?: () => void) => (
 		<SideStack
 			side={side}
 			attention={attention}
 			projectionEpoch={projectionEpoch}
 			onCommit={onCommit}
+			{...(onHide ? { onHide } : {})}
 			{...shared}
 		/>
 	);
+	const phoneSheetRail = (side: LayoutSide) =>
+		phone
+			? {
+					sheet: {
+						open: phoneSheetSide === side,
+						onToggle: (open: boolean) => setPhoneSheet(open ? side : null),
+					},
+				}
+			: {};
 	const centerView = (
 		<main data-testid="center-tabs" className="h-full min-h-0 min-w-0">
 			<CenterNodeView
@@ -1033,11 +1087,26 @@ export function Workbench({
 					focusAdjacentGroup(event.shiftKey ? -1 : 1);
 				}}
 			>
-				<AuxiliaryRegionRail region="left" shared={shared} attention={attention} />
-				<div ref={columnsRef} className="min-h-0 min-w-0 flex-1">
+				<AuxiliaryRegionRail
+					region="left"
+					shared={shared}
+					attention={attention}
+					{...phoneSheetRail("left")}
+				/>
+				<div ref={columnsRef} className="relative min-h-0 min-w-0 flex-1">
 					{workbenchColumns}
+					{phoneSheetSide ? (
+						<div data-testid="phone-side-sheet" className="absolute inset-0 z-20 shadow-lg">
+							{sideStack(phoneSheetSide, () => setPhoneSheet(null))}
+						</div>
+					) : null}
 				</div>
-				<AuxiliaryRegionRail region="right" shared={shared} attention={attention} />
+				<AuxiliaryRegionRail
+					region="right"
+					shared={shared}
+					attention={attention}
+					{...phoneSheetRail("right")}
+				/>
 			</div>
 			<DragOverlay dropAnimation={null}>
 				{draggingTab ? (

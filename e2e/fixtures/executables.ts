@@ -15,7 +15,18 @@ export function resolveBunExecutable(env: NodeJS.ProcessEnv = process.env): stri
 }
 
 export function hermeticE2ePath(fakeBinDir: string): string {
-	return [fakeBinDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(delimiter);
+	return [fakeBinDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin", ...windowsHostToolDirs()].join(
+		delimiter,
+	);
+}
+
+// shortcut: Windows gets only git and System32, so specs that drive the POSIX fake bins (`central`, `code`, `gh`, the login shell) still fail there; port those stubs before making Windows a supported e2e host.
+function windowsHostToolDirs(): string[] {
+	if (process.platform !== "win32") return [];
+	const directories = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+	const git = directories.find((directory) => existsSync(join(directory, "git.exe")));
+	const system32 = directories.find((directory) => /[\\/]system32[\\/]?$/i.test(directory));
+	return [git, system32].filter((directory) => directory !== undefined);
 }
 
 export function hermeticE2eShell(fakeBinDir: string): string {

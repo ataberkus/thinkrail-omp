@@ -43,10 +43,10 @@ if (hostPath.split(delimiter).some((directory) => existsSync(join(directory, "pi
 	throw new Error("e2e host PATH must not contain pi");
 const isShardLane =
 	process.env.THINKRAIL_E2E_LANE !== undefined || !!process.env.THINKRAIL_E2E_JOB_SHARD;
+const bun = JSON.stringify(bunExecutable);
+const startHost = `${bun} e2e/fixtures/dataDir.ts && ${bun} packages/server/src/dev.ts`;
 const hostCommand =
-	process.env.THINKRAIL_E2E_SKIP_BUILD === "1"
-		? `${JSON.stringify(bunExecutable)} packages/server/src/dev.ts`
-		: `${JSON.stringify(bunExecutable)} run build:web && ${JSON.stringify(bunExecutable)} packages/server/src/dev.ts`;
+	process.env.THINKRAIL_E2E_SKIP_BUILD === "1" ? startHost : `${bun} run build:web && ${startHost}`;
 export default defineConfig({
 	testDir: "./e2e",
 	// The headless workflow-test suite has its own config (playwright.workflows.config.ts) — no browser,

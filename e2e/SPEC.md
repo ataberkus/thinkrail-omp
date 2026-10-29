@@ -414,6 +414,14 @@ A sandboxed home is handed to every host as **both `HOME` and `USERPROFILE`**: `
 resolution — reads `USERPROFILE` on Windows and ignores `HOME`, so `HOME` alone would silently leak a
 Windows lane into the real profile (see `module-shared`).
 
+**Windows lane state.** Playwright starts the host before global setup and stops it after global teardown,
+and Windows cannot unlink files a live process holds open (its log, SQLite and native-module files). The
+host command therefore wipes the lane data dir (`e2e/fixtures/dataDir.ts`) before booting, and global
+setup/teardown remove what they can, skipping `EBUSY`/`EPERM`/`EACCES` entries on Windows only. The
+hermetic PATH adds the host's `git.exe` directory and `System32` on Windows. The POSIX fake bins (`central`,
+`code`, `gh`, the login shell) are not ported, so specs that drive them still fail on a Windows host, which
+stays unsupported for the full suite.
+
 ## Boundary
 
 - **Owns:** browser scenarios and fixtures under `e2e/`, their Playwright configuration/runner entrypoints,
@@ -427,7 +435,7 @@ Windows lane into the real profile (see `module-shared`).
   encodes how a line is selected. `e2e/phone-review.spec.ts` is the phone-class gate for the review
   surface — Pierre file rendering, unified-only diffs, tap-to-comment and inline placement at
   `PHONE_VIEWPORT` — reached the way the desktop shell reaches a phone today: open at desktop width, then
-  resize and hide the auxiliary stacks.
+  resize (the side stacks leave for the closed phone sheet) and hide the bottom panel.
 - **Consumes:** the built web artifact, the host's public boot/wire behavior, sanctioned server test-fixture
   exports, CLI binary, the locator from [[module-artifact-tests]], shared retrying teardown helper, git,
   Chromium, and Playwright. Standalone native/installer smoke and shared artifact probes are owned by

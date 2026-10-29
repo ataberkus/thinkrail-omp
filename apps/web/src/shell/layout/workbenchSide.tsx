@@ -376,6 +376,7 @@ export const SideStack = memo(function SideStack({
 	projectionEpoch,
 	renderToolBody,
 	onCommit,
+	onHide,
 	...shared
 }: SharedGroupProps & {
 	side: LayoutSide;
@@ -383,6 +384,7 @@ export const SideStack = memo(function SideStack({
 	projectionEpoch: number;
 	renderToolBody: WorkbenchProps["renderToolBody"];
 	onCommit: WorkbenchProps["onCommit"];
+	onHide?: () => void;
 }) {
 	const t = useT();
 	const [sizeRef, size] = useElementSize();
@@ -439,11 +441,19 @@ export const SideStack = memo(function SideStack({
 								groupIndex={documentIndex}
 								selectedId={readLayoutSelection(attention, group.id)}
 								renderToolBody={renderToolBody}
-								onFold={() => {
-									const result = setSideGroupFolded(shared.document, side, group.id, !group.folded);
-									if (!isLayoutUnavailable(result))
-										shared.onApply({ ...result, focusGroupId: group.id });
-								}}
+								onFold={
+									onHide ??
+									(() => {
+										const result = setSideGroupFolded(
+											shared.document,
+											side,
+											group.id,
+											!group.folded,
+										);
+										if (!isLayoutUnavailable(result))
+											shared.onApply({ ...result, focusGroupId: group.id });
+									})
+								}
 								{...shared}
 							/>
 						</PanelWithHandle>

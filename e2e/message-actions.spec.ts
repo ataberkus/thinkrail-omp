@@ -117,9 +117,9 @@ test("an unbounded transcript keeps the user message within the visible pane", a
 		],
 	});
 
-	await page.setViewportSize({ width: 620, height: 900 });
 	await expect(defaultWorkspaceRow(page)).toBeVisible();
 	await enterDefaultWorkspace(page);
+	await page.setViewportSize({ width: 620, height: 900 });
 	await expect(page.locator('[data-testid="editor-tab"][data-kind="chat"]')).toHaveCount(1);
 
 	try {

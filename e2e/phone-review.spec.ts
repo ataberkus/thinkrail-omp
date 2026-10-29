@@ -15,6 +15,8 @@ const worktree = () => join(E2E_DATA_DIR, "worktrees", "sample-project", "worksp
 
 async function goPhone(page: Page): Promise<void> {
 	await page.setViewportSize(PHONE_VIEWPORT);
+	await expect(page.getByTestId("left-stack")).toHaveCount(0);
+	await expect(page.getByTestId("right-stack")).toHaveCount(0);
 	await hideAuxiliaryWorkbench(page);
 }
 

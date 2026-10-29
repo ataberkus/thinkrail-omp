@@ -158,6 +158,8 @@ async function disposeLiveSessions(page: Page): Promise<void> {
 export async function createWorkspaceViaDialog(page: Page): Promise<Workspace> {
 	const before = new Set(loadPersistedWorkspaces().map((w) => w.id));
 	const dialog = page.getByTestId("new-workspace-dialog");
+	if ((await isPhoneClass(page)) && !(await page.getByTestId("add-workspace").first().isVisible()))
+		await page.getByTestId("tool-rail-projects").click();
 	await expect(async () => {
 		if (!(await dialog.isVisible())) await page.getByTestId("add-workspace").first().click();
 		await expect(dialog).toBeVisible({ timeout: 5_000 });
@@ -177,19 +179,29 @@ export async function openAppFresh(page: Page): Promise<void> {
 	await expect(page.getByTestId("connection-status")).toHaveAttribute("data-status", "connected");
 }
 
+function isPhoneClass(page: Page): Promise<boolean> {
+	return page.evaluate(() =>
+		["(pointer: coarse)", "(max-width: 767px)"].some((query) => matchMedia(query).matches),
+	);
+}
+
 export async function openFixtureProject(page: Page): Promise<void> {
 	await openAppFresh(page);
+	const phone = await isPhoneClass(page);
+	if (phone) await page.getByTestId("tool-rail-projects").click();
 	await page.getByTestId("add-project-menu").click();
 	await page.getByTestId("menu-open-project").click();
 	await expect(page.getByTestId("project-item").first()).toBeVisible();
-	await expect(page.getByTestId("welcome")).toBeVisible();
 	await expect(defaultWorkspaceRow(page)).toBeVisible();
+	if (phone) await page.getByTestId("side-group-fold").click();
+	await expect(page.getByTestId("welcome")).toBeVisible();
 }
 
 export async function enterDefaultWorkspace(page: Page): Promise<void> {
 	await page.getByTestId("welcome-action").filter({ hasText: "Work in project folder" }).click();
-	await expect(defaultWorkspaceRow(page)).toHaveAttribute("data-active", "true");
 	await expect(page.getByTestId("center-tabs")).toBeVisible();
+	if (!(await isPhoneClass(page)))
+		await expect(defaultWorkspaceRow(page)).toHaveAttribute("data-active", "true");
 }
 
 // Use this helper when a pane must be visible; rail controls toggle on each click. "files" means Files in All mode, "changes" Files in Changed mode.

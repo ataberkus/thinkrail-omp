@@ -188,20 +188,32 @@ export function AuxiliaryRegionRail({
 	shared,
 	attention,
 	trailing,
+	sheet,
 }: {
 	region: LayoutAuxiliaryRegion;
 	shared: SharedGroupProps;
 	attention: LayoutAttention;
 	trailing?: ReactNode;
+	sheet?: { open: boolean; onToggle: (open: boolean) => void };
 }) {
 	const t = useT();
-	const entries = projectAuxiliaryRail(shared.document, attention, region);
+	const projected = projectAuxiliaryRail(shared.document, attention, region);
+	const entries =
+		sheet && !sheet.open ? projected.map((entry) => ({ ...entry, expanded: false })) : projected;
 	const groups = shared.document[region].groups;
 	const draggedAuxiliary =
 		shared.draggingTab?.kind === "tool" || shared.draggingTab?.kind === "terminal"
 			? shared.draggingTab
 			: null;
 	const activate = (entry: AuxiliaryRailEntry) => {
+		if (sheet) {
+			const shown = projected.find((candidate) => candidate.key === entry.key);
+			if (shown?.selected && shown.expanded) {
+				sheet.onToggle(!sheet.open);
+				return;
+			}
+			sheet.onToggle(true);
+		}
 		shared.onUserNavigation();
 		shared.selectionEpochRef.current += 1;
 		const result = activateAuxiliaryRailEntry(

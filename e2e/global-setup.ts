@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FullConfig } from "@playwright/test";
 import { removeTree } from "@thinkrail/shared/removeTree";
@@ -14,6 +14,7 @@ import {
 	waitForCentralTarget,
 	writeE2eAgentSettings,
 } from "./fixtures/centralAgent";
+import { clearE2eDataDir } from "./fixtures/dataDir";
 import { writeFakeGh, writeHermeticE2eShell } from "./fixtures/executables";
 import {
 	E2E_CENTRAL_BAD_EXTENSION_SOURCE,
@@ -55,7 +56,7 @@ export default function globalSetup(config?: FullConfig): void | Promise<void> {
 	const centralMode = isRealCentralE2e();
 	try {
 		const globalCentralArtifact = centralMode ? findGlobalCentralArtifact() : undefined;
-		rmSync(E2E_DATA_DIR, { recursive: true, force: true });
+		clearE2eDataDir();
 		mkdirSync(E2E_DATA_DIR, { recursive: true });
 		writeFileSync(join(E2E_DATA_DIR, "config.json"), JSON.stringify(CONFIRMED_ANALYTICS_CONFIG));
 		writeFileSync(

@@ -512,22 +512,23 @@ test("bottom alignments give excluded lower corners to the actual side panels", 
 	}
 });
 
-test("bottom alignments follow locally compressed side geometry at narrow widths", async ({
+test("phone-class widths keep every bottom alignment under the full-width center", async ({
 	page,
 }) => {
 	await openDefaultWorkbench(page);
 	await page.setViewportSize({ width: 390, height: 844 });
 	const bottom = page.getByTestId("bottom-panel");
 	const center = page.getByTestId("center-tabs");
-	const left = page.getByTestId("left-stack");
-	const right = page.getByTestId("right-stack");
 
-	await setBottomAlignment(page, "Below center");
-	await expectHorizontalSpan(bottom, center, center);
-	await setBottomAlignment(page, "Below center and left");
-	await expectHorizontalSpan(bottom, left, center);
-	await setBottomAlignment(page, "Below center and right");
-	await expectHorizontalSpan(bottom, center, right);
+	for (const alignment of [
+		"Below center",
+		"Below center and left",
+		"Below center and right",
+		"Full width",
+	]) {
+		await setBottomAlignment(page, alignment);
+		await expectHorizontalSpan(bottom, center, center);
+	}
 });
 
 for (const scenario of [
@@ -542,8 +543,18 @@ for (const scenario of [
 		await openDefaultWorkbench(page);
 		await page.setViewportSize({ width: 1200, height: 844 });
 		await setBottomAlignment(page, scenario.alignment);
+		for (const [side, dx] of [
+			["left", 100],
+			["right", -100],
+		] as const) {
+			const widen = page.getByTestId(`resize-${side}`);
+			const widenBox = await widen.boundingBox();
+			if (!widenBox) throw new Error(`${side} resize handle has no bounding box`);
+			await dragHandle(page, widen, widenBox.x + dx, widenBox.y);
+		}
+		await waitForLayoutSettled(page);
 		const durableBefore = await readPersistedSideWidths(page);
-		await page.setViewportSize({ width: 640, height: 844 });
+		await page.setViewportSize({ width: 800, height: 844 });
 		await expect
 			.poll(async () => {
 				const local = await readLocalSideWidths(page);
